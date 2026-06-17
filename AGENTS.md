@@ -31,7 +31,7 @@ E2E tests require Chrome.
 - `src/odda/cli.py` — Typer CLI commands.
 - `src/odda/server.py` — JSON-RPC server and request handlers.
 - `src/odda/client.py` — JSON-RPC client.
-- `src/odda/browser.py` — nodriver/CDP browser automation.
+- `src/odda/browser.py` — patchright/Playwright browser automation.
 - `src/odda/proxy.py` — mitmproxy wrapper.
 - `src/odda/database.py` — SQLite flow storage and queries.
 - `src/odda/opencode/plugin.js` — OpenCode plugin.

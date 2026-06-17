@@ -1,159 +1,182 @@
-"""Browser automation module using nodriver (pure Python CDP)."""
+"""Browser automation module using patchright (Playwright)."""
 
-import json
 import shutil
 import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
-import nodriver as uc
-import nodriver.cdp.console as cdp_console
-import nodriver.cdp.debugger as cdp_debugger
-import nodriver.cdp.dom_debugger as cdp_dom
-import nodriver.cdp.page as cdp_page
-import nodriver.cdp.runtime as cdp_runtime
+from patchright.async_api import (
+    BrowserContext,
+    CDPSession,
+    ConsoleMessage,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
 _BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
 
 
-def _prepare_user_data_dir() -> str | None:
-    """Copy base profile to a temp directory, or return None to fall back.
+def _find_chrome_executable() -> str:
+    """Find a system Chrome/Chromium executable.
 
-    Checks for a base profile at ~/.config/odda/chrome-profile/.
-    If it exists, creates a temp directory and copies the profile into it.
-    Returns the temp directory path, or None if the base profile is
-    missing or the copy fails.
+    Returns:
+        Path to the Chrome binary.
+
+    Raises:
+        RuntimeError: If no Chrome executable is found on PATH.
     """
-    if not _BASE_PROFILE_DIR.is_dir():
-        return None
-    try:
-        temp_dir = tempfile.mkdtemp(prefix="odda_")
-        shutil.copytree(_BASE_PROFILE_DIR, temp_dir, dirs_exist_ok=True)
-    except OSError:
-        return None
-    else:
-        return temp_dir
+    candidates = [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ]
+    for name in candidates:
+        path = shutil.which(name)
+        if path:
+            return path
+    msg = "No Chrome or Chromium executable found on PATH"
+    raise RuntimeError(msg)
+
+
+def _prepare_user_data_dir() -> str:
+    """Create a temp user data dir, optionally seeded from the base profile.
+
+    Returns:
+        Path to a temporary directory that can be used as Chrome's
+        user data directory.
+    """
+    temp_dir = tempfile.mkdtemp(prefix="odda_")
+    if _BASE_PROFILE_DIR.is_dir():
+        with suppress(OSError):
+            shutil.copytree(_BASE_PROFILE_DIR, temp_dir, dirs_exist_ok=True)
+    return temp_dir
 
 
 class BrowserInstance:
-    """Manages a single Chrome browser process and its state."""
+    """Manages a single Chrome browser context and its active page."""
 
     def __init__(
         self,
         browser_id: int,
-        browser: uc.Browser,
-        tab: uc.Tab,
-    ):
+        playwright: Playwright,
+        context: BrowserContext,
+        page: Page,
+    ) -> None:
         """Initialize a browser instance.
 
         Args:
             browser_id: Unique ID for this browser.
-            browser: nodriver Browser object.
-            tab: Initial active tab.
+            playwright: Patchright Playwright object.
+            context: BrowserContext (persistent context for this browser).
+            page: Initial active page.
         """
         self.browser_id = browser_id
-        self.browser = browser
-        self.tab = tab
-        self._script_map: dict[str, str] = {}
+        self.playwright = playwright
+        self.context = context
+        self.page = page
         self._console_buffer: list[dict] = []
         self._console_max = 1000
-        self._console_enabled_tabs: set[str] = set()
+        self._script_map: dict[str, str] = {}
+        self._cdp_session: CDPSession | None = None
+        self._cdp_setup_done = False
+
+        self._setup_page_handlers(self.page)
+
+    def _setup_page_handlers(self, page: Page) -> None:
+        """Attach console and navigation handlers to a page."""
+        page.on("console", self._on_console_message)
+        page.on("framenavigated", self._on_frame_navigated)
+
+    async def _ensure_cdp_session(self) -> CDPSession:
+        """Create and configure a CDP session for the active page."""
+        if self._cdp_session is None:
+            self._cdp_session = await self.context.new_cdp_session(self.page)
+            await self._cdp_session.send("Runtime.enable")
+            await self._cdp_session.send("Debugger.enable")
+            self._cdp_session.on(
+                "Debugger.scriptParsed",
+                self._on_script_parsed,
+            )
+        return self._cdp_session
 
     async def _close(self) -> None:
-        """Close the browser process and reset internal state."""
+        """Close the browser context and release resources."""
         with suppress(Exception):
-            if self.browser:
-                self.browser.stop()
-        self.browser = None
-        self.tab = None
-        self._script_map.clear()
+            if self.context:
+                await self.context.close()
+        with suppress(Exception):
+            if self.playwright:
+                await self.playwright.stop()
+        self.context = None  # type: ignore[assignment]
+        self.page = None  # type: ignore[assignment]
+        self.playwright = None  # type: ignore[assignment]
+        self._cdp_session = None
         self._console_buffer.clear()
-        self._console_enabled_tabs.clear()
+        self._script_map.clear()
 
-    async def _inject_dialog_override(self) -> None:
-        """Inject alert/confirm/prompt overrides via CDP."""
-        script_path = Path(__file__).with_name("dialog_override.js")
-        source = script_path.read_text()
-        await self.tab.send(
-            cdp_page.add_script_to_evaluate_on_new_document(source=source)
-        )
-
-    async def _enable_debugger(self) -> None:
-        """Enable CDP Debugger, Page, and Console domains on the current tab."""
-        await self.tab.send(cdp_debugger.enable())
-        await self.tab.send(cdp_page.enable())
-        self.tab.add_handler(
-            cdp_debugger.ScriptParsed,
-            self._on_script_parsed,
-        )
-        self.tab.add_handler(
-            cdp_page.FrameNavigated,
-            self._on_frame_navigated,
-        )
-        await self._enable_console()
-        await self._inject_dialog_override()
-
-    async def _enable_console(self) -> None:
-        """Enable CDP Console domain and register handler on current tab."""
-        target_id = self.tab.target.target_id
-        if target_id in self._console_enabled_tabs:
-            return
-        await self.tab.send(cdp_console.enable())
-        self.tab.add_handler(
-            cdp_console.MessageAdded,
-            self._on_console_message,
-        )
-        self._console_enabled_tabs.add(target_id)
-
-    def _on_script_parsed(self, event: cdp_debugger.ScriptParsed) -> None:
+    def _on_script_parsed(self, event: dict[str, Any]) -> None:
         """Store mapping from script ID to URL."""
-        self._script_map[event.script_id] = event.url
+        self._script_map[event.get("scriptId", "")] = event.get("url", "")
 
-    def _on_frame_navigated(self, event: cdp_page.FrameNavigated) -> None:
+    def _on_frame_navigated(self, frame) -> None:
         """Clear script map and console buffer on main-frame navigation."""
-        if event.frame.parent_id is None:
+        if frame.parent_frame is None:
             self._script_map.clear()
             self._console_buffer.clear()
 
-    def _on_console_message(self, event: cdp_console.MessageAdded) -> None:
+    def _on_console_message(self, msg: ConsoleMessage) -> None:
         """Append a console message to the ring buffer."""
-        msg = event.message
+        location = msg.location or {}
         entry = {
-            "source": msg.source,
-            "level": msg.level,
+            "source": "console-api",
+            "level": msg.type,
             "text": msg.text,
-            "url": msg.url or "",
-            "line": msg.line or 0,
-            "column": msg.column or 0,
+            "url": location.get("url", ""),
+            "line": location.get("lineNumber", 0),
+            "column": location.get("columnNumber", 0),
         }
         self._console_buffer.append(entry)
         if len(self._console_buffer) > self._console_max:
             self._console_buffer.pop(0)
 
     async def _listeners_for_target(self, tag: str, expr: str) -> list[dict]:
-        """Return event listeners for a given target expression."""
-        obj, exc = await self.tab.send(cdp_runtime.evaluate(expression=expr))
-        if exc or not obj or not obj.object_id:
+        """Return event listeners for a given target expression via CDP."""
+        cdp = await self._ensure_cdp_session()
+
+        result = await cdp.send(
+            "Runtime.evaluate",
+            {
+                "expression": expr,
+                "objectGroup": "odda-event-listeners",
+                "includeCommandLineAPI": False,
+            },
+        )
+        obj = result.get("result", {})
+        if not obj or not obj.get("objectId"):
             return []
 
-        listeners = await self.tab.send(
-            cdp_dom.get_event_listeners(object_id=obj.object_id)
+        listeners_result = await cdp.send(
+            "DOMDebugger.getEventListeners",
+            {"objectId": obj["objectId"]},
         )
+        listeners = listeners_result.get("listeners", [])
 
-        results = [
+        await cdp.send("Runtime.releaseObject", {"objectId": obj["objectId"]})
+
+        return [
             {
-                "type": listener.type_,
+                "type": listener.get("type", ""),
                 "element_tag": tag,
-                "line_number": listener.line_number,
-                "column_number": listener.column_number,
-                "script_url": self._script_map.get(listener.script_id),
+                "line_number": listener.get("lineNumber"),
+                "column_number": listener.get("columnNumber"),
+                "script_url": self._script_map.get(listener.get("scriptId")),
             }
             for listener in listeners
         ]
-
-        await self.tab.send(cdp_runtime.release_object(object_id=obj.object_id))
-        return results
 
     async def list_event_listeners(self) -> list[dict]:
         """List JavaScript event listeners on window and document."""
@@ -163,15 +186,18 @@ class BrowserInstance:
             results.extend(target_listeners)
         return results
 
-    def list_tabs(self) -> list[dict]:
-        """List all open tabs in this browser instance."""
+    async def list_tabs(self) -> list[dict]:
+        """List all open tabs (pages) in this browser context."""
         tabs = []
-        for i, tab in enumerate(self.browser):
+        for i, page in enumerate(self.context.pages):
+            title = ""
+            with suppress(Exception):
+                title = await page.title()
             tabs.append(
                 {
                     "index": i,
-                    "url": tab.target.url if tab.target else None,
-                    "title": tab.target.title if tab.target else None,
+                    "url": page.url,
+                    "title": title,
                 }
             )
         return tabs
@@ -182,22 +208,18 @@ class BrowserInstance:
         Returns:
             Status message.
         """
-        try:
-            tab = self.browser[index]
-        except IndexError:
+        pages = self.context.pages
+        if index < 0 or index >= len(pages):
             return f"Tab index {index} not found."
 
-        old = self.tab.target.target_id if self.tab and self.tab.target else None
-        if old and old in self._console_enabled_tabs:
-            self.tab.remove_handler(cdp_console.MessageAdded, self._on_console_message)
-            self._console_enabled_tabs.discard(old)
-
-        self.tab = tab
-        await tab.activate()
+        self.page = pages[index]
+        with suppress(Exception):
+            await self.page.bring_to_front()
         self._console_buffer.clear()
-        await self._enable_console()
-        await self._inject_dialog_override()
-        title = tab.target.title if tab.target else None
+
+        title = ""
+        with suppress(Exception):
+            title = await self.page.title()
         return f"Switched to tab {index}: {title}"
 
     async def navigate(self, url: str, *, new_tab: bool = False) -> str:
@@ -212,46 +234,23 @@ class BrowserInstance:
         """
         try:
             if new_tab:
-                old = (
-                    self.tab.target.target_id if self.tab and self.tab.target else None
-                )
-                if old and old in self._console_enabled_tabs:
-                    self.tab.remove_handler(
-                        cdp_console.MessageAdded, self._on_console_message
-                    )
-                    self._console_enabled_tabs.discard(old)
-                self.tab = await self.browser.get(url, new_tab=True)
-                await self._enable_debugger()
+                self.page = await self.context.new_page()
+                self._setup_page_handlers(self.page)
+                await self.page.goto(url)
             else:
-                await self.tab.get(url)
-            await self.tab
+                await self.page.goto(url)
         except Exception as e:
             return f"Failed to navigate: {e!s}"
-        else:
-            return f"Navigated to: {url}"
+        return f"Navigated to: {url}"
 
-    async def eval_js(self, js_code: str) -> str:
+    async def eval_js(self, js_code: str) -> Any:
         """Execute JavaScript in the active tab.
 
         Returns:
-            JSON-serializable primitives only. Complex platform objects
-            return null — use a primitive property (.href, .toString()).
-            Promises auto-resolve.
+            Result of the evaluation (Playwright handles promise resolution).
         """
         try:
-            result = await self.tab.evaluate(js_code, await_promise=True)
-
-            if isinstance(result, cdp_runtime.ExceptionDetails):
-                msg = result.text
-                if result.stack_trace:
-                    msg += f"\n{result.stack_trace}"
-                return f"JavaScript error: {msg}"
-
-            if hasattr(result, "value"):
-                result = result.value
-
-            return json.dumps(result)
-
+            return await self.page.evaluate(js_code)
         except Exception as e:
             return f"JavaScript error: {e!s}"
 
@@ -264,7 +263,11 @@ class BrowserInstance:
         try:
             temp_dir = Path(tempfile.gettempdir())
             temp_path = temp_dir / f"screenshot_{int(time.time())}.jpeg"
-            await self.tab.save_screenshot(filename=str(temp_path))
+            await self.page.screenshot(
+                path=str(temp_path),
+                type="jpeg",
+                full_page=False,
+            )
             return str(temp_path)
         except Exception as e:
             return f"Screenshot error: {e!s}"
@@ -277,7 +280,7 @@ class BrowserInstance:
         Args:
             n: Maximum number of messages to return (default: 50).
             level: Optional filter by log level.
-            source: Optional filter by log source.
+            source: Optional filter by source.
 
         Returns:
             List of message dicts.
@@ -291,7 +294,7 @@ class BrowserInstance:
 
 
 class BrowserManager:
-    """Manages multiple Chrome browser instances via CDP using nodriver."""
+    """Manages multiple Chrome browser instances via patchright."""
 
     def __init__(self, proxy=None):
         """Initialize browser manager.
@@ -320,17 +323,7 @@ class BrowserManager:
         ]
 
     async def _ensure_browser(self, *, auto_open: bool = False) -> BrowserInstance:
-        """Ensure an active browser exists, optionally auto-opening one.
-
-        Args:
-            auto_open: If True, automatically open a browser if none active.
-
-        Returns:
-            The active BrowserInstance.
-
-        Raises:
-            RuntimeError: If no browser is active and auto_open is False.
-        """
+        """Ensure an active browser exists, optionally auto-opening one."""
         if self._active_browser_id is not None:
             return self._instances[self._active_browser_id]
         if auto_open:
@@ -344,39 +337,30 @@ class BrowserManager:
         browser_id = self._next_id
         self._next_id += 1
 
-        browser_args = [
-            "--no-first-run",
-            "--no-default-browser-check",
-        ]
-
+        proxy_config = None
         if self.proxy:
-            proxy_host = self.proxy.options.listen_host
-            proxy_port = self.proxy.options.listen_port
-            browser_args.append(f"--proxy-server=http://{proxy_host}:{proxy_port}")
-            browser_args.append("--ignore-certificate-errors")
-            browser_args.append("--ignore-certificate-errors-spki-list")
+            proxy_config = {"server": self.proxy.proxy_url}
 
         user_data_dir = _prepare_user_data_dir()
+        chrome_executable = _find_chrome_executable()
 
-        config = uc.Config(
-            headless=False,
-            sandbox=False,
-            browser_args=browser_args,
-            lang="en-US",
-            host=None,
+        playwright = await async_playwright().start()
+        context = await playwright.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
+            executable_path=chrome_executable,
+            headless=False,
+            proxy=proxy_config,
+            ignore_https_errors=True,
+            args=[
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
         )
+        page = context.pages[0] if context.pages else await context.new_page()
 
-        browser = await uc.start(config)
-        tab = await browser.get("about:blank")
-
-        instance = BrowserInstance(browser_id, browser, tab)
-        await instance._enable_debugger()  # noqa: SLF001
-
+        instance = BrowserInstance(browser_id, playwright, context, page)
         self._instances[browser_id] = instance
-
         self._active_browser_id = browser_id
-
         return instance
 
     async def open(self) -> str:
@@ -389,8 +373,7 @@ class BrowserManager:
             instance = await self._create_instance()
         except Exception as e:
             return f"Failed to open browser: {e!s}"
-        else:
-            return f"Browser {instance.browser_id} launched"
+        return f"Browser {instance.browser_id} launched"
 
     async def close_instance(self, browser_id: int) -> str:
         """Close a browser instance.
@@ -424,19 +407,14 @@ class BrowserManager:
         return f"Browser {browser_id} closed.{active_info}"
 
     async def list_tabs(self) -> list[dict]:
-        """List all open browser tabs grouped by browser.
-
-        Returns:
-            List of dicts with ``browser_id`` and ``tabs`` (list of tab
-            dicts with index, url, title).
-        """
+        """List all open browser tabs grouped by browser."""
         await self._ensure_browser()
         result = []
         for browser_id, instance in sorted(self._instances.items()):
             result.append(
                 {
                     "browser_id": browser_id,
-                    "tabs": instance.list_tabs(),
+                    "tabs": await instance.list_tabs(),
                 }
             )
         return result
@@ -476,7 +454,7 @@ class BrowserManager:
         status = await inst.navigate(url, new_tab=new_tab)
         return {"status": status, "auto_opened": auto_opened}
 
-    async def eval_js(self, js_code: str) -> str:
+    async def eval_js(self, js_code: str) -> Any:
         """Execute JavaScript in the active browser tab."""
         inst = await self._ensure_browser()
         return await inst.eval_js(js_code)
