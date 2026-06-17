@@ -34,7 +34,7 @@ From within an OpenCode session:
 ```bash
 odda navigate https://example.com
 odda screenshot
-odda flows search "SELECT * FROM flows WHERE host = 'example.com' ORDER BY id DESC LIMIT 10"
+odda flows search "SELECT * FROM flows WHERE host = 'example.com' LIMIT 10"
 ```
 
 ### Standalone mode

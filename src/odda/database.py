@@ -255,7 +255,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
 
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS flows (
+        CREATE TABLE IF NOT EXISTS flows_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             method TEXT NOT NULL,
             scheme TEXT,
@@ -277,11 +277,19 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         """
     )
 
+    # Create a sorted view so agents can query `flows` and get newest first.
+    conn.execute(
+        """
+        CREATE VIEW IF NOT EXISTS flows AS
+        SELECT * FROM flows_data ORDER BY id DESC
+        """
+    )
+
     # Create indexes
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_host ON flows(host)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_method ON flows(method)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON flows(status_code)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_url ON flows(url)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_host ON flows_data(host)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_method ON flows_data(method)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON flows_data(status_code)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_url ON flows_data(url)")
 
     conn.commit()
 
@@ -319,7 +327,7 @@ class DatabaseAddon:
         # Insert request into database immediately
         cursor = self.conn.execute(
             """
-            INSERT INTO flows (
+            INSERT INTO flows_data (
                 method, scheme, host, port, path, url,
                 status_code, reason,
                 request_headers, response_headers,
@@ -393,7 +401,7 @@ class DatabaseAddon:
         # Update the existing row with response data
         self.conn.execute(
             """
-            UPDATE flows SET
+            UPDATE flows_data SET
                 status_code = ?,
                 reason = ?,
                 response_headers = ?,
@@ -445,7 +453,7 @@ class FlowStore:
 
         Example:
             with self._get_readonly_connection() as conn:
-                cursor = conn.execute("SELECT * FROM flows")
+                cursor = conn.execute("SELECT * FROM flows_data")
         """
         # URI mode for read-only access
         uri = f"file:{self.db_path}?mode=ro"
@@ -469,7 +477,6 @@ class FlowStore:
                 """
                 SELECT id, method, host, path, status_code, total_duration_ms
                 FROM flows
-                ORDER BY id DESC
                 LIMIT ?
                 """,
                 (n,),
