@@ -3,7 +3,7 @@ name = "odda"
 version = "0.1.0"
 description = "Browser automation and HTTP traffic capture CLI for AI agents"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "typer>=0.15.0",
     "mitmproxy>=11.0.2",

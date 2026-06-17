@@ -10,7 +10,7 @@
 ## Build / run
 
 ```bash
-uv venv --python 3.11
+uv venv --python 3.14
 uv pip install -e ".[dev]"
 odda install-opencode
 ```
@@ -39,7 +39,7 @@ E2E tests require Chrome.
 
 ## Conventions
 
-- Python 3.11+ with `from __future__ import annotations`.
+- Python 3.14+ with `from __future__ import annotations`.
 - CLI commands stay thin; logic belongs in server/library modules.
 - All CLI output is JSON; errors are JSON with non-zero exit codes.
 - If you add, remove, or change CLI commands/options, update `src/odda/opencode/SKILL.md` and run `odda install-opencode` so agents see the current tool surface.
