@@ -23,7 +23,6 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Navigate                    | `odda navigate <url>` or `odda navigate <url> --new-tab` |
 | Run JavaScript              | `odda eval "<js>"`                                       |
 | Screenshot                  | `odda screenshot`                                        |
-| Read console                | `odda console [--n N] [--level LEVEL] [--source SOURCE]` |
 | List event listeners        | `odda event-listeners`                                   |
 | List captured flows         | `odda flows list [--n N]`                                |
 | Query flows with SQL        | `odda flows search "SELECT ..."`                         |
@@ -46,7 +45,6 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 - `odda navigate <url> [--new-tab]` — Navigate the active browser. If no browser is active, one is opened automatically and reported in the `auto_opened` field.
 - `odda eval "<js>"` — Execute JavaScript in the active tab and return the result.
 - `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
-- `odda console [--n N] [--level LEVEL] [--source SOURCE]` — Read recent browser console messages. Default `--n` is 50.
 - `odda event-listeners` — List JavaScript event listeners attached to `window` and `document`.
 
 ## Proxy and flow commands

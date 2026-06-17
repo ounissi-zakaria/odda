@@ -67,7 +67,6 @@ odda screenshot          # Capture JPEG screenshot
 odda tabs                # List tabs
 odda switch-tab          # Switch tab
 
-odda console             # Read browser console
 odda event-listeners     # List JS event listeners
 
 odda flows list          # Latest captured flows

@@ -97,6 +97,57 @@ proxy_url() {
     "$ODDA_BIN" --socket "$SOCKET" proxy-url
 }
 
+assert_tab_count() {
+    local expected="$1"
+    local output
+    output=$("$ODDA_BIN" --socket "$SOCKET" tabs list)
+    local count
+    count=$(echo "$output" | python3 -c 'import json,sys; print(sum(len(b["tabs"]) for b in json.load(sys.stdin)))')
+    if [ "$count" -eq "$expected" ]; then
+        echo "[OK] tab count = $expected"
+        PASSED=$((PASSED + 1))
+    else
+        echo "[FAIL] expected $expected tabs, got $count"
+        FAILED=$((FAILED + 1))
+    fi
+    echo
+}
+
+assert_browser_count() {
+    local expected="$1"
+    local output
+    output=$("$ODDA_BIN" --socket "$SOCKET" browser list)
+    local count
+    count=$(echo "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+    if [ "$count" -eq "$expected" ]; then
+        echo "[OK] browser count = $expected"
+        PASSED=$((PASSED + 1))
+    else
+        echo "[FAIL] expected $expected browsers, got $count"
+        FAILED=$((FAILED + 1))
+    fi
+    echo
+}
+
+LAST_BROWSER_ID=""
+
+open_browser() {
+    local label="$1"
+    local output
+    output=$("$ODDA_BIN" --socket "$SOCKET" browser open 2>&1)
+    echo ">>> $label"
+    echo "$output"
+    LAST_BROWSER_ID=$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin).split()[1])')
+    if [ -n "$LAST_BROWSER_ID" ]; then
+        echo "[OK] browser id = $LAST_BROWSER_ID"
+        PASSED=$((PASSED + 1))
+    else
+        echo "[FAIL] could not parse browser ID"
+        FAILED=$((FAILED + 1))
+    fi
+    echo
+}
+
 start_server
 
 # Core commands
@@ -111,16 +162,27 @@ expect_json "flows search (empty)" "$ODDA_BIN" --socket "$SOCKET" flows search "
 
 # Browser commands
 echo "=== Browser commands ==="
-expect_json "browser open" "$ODDA_BIN" --socket "$SOCKET" browser open
+open_browser "browser open"
+BROWSER_ID=$LAST_BROWSER_ID
 expect_json "browser list" "$ODDA_BIN" --socket "$SOCKET" browser list
 expect_json "tabs list" "$ODDA_BIN" --socket "$SOCKET" tabs list
 expect_json "navigate" "$ODDA_BIN" --socket "$SOCKET" navigate https://example.com
 expect_json "eval" "$ODDA_BIN" --socket "$SOCKET" eval "document.title"
 expect_json "screenshot" "$ODDA_BIN" --socket "$SOCKET" screenshot
-expect_json "console" "$ODDA_BIN" --socket "$SOCKET" console --n 5
 expect_json "event-listeners" "$ODDA_BIN" --socket "$SOCKET" event-listeners
-expect_json "switch-tab" "$ODDA_BIN" --socket "$SOCKET" switch-tab --browser-id 1 --index 0
-expect_json "browser close" "$ODDA_BIN" --socket "$SOCKET" browser close 1
+expect_json "switch-tab" "$ODDA_BIN" --socket "$SOCKET" switch-tab --browser-id "$BROWSER_ID" --index 0
+expect_json "browser close" "$ODDA_BIN" --socket "$SOCKET" browser close "$BROWSER_ID"
+
+# Multiple tabs and browsers
+open_browser "browser open (multi)"
+BROWSER_ID_MULTI_1=$LAST_BROWSER_ID
+expect_json "navigate new-tab" "$ODDA_BIN" --socket "$SOCKET" navigate https://example.org --new-tab
+assert_tab_count 2
+open_browser "browser open second"
+BROWSER_ID_MULTI_2=$LAST_BROWSER_ID
+assert_browser_count 2
+expect_json "browser close second" "$ODDA_BIN" --socket "$SOCKET" browser close "$BROWSER_ID_MULTI_2"
+expect_json "browser close first multi" "$ODDA_BIN" --socket "$SOCKET" browser close "$BROWSER_ID_MULTI_1"
 
 # Generate a captured flow through the proxy
 echo "=== Capturing an HTTP flow through the proxy ==="

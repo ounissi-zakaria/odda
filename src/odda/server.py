@@ -219,14 +219,6 @@ class OddaServer:
         """Switch to a specific tab."""
         return await self.browser.switch_tab(params["browser_id"], params["index"])
 
-    async def method_console_read(self, params: dict[str, Any]) -> list[dict]:
-        """Read recent console messages."""
-        return await self.browser.read_console(
-            n=params.get("n", 50),
-            level=params.get("level"),
-            source=params.get("source"),
-        )
-
     async def method_event_listeners(self, _params: dict[str, Any]) -> list[dict]:
         """List JS event listeners on window and document."""
         return await self.browser.list_event_listeners()

@@ -256,22 +256,6 @@ def switch_tab(
     )
 
 
-@app.command()
-def console(
-    ctx: typer.Context,
-    n: int = typer.Option(50, "--n", help="Maximum number of messages"),
-    level: str | None = typer.Option(None, "--level", help="Filter by log level"),
-    source: str | None = typer.Option(None, "--source", help="Filter by source"),
-) -> None:
-    """Read recent browser console messages."""
-    params: dict[str, Any] = {"n": n}
-    if level is not None:
-        params["level"] = level
-    if source is not None:
-        params["source"] = source
-    _run_coro(_client(ctx).call("console/read", params))
-
-
 @app.command("event-listeners")
 def event_listeners(ctx: typer.Context) -> None:
     """List JavaScript event listeners on window and document."""

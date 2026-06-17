@@ -10,7 +10,6 @@ from typing import Any
 from patchright.async_api import (
     BrowserContext,
     CDPSession,
-    ConsoleMessage,
     Page,
     Playwright,
     async_playwright,
@@ -78,30 +77,41 @@ class BrowserInstance:
         self.playwright = playwright
         self.context = context
         self.page = page
-        self._console_buffer: list[dict] = []
-        self._console_max = 1000
         self._script_map: dict[str, str] = {}
         self._cdp_session: CDPSession | None = None
-        self._cdp_setup_done = False
 
-        self._setup_page_handlers(self.page)
+        self.page.on("framenavigated", self._on_frame_navigated)
 
-    def _setup_page_handlers(self, page: Page) -> None:
-        """Attach console and navigation handlers to a page."""
-        page.on("console", self._on_console_message)
-        page.on("framenavigated", self._on_frame_navigated)
+    def _on_script_parsed(self, event: dict[str, Any]) -> None:
+        """Store mapping from script ID to URL."""
+        self._script_map[event.get("scriptId", "")] = event.get("url", "")
 
-    async def _ensure_cdp_session(self) -> CDPSession:
-        """Create and configure a CDP session for the active page."""
-        if self._cdp_session is None:
-            self._cdp_session = await self.context.new_cdp_session(self.page)
-            await self._cdp_session.send("Runtime.enable")
-            await self._cdp_session.send("Debugger.enable")
-            self._cdp_session.on(
-                "Debugger.scriptParsed",
-                self._on_script_parsed,
-            )
+    def _on_frame_navigated(self, frame) -> None:
+        """Clear script map on main-frame navigation."""
+        if frame.parent_frame is None:
+            self._script_map.clear()
+
+    async def _setup_cdp_session(self) -> CDPSession:
+        """Create and configure a CDP session for the active page.
+
+        Only the Debugger domain is enabled so we can map script IDs to URLs.
+        Runtime, Console, and Page are intentionally NOT enabled to avoid
+        the detection leaks patchright works to prevent.
+        """
+        if self._cdp_session is not None:
+            return self._cdp_session
+        self._cdp_session = await self.context.new_cdp_session(self.page)
+        await self._cdp_session.send("Debugger.enable")
+        self._cdp_session.on("Debugger.scriptParsed", self._on_script_parsed)
         return self._cdp_session
+
+    async def _reset_cdp_session(self) -> None:
+        """Reset the CDP session when the active page changes."""
+        if self._cdp_session is not None:
+            with suppress(Exception):
+                await self._cdp_session.detach()
+            self._cdp_session = None
+        await self._setup_cdp_session()
 
     async def _close(self) -> None:
         """Close the browser context and release resources."""
@@ -115,76 +125,47 @@ class BrowserInstance:
         self.page = None  # type: ignore[assignment]
         self.playwright = None  # type: ignore[assignment]
         self._cdp_session = None
-        self._console_buffer.clear()
         self._script_map.clear()
 
-    def _on_script_parsed(self, event: dict[str, Any]) -> None:
-        """Store mapping from script ID to URL."""
-        self._script_map[event.get("scriptId", "")] = event.get("url", "")
+    async def list_event_listeners(self) -> list[dict]:
+        """List JavaScript event listeners on window and document.
 
-    def _on_frame_navigated(self, frame) -> None:
-        """Clear script map and console buffer on main-frame navigation."""
-        if frame.parent_frame is None:
-            self._script_map.clear()
-            self._console_buffer.clear()
+        Uses Runtime.evaluate with includeCommandLineAPI=True to invoke
+        Chrome's getEventListeners() DevTools function. This avoids the
+        Runtime.enable detection leak.
+        """
+        cdp = await self._setup_cdp_session()
 
-    def _on_console_message(self, msg: ConsoleMessage) -> None:
-        """Append a console message to the ring buffer."""
-        location = msg.location or {}
-        entry = {
-            "source": "console-api",
-            "level": msg.type,
-            "text": msg.text,
-            "url": location.get("url", ""),
-            "line": location.get("lineNumber", 0),
-            "column": location.get("columnNumber", 0),
-        }
-        self._console_buffer.append(entry)
-        if len(self._console_buffer) > self._console_max:
-            self._console_buffer.pop(0)
-
-    async def _listeners_for_target(self, tag: str, expr: str) -> list[dict]:
-        """Return event listeners for a given target expression via CDP."""
-        cdp = await self._ensure_cdp_session()
-
+        js_expression = (
+            "(function(){"
+            "var w=getEventListeners(window);"
+            "var d=getEventListeners(document);"
+            "return w.concat(d);"
+            "})()"
+        )
         result = await cdp.send(
             "Runtime.evaluate",
             {
-                "expression": expr,
-                "objectGroup": "odda-event-listeners",
-                "includeCommandLineAPI": False,
+                "expression": js_expression,
+                "includeCommandLineAPI": True,
+                "returnByValue": True,
             },
         )
-        obj = result.get("result", {})
-        if not obj or not obj.get("objectId"):
+
+        value = result.get("result", {}).get("value")
+        if not isinstance(value, list):
             return []
-
-        listeners_result = await cdp.send(
-            "DOMDebugger.getEventListeners",
-            {"objectId": obj["objectId"]},
-        )
-        listeners = listeners_result.get("listeners", [])
-
-        await cdp.send("Runtime.releaseObject", {"objectId": obj["objectId"]})
 
         return [
             {
                 "type": listener.get("type", ""),
-                "element_tag": tag,
+                "element_tag": "window" if idx < len(value) // 2 else "document",
                 "line_number": listener.get("lineNumber"),
                 "column_number": listener.get("columnNumber"),
                 "script_url": self._script_map.get(listener.get("scriptId")),
             }
-            for listener in listeners
+            for idx, listener in enumerate(value)
         ]
-
-    async def list_event_listeners(self) -> list[dict]:
-        """List JavaScript event listeners on window and document."""
-        results = []
-        for tag, expr in [("window", "window"), ("document", "document")]:
-            target_listeners = await self._listeners_for_target(tag, expr)
-            results.extend(target_listeners)
-        return results
 
     async def list_tabs(self) -> list[dict]:
         """List all open tabs (pages) in this browser context."""
@@ -215,7 +196,7 @@ class BrowserInstance:
         self.page = pages[index]
         with suppress(Exception):
             await self.page.bring_to_front()
-        self._console_buffer.clear()
+        await self._reset_cdp_session()
 
         title = ""
         with suppress(Exception):
@@ -235,10 +216,11 @@ class BrowserInstance:
         try:
             if new_tab:
                 self.page = await self.context.new_page()
-                self._setup_page_handlers(self.page)
+                self.page.on("framenavigated", self._on_frame_navigated)
                 await self.page.goto(url)
             else:
                 await self.page.goto(url)
+            await self._reset_cdp_session()
         except Exception as e:
             return f"Failed to navigate: {e!s}"
         return f"Navigated to: {url}"
@@ -271,26 +253,6 @@ class BrowserInstance:
             return str(temp_path)
         except Exception as e:
             return f"Screenshot error: {e!s}"
-
-    async def read_console(
-        self, n: int = 50, level: str | None = None, source: str | None = None
-    ) -> list[dict]:
-        """Return recent console messages from the ring buffer.
-
-        Args:
-            n: Maximum number of messages to return (default: 50).
-            level: Optional filter by log level.
-            source: Optional filter by source.
-
-        Returns:
-            List of message dicts.
-        """
-        messages = self._console_buffer
-        if level:
-            messages = [m for m in messages if m["level"] == level]
-        if source:
-            messages = [m for m in messages if m["source"] == source]
-        return messages[-n:]
 
 
 class BrowserManager:
@@ -359,6 +321,7 @@ class BrowserManager:
         page = context.pages[0] if context.pages else await context.new_page()
 
         instance = BrowserInstance(browser_id, playwright, context, page)
+        await instance._setup_cdp_session()  # noqa: SLF001
         self._instances[browser_id] = instance
         self._active_browser_id = browser_id
         return instance
@@ -468,10 +431,3 @@ class BrowserManager:
         """List JS event listeners in the active browser tab."""
         inst = await self._ensure_browser()
         return await inst.list_event_listeners()
-
-    async def read_console(
-        self, n: int = 50, level: str | None = None, source: str | None = None
-    ) -> list[dict]:
-        """Return recent console messages from the active browser."""
-        inst = await self._ensure_browser()
-        return await inst.read_console(n=n, level=level, source=source)
