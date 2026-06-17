@@ -130,42 +130,38 @@ class BrowserInstance:
     async def list_event_listeners(self) -> list[dict]:
         """List JavaScript event listeners on window and document.
 
-        Uses Runtime.evaluate with includeCommandLineAPI=True to invoke
-        Chrome's getEventListeners() DevTools function. This avoids the
-        Runtime.enable detection leak.
+        Uses DOMDebugger.getEventListeners so we get script IDs, line numbers,
+        and column numbers. Only Debugger.enable is required; Runtime, Console,
+        and Page domains are intentionally left disabled to avoid detection leaks.
         """
         cdp = await self._setup_cdp_session()
 
-        js_expression = (
-            "(function(){"
-            "var w=getEventListeners(window);"
-            "var d=getEventListeners(document);"
-            "return w.concat(d);"
-            "})()"
-        )
-        result = await cdp.send(
-            "Runtime.evaluate",
-            {
-                "expression": js_expression,
-                "includeCommandLineAPI": True,
-                "returnByValue": True,
-            },
-        )
+        listeners: list[dict] = []
+        for element_tag, expression in (("window", "window"), ("document", "document")):
+            ref = await cdp.send(
+                "Runtime.evaluate",
+                {"expression": expression, "includeCommandLineAPI": True},
+            )
+            object_id = ref.get("result", {}).get("objectId")
+            if not object_id:
+                continue
 
-        value = result.get("result", {}).get("value")
-        if not isinstance(value, list):
-            return []
+            response = await cdp.send(
+                "DOMDebugger.getEventListeners",
+                {"objectId": object_id},
+            )
+            listeners.extend(
+                {
+                    "type": listener.get("type", ""),
+                    "element_tag": element_tag,
+                    "line_number": listener.get("lineNumber"),
+                    "column_number": listener.get("columnNumber"),
+                    "script_url": self._script_map.get(listener.get("scriptId")),
+                }
+                for listener in response.get("listeners", [])
+            )
 
-        return [
-            {
-                "type": listener.get("type", ""),
-                "element_tag": "window" if idx < len(value) // 2 else "document",
-                "line_number": listener.get("lineNumber"),
-                "column_number": listener.get("columnNumber"),
-                "script_url": self._script_map.get(listener.get("scriptId")),
-            }
-            for idx, listener in enumerate(value)
-        ]
+        return listeners
 
     async def list_tabs(self) -> list[dict]:
         """List all open tabs (pages) in this browser context."""

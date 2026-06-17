@@ -35,6 +35,9 @@ cleanup() {
     if [ -n "${HTTP_PID:-}" ]; then
         kill "$HTTP_PID" 2>/dev/null || true
     fi
+    if [ -n "${LISTENER_HTTP_PID:-}" ]; then
+        kill "$LISTENER_HTTP_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
@@ -148,6 +151,47 @@ open_browser() {
     echo
 }
 
+start_listener_http_server() {
+    mkdir -p "$TMPDIR/listener_http"
+    cat > "$TMPDIR/listener_http/index.html" <<'EOF'
+<!DOCTYPE html>
+<html>
+<head><title>Listener Test</title></head>
+<body>
+<button id="btn">Click</button>
+<script>
+  window.addEventListener('resize', function windowResizeHandler() {});
+  document.addEventListener('scroll', function documentScrollHandler() {});
+</script>
+</body>
+</html>
+EOF
+    python3 -m http.server 8766 --bind 127.0.0.1 --directory "$TMPDIR/listener_http" > "$TMPDIR/listener_http_server.log" 2>&1 &
+    LISTENER_HTTP_PID=$!
+    sleep 1
+}
+
+assert_event_listeners() {
+    local output
+    output=$("$ODDA_BIN" --socket "$SOCKET" event-listeners 2>&1)
+    echo ">>> event-listeners (with listeners)"
+    echo "$output"
+    local count
+    count=$(echo "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+    local has_resize
+    has_resize=$(echo "$output" | python3 -c 'import json,sys; print(any(l.get("type") == "resize" for l in json.load(sys.stdin)))')
+    local has_scroll
+    has_scroll=$(echo "$output" | python3 -c 'import json,sys; print(any(l.get("type") == "scroll" for l in json.load(sys.stdin)))')
+    if [ "$count" -ge 2 ] && [ "$has_resize" = "True" ] && [ "$has_scroll" = "True" ]; then
+        echo "[OK] found resize and scroll listeners"
+        PASSED=$((PASSED + 1))
+    else
+        echo "[FAIL] expected >=2 listeners with resize and scroll, got $count"
+        FAILED=$((FAILED + 1))
+    fi
+    echo
+}
+
 start_server
 
 # Core commands
@@ -162,14 +206,15 @@ expect_json "flows search (empty)" "$ODDA_BIN" --socket "$SOCKET" flows search "
 
 # Browser commands
 echo "=== Browser commands ==="
+start_listener_http_server
 open_browser "browser open"
 BROWSER_ID=$LAST_BROWSER_ID
 expect_json "browser list" "$ODDA_BIN" --socket "$SOCKET" browser list
 expect_json "tabs list" "$ODDA_BIN" --socket "$SOCKET" tabs list
-expect_json "navigate" "$ODDA_BIN" --socket "$SOCKET" navigate https://example.com
+expect_json "navigate" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
 expect_json "eval" "$ODDA_BIN" --socket "$SOCKET" eval "document.title"
 expect_json "screenshot" "$ODDA_BIN" --socket "$SOCKET" screenshot
-expect_json "event-listeners" "$ODDA_BIN" --socket "$SOCKET" event-listeners
+assert_event_listeners
 expect_json "switch-tab" "$ODDA_BIN" --socket "$SOCKET" switch-tab --browser-id "$BROWSER_ID" --index 0
 expect_json "browser close" "$ODDA_BIN" --socket "$SOCKET" browser close "$BROWSER_ID"
 
