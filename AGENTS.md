@@ -1,57 +1,44 @@
 # AGENTS.md
 
-## Project overview
+`odda` is a Python CLI tool for browser automation and HTTP traffic capture.
 
-`odda` is a Python CLI tool that provides browser automation and HTTP traffic capture for AI agents.
-
-## Architecture
-
-- `odda server` — Long-running background process holding browser, proxy, and flow-store state.
-- `odda <command>` — CLI client that sends JSON-RPC requests to the server.
-- OpenCode plugin — Starts the server on `session.created` and injects `ODDA_SOCKET` + `ODDA_DATA_DIR` via `shell.env`.
-- Skill — Describes available CLI commands and workflows to the agent.
-
-The proxy (mitmproxy) runs in its own thread with a dedicated asyncio event loop. Browser automation (nodriver/CDP) runs in the server's main event loop.
+- Server/client model: `odda server` runs in the background; `odda <command>` talks to it over a Unix socket via JSON-RPC.
+- The OpenCode plugin starts the server and injects `ODDA_SOCKET` + `ODDA_DATA_DIR` into shell env.
+- Proxy state, browser state, and captured flows all live in the server process.
+- Response bodies and `flows.db` are stored in `.odda/` (or the configured data dir).
 
 ## Build / run
 
-Do not use `pip` directly unless `uv` is unavailable.
-
 ```bash
-# Create a Python 3.11 virtual environment with uv
 uv venv --python 3.11
-
-# Install in editable mode with dev dependencies
 uv pip install -e ".[dev]"
-
-# Install OpenCode assets
 odda install-opencode
-
-# Run tests
-.venv/bin/pytest
-
-# Lint / format
-.venv/bin/ruff check .
-.venv/bin/ruff format .
 ```
 
-If `uv` is not available, the same commands work with a standard `python -m venv` and `pip`.
+Use `.venv/bin/python` and `.venv/bin/ruff`. Avoid `pip` directly unless `uv` is unavailable.
 
-
-## Code conventions
-
-- Python 3.11+ with `from __future__ import annotations`.
-- Follow the existing ruff configuration.
-- Keep CLI commands thin; business logic lives in the server and library modules.
-- All CLI output is JSON by default.
-- Errors are returned as JSON with non-zero exit codes.
-
-## Testing
-
-End-to-end tests live in `tests/e2e/`. They exercise the full CLI against a running server, including browser automation and proxy flow capture.
+## Useful commands
 
 ```bash
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
 bash tests/e2e/test_all_commands.sh
 ```
 
-Browser-dependent tests require Chrome.
+E2E tests require Chrome.
+
+## Key files
+
+- `src/odda/cli.py` — Typer CLI commands.
+- `src/odda/server.py` — JSON-RPC server and request handlers.
+- `src/odda/client.py` — JSON-RPC client.
+- `src/odda/browser.py` — nodriver/CDP browser automation.
+- `src/odda/proxy.py` — mitmproxy wrapper.
+- `src/odda/database.py` — SQLite flow storage and queries.
+- `src/odda/opencode/plugin.js` — OpenCode plugin.
+- `src/odda/opencode/SKILL.md` — Agent skill documentation.
+
+## Conventions
+
+- Python 3.11+ with `from __future__ import annotations`.
+- CLI commands stay thin; logic belongs in server/library modules.
+- All CLI output is JSON; errors are JSON with non-zero exit codes.
