@@ -1,0 +1,263 @@
+"""JSON-RPC server that owns browser, proxy, and flow state."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import signal
+import threading
+from pathlib import Path
+from typing import Any
+
+from odda import database, rpc
+from odda.browser import BrowserManager
+from odda.database import FlowStore
+from odda.proxy import ProxyServer
+
+
+class OddaServer:
+    """Long-running stateful server exposed over a Unix socket."""
+
+    def __init__(
+        self,
+        socket_path: str | Path,
+        data_dir: str | Path,
+        parent_pid: int | None = None,
+    ) -> None:
+        """Initialize server configuration.
+
+        Args:
+            socket_path: Unix socket path to listen on.
+            data_dir: Directory for flows.db, bodies/, and server.log.
+            parent_pid: Optional parent PID to watch for auto-shutdown.
+        """
+        self.socket_path = Path(socket_path)
+        self.data_dir = Path(data_dir)
+        self.parent_pid = parent_pid
+        self.proxy: ProxyServer | None = None
+        self.browser: BrowserManager | None = None
+        self.flow_store: FlowStore | None = None
+        self._shutdown_event = asyncio.Event()
+        self._parent_watch_task: asyncio.Task | None = None
+
+    async def run(self) -> None:
+        """Start and run the server until shutdown."""
+        self._setup_logging()
+        logger = logging.getLogger(__name__)
+        logger.info("Starting odda server (data_dir=%s)", self.data_dir)
+
+        database.set_data_dir(self.data_dir)
+        self.proxy = ProxyServer()
+        self.browser = BrowserManager(proxy=self.proxy)
+        self.flow_store = FlowStore()
+
+        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.socket_path.exists():
+            try:
+                self.socket_path.unlink()
+            except OSError as exc:
+                logger.warning("Failed to remove stale socket: %s", exc)
+
+        server = await asyncio.start_unix_server(
+            self._handle_client,
+            path=str(self.socket_path),
+        )
+        logger.info("Listening on %s", self.socket_path)
+
+        loop = asyncio.get_running_loop()
+        if threading.current_thread() is threading.main_thread():
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, self._signal_handler, sig)
+
+        if self.parent_pid is not None:
+            self._parent_watch_task = asyncio.create_task(self._watch_parent())
+
+        try:
+            await self._shutdown_event.wait()
+        finally:
+            logger.info("Shutting down odda server")
+            server.close()
+            await server.wait_closed()
+            await self._cleanup()
+            if self.socket_path.exists():
+                self.socket_path.unlink()
+            logger.info("Shutdown complete")
+
+    def _setup_logging(self) -> None:
+        """Configure logging to append to server.log in the data directory."""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        log_file = self.data_dir / "server.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            handlers=[logging.FileHandler(log_file, mode="a")],
+        )
+
+    def _signal_handler(self, sig: int) -> None:
+        """Handle shutdown signals."""
+        logging.getLogger(__name__).info("Received signal %s", sig)
+        self._shutdown_event.set()
+
+    async def _watch_parent(self) -> None:
+        """Poll parent PID and shutdown if it disappears."""
+        logger = logging.getLogger(__name__)
+        while True:
+            try:
+                if self.parent_pid is not None:
+                    os.kill(self.parent_pid, 0)
+            except ProcessLookupError:
+                logger.info("Parent process %s gone; shutting down", self.parent_pid)
+                self._shutdown_event.set()
+                return
+            except PermissionError:
+                logger.warning(
+                    "No permission to signal parent process %s; continuing",
+                    self.parent_pid,
+                )
+            except OSError:
+                logger.exception(
+                    "Unexpected error checking parent process %s",
+                    self.parent_pid,
+                )
+            await asyncio.sleep(2)
+
+    async def _cleanup(self) -> None:
+        """Close browsers and stop proxy."""
+        if self.browser is not None:
+            for browser_id in [b["browser_id"] for b in self.browser.list_instances()]:
+                await self.browser.close_instance(browser_id)
+        if self.proxy is not None:
+            await self.proxy.shutdown()
+
+    async def _handle_client(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        """Handle a single JSON-RPC client connection."""
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+
+            request_id: Any = None
+            try:
+                request = rpc.parse_request(line.decode("utf-8"))
+                method_name = request["method"]
+                params = request.get("params") or {}
+                request_id = request.get("id")
+                handler = getattr(self, f"method_{method_name.replace('/', '_')}", None)
+                if handler is None:
+                    raise rpc.JsonRpcError(
+                        rpc.METHOD_NOT_FOUND, f"Method not found: {method_name}"
+                    )
+                if not isinstance(params, dict):
+                    raise rpc.JsonRpcError(
+                        rpc.INVALID_PARAMS, "Params must be an object"
+                    )
+                result = await handler(params)
+                response = rpc.build_response(request_id, result)
+            except rpc.JsonRpcError as exc:
+                response = rpc.build_error(request_id, exc.code, exc.message, exc.data)
+            except Exception as exc:  # pragma: no cover
+                response = rpc.build_error(request_id, rpc.INTERNAL_ERROR, str(exc))
+
+            writer.write(rpc.encode(response))
+            await writer.drain()
+
+        writer.close()
+        await writer.wait_closed()
+
+    # --- JSON-RPC method handlers ---
+
+    async def method_status(self, _params: dict[str, Any]) -> dict[str, Any]:
+        """Return server status."""
+        return {
+            "socket": str(self.socket_path),
+            "data_dir": str(self.data_dir),
+            "parent_pid": self.parent_pid,
+            "proxy_url": self.proxy.proxy_url if self.proxy else None,
+            "browser_count": self.browser.browser_count if self.browser else 0,
+        }
+
+    async def method_proxy_url(self, _params: dict[str, Any]) -> str:
+        """Return the HTTP proxy URL."""
+        if self.proxy is None:
+            raise rpc.JsonRpcError(rpc.INTERNAL_ERROR, "Proxy not initialized")
+        return self.proxy.proxy_url
+
+    async def method_browser_open(self, _params: dict[str, Any]) -> str:
+        """Open a new browser instance."""
+        return await self.browser.open()
+
+    async def method_browser_list(self, _params: dict[str, Any]) -> list[dict]:
+        """List open browser instances."""
+        return self.browser.list_instances()
+
+    async def method_browser_close(self, params: dict[str, Any]) -> str:
+        """Close a browser instance by ID."""
+        return await self.browser.close_instance(params["id"])
+
+    async def method_navigate(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Navigate the active browser to a URL."""
+        return await self.browser.navigate(
+            params["url"], new_tab=params.get("new_tab", False)
+        )
+
+    async def method_eval(self, params: dict[str, Any]) -> str:
+        """Evaluate JavaScript in the active browser tab."""
+        return await self.browser.eval_js(params["js"])
+
+    async def method_screenshot(self, _params: dict[str, Any]) -> str:
+        """Capture a screenshot of the active browser viewport."""
+        return await self.browser.screenshot()
+
+    async def method_tabs_list(self, _params: dict[str, Any]) -> list[dict]:
+        """List tabs grouped by browser."""
+        return await self.browser.list_tabs()
+
+    async def method_tabs_switch(self, params: dict[str, Any]) -> str:
+        """Switch to a specific tab."""
+        return await self.browser.switch_tab(params["browser_id"], params["index"])
+
+    async def method_console_read(self, params: dict[str, Any]) -> list[dict]:
+        """Read recent console messages."""
+        return await self.browser.read_console(
+            n=params.get("n", 50),
+            level=params.get("level"),
+            source=params.get("source"),
+        )
+
+    async def method_event_listeners(self, _params: dict[str, Any]) -> list[dict]:
+        """List JS event listeners on window and document."""
+        return await self.browser.list_event_listeners()
+
+    async def method_flows_latest(self, params: dict[str, Any]) -> list[dict]:
+        """Return the latest N captured flows."""
+        return self.flow_store.get_latest(params.get("n", 10))
+
+    async def method_flows_search(self, params: dict[str, Any]) -> list[dict]:
+        """Execute a read-only SQL query against captured flows."""
+        return self.flow_store.execute_query(params["sql"])
+
+    async def method_flows_inspect(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return full details for a single flow."""
+        flow = self.flow_store.get_by_id(params["id"])
+        if flow is None:
+            raise rpc.JsonRpcError(rpc.INTERNAL_ERROR, f"Flow {params['id']} not found")
+        return flow
+
+
+def run(
+    socket_path: str | Path,
+    data_dir: str | Path,
+    parent_pid: int | None = None,
+) -> None:
+    """Run the odda server.
+
+    Args:
+        socket_path: Unix socket path.
+        data_dir: Data directory.
+        parent_pid: Optional parent PID to watch.
+    """
+    server = OddaServer(socket_path, data_dir, parent_pid)
+    asyncio.run(server.run())

@@ -1,0 +1,111 @@
+[project]
+name = "odda"
+version = "0.1.0"
+description = "Browser automation and HTTP traffic capture CLI for AI agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.15.0",
+    "mitmproxy>=11.0.2",
+    "nodriver>=0.48.1",
+    "jsbeautifier>=1.15",
+    "lxml>=6.0",
+]
+
+[project.scripts]
+odda = "odda.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.15.11",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.package-data]
+odda = ["opencode/*.js", "opencode/SKILL.md", "dialog_override.js"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "N",
+    "D",
+    "S",
+    "B",
+    "C4",
+    "UP",
+    "SIM",
+    "TCH",
+    "PTH",
+    "ERA",
+    "RUF",
+    "ARG",
+    "PL",
+    "PERF",
+    "FURB",
+    "TRY",
+    "EM",
+    "RET",
+    "SLF",
+    "TID",
+    "RSE",
+    "FBT",
+    "COM",
+    "C90",
+    "INP",
+    "PIE",
+    "T20",
+    "PGH",
+    "FAST",
+]
+ignore = [
+    "D100",
+    "D104",
+    "COM812",
+    "ISC001",
+    "T201",
+    "EM101",
+    "EM102",
+    "TRY003",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 6
+max-branches = 15
+max-returns = 8
+max-statements = 60
+max-public-methods = 25
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+known-first-party = ["odda"]
+combine-as-imports = true
+split-on-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+"src/odda/cli.py" = ["B008", "FBT001", "FBT003"]
+"src/odda/database.py" = ["PLW0603"]
+"src/odda/server.py" = ["TRY301"]
