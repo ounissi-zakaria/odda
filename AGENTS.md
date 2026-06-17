@@ -17,6 +17,12 @@ odda install-opencode
 
 Use `.venv/bin/python` and `.venv/bin/ruff`. Avoid `pip` directly unless `uv` is unavailable.
 
+For a non-editable, global CLI install you can also use:
+
+```bash
+uv tool install .
+```
+
 ## Useful commands
 
 ```bash
