@@ -180,7 +180,8 @@ def logs(
 @app.command()
 def proxy_url(ctx: typer.Context) -> None:
     """Return the HTTP proxy URL."""
-    _run_coro(_client(ctx).call("proxy/url"))
+    result = _run_coro_raw(_client(ctx).call("proxy/url"))
+    typer.echo(result)
 
 
 @browser_app.command("open")

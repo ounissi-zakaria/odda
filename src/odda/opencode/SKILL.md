@@ -51,7 +51,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 
 ## Proxy and flow commands
 
-- `odda proxy-url` — Return the HTTP proxy URL. Route HTTP clients through this URL to capture traffic.
+- `odda proxy-url` — Return the HTTP proxy URL as plain text. Route HTTP clients through this URL to capture traffic.
 - `odda flows list [--n N]` — Return the latest captured HTTP flows. Default `--n` is 10.
 - `odda flows search "<SELECT ...>"` — Query captured flows with a read-only SQL SELECT.
 - `odda flows inspect <id>` — Return full request/response details for one flow.

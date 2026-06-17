@@ -94,7 +94,7 @@ expect_json() {
 }
 
 proxy_url() {
-    "$ODDA_BIN" --socket "$SOCKET" proxy-url | python3 -c 'import json,sys; print(json.load(sys.stdin))'
+    "$ODDA_BIN" --socket "$SOCKET" proxy-url
 }
 
 start_server
@@ -102,7 +102,7 @@ start_server
 # Core commands
 expect_json "version" "$ODDA_BIN" --socket "$SOCKET" version
 expect_json "status" "$ODDA_BIN" --socket "$SOCKET" status
-expect_json "proxy-url" "$ODDA_BIN" --socket "$SOCKET" proxy-url
+run_cmd "proxy-url" "$ODDA_BIN" --socket "$SOCKET" proxy-url
 expect_json "logs" "$ODDA_BIN" --socket "$SOCKET" logs --n 5
 
 # Flow commands (empty database)
