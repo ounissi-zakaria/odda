@@ -592,9 +592,10 @@ wheels = [
 
 [[package]]
 name = "odda"
-version = "0.1.0"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "h2" },
     { name = "mitmproxy" },
     { name = "patchright" },
     { name = "typer" },
@@ -607,6 +608,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "h2", specifier = ">=4.0.0" },
     { name = "mitmproxy", specifier = ">=11.0.2" },
     { name = "patchright", specifier = ">=1.60" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.11" },

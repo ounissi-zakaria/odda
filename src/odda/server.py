@@ -13,6 +13,11 @@ from typing import Any
 from odda import flowstore, rpc
 from odda.browser import BrowserManager
 from odda.proxy import ProxyServer
+from odda.request import (
+    clone as clone_request,
+    new as new_request,
+    send as send_request,
+)
 
 
 class OddaServer:
@@ -219,6 +224,57 @@ class OddaServer:
     async def method_event_listeners(self, _params: dict[str, Any]) -> list[dict]:
         """List JS event listeners on window and document."""
         return await self.browser.list_event_listeners()
+
+    # --- Request (raw resend) handlers ---
+
+    async def method_request_clone(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Clone a captured flow's request into an editable request.
+
+        Params:
+            flow_id: Flow id (e.g. ``00042``).
+            name: Editable request name.
+            force: If True, overwrite an existing request of the same name.
+        """
+        return clone_request(
+            params["flow_id"],
+            params["name"],
+            force=params.get("force", False),
+        )
+
+    async def method_request_new(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create a new empty editable request.
+
+        Params:
+            name: Editable request name.
+            host: Target host (required).
+            protocol: ``http`` or ``https`` (default ``https``).
+            port: Target port (default 80 for http, 443 for https).
+            force: If True, overwrite an existing request of the same name.
+        """
+        return new_request(
+            params["name"],
+            host=params["host"],
+            protocol=params.get("protocol", "https"),
+            port=params.get("port"),
+            force=params.get("force", False),
+        )
+
+    async def method_request_send(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Send an editable request and record the response as a flow.
+
+        Params:
+            name: Editable request name.
+            fix_content_length: Recompute Content-Length from the body
+                before sending (default False).
+            timeout: Total timeout in seconds (default 30).
+            insecure: Skip TLS certificate verification (default False).
+        """
+        return await send_request(
+            params["name"],
+            fix_content_length=params.get("fix_content_length", False),
+            timeout=float(params.get("timeout", 30.0)),
+            insecure=params.get("insecure", False),
+        )
 
 
 def run(

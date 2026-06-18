@@ -25,6 +25,9 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Screenshot                  | `odda screenshot`                                        |
 | List event listeners        | `odda event-listeners`                                   |
 | Read server logs            | `odda logs [--follow] [--n N]`                           |
+| Clone a flow to edit        | `odda request clone <flow-id> --name <name> [--force]`   |
+| Create an empty request     | `odda request new --name <name> [--force]`               |
+| Send an editable request    | `odda request send <name> [flags]`                       |
 
 ## Browser commands
 
@@ -44,6 +47,32 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 - `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
 - `odda event-listeners` — List JavaScript event listeners attached to `window` and `document`.
 
+## Raw request commands
+
+`odda request` lets you craft and send raw HTTP requests byte-for-byte, bypassing the browser. Use it to replay/modify captured flows or send hand-built requests for header-injection, smuggling, and parser-differential tests.
+
+Editable requests live in `.odda/requests/<name>/`:
+- `request` — the raw HTTP request bytes (request line + headers + blank line + body), **CRLF-terminated**, same format as `.odda/flows/<id>/request`. Edit this file with the built-in edit tool. Ensure `\r\n` line endings (use `printf` or `sed 's/$/\r/'` when writing via shell — heredocs use `\n` which will fail on the wire).
+- `meta.json` — sidecar with `{"scheme": "http"|"https", "host": "...", "port": N}`. `send` uses this to open the socket; the `request` file is origin-form and carries no scheme/port. The `host` here is the TCP destination — it may intentionally differ from the `Host` header in the request file (for vhost/host-header/SSRF tests).
+
+Commands:
+- `odda request clone <flow-id> --name <name> [--force]` — Copy `.odda/flows/<flow-id>/request` into `.odda/requests/<name>/request` and synthesize `meta.json` from the flow's `flows.jsonl` record (scheme/port) plus the `Host` header's explicit port. Refuses to overwrite an existing request unless `--force`.
+- `odda request new --name <name> --host <host> [--protocol http|https] [--port <port>] [--force]` — Create an empty `request` file (0 bytes) and a `meta.json` with the given host, protocol (default `https`), and port (default 80 for `http`, 443 for `https`). Fill the `request` file with the edit tool.
+- `odda request send <name> [--fix-content-length] [--timeout 30] [--insecure]` — Read both files, open a TCP socket (TLS for https, ALPN `h2` when the request line says `HTTP/2`), write the exact bytes from the `request` file, read the response, decode it (de-chunk + gzip/br/deflate/zstd), and write a flow record to `.odda/flows/<NNNNN>/`. The sent request is recorded before the network exchange (two-phase durability), so a crash leaves a durable request file. Output is the `flows.jsonl` record that was appended; read `.odda/flows/<id>/response_body.*` for the body.
+
+Flags for `send`:
+- `--fix-content-length` — Recompute `Content-Length` from the body and overwrite the header **in the bytes sent on the wire** (the `request` file on disk is untouched). Use this when you've edited the body and want the framing auto-corrected. Skip it for Content-Length smuggling/differential tests where the wrong value is the point.
+- `--timeout <seconds>` — Total timeout for connect + reads (default 30). On timeout, a flow record is written with whatever was received plus an `error` file.
+- `--insecure` — Skip TLS certificate verification. Default verifies.
+
+Behavior notes:
+- **Single-shot, no redirects.** A 3xx response is recorded as-is; re-`send` manually if you want to follow.
+- **No pre-flight validation.** Malformed requests fail at the socket/TLS/H2 layer; the error is captured in the flow's `error` file.
+- **HTTP/2** — if the request line says `HTTP/2`, `send` negotiates ALPN `h2` and emits real H2 frames (HPACK-encoded pseudo-headers synthesized from the request line + `Host` + `meta.json`). The stored `request` file stays H1-shaped text with `HTTP/2` in the version field (consistent with how mitmproxy stores captured H2 flows). If the server doesn't negotiate `h2`, `send` errors — edit the request line to `HTTP/1.1` and resend.
+- **Missing framing** — if a body exists with no `Content-Length` and no `Transfer-Encoding: chunked`, `send` half-closes the socket (`write_eof`) after the body so the server sees EOF.
+- **Binary bodies** — the `request` file is bytes; populate it via shell (`cat`, `cp`) if the edit tool can't author the bytes you need.
+- **Captured-sent requests are stored in the same `flows.jsonl`** as proxied captures, with `scheme` and `port` fields populated. `flows.jsonl` records from older captures may lack these fields; treat them as `https`/`443` when absent.
+
 ## Proxy and flow capture
 
 - `odda proxy-url` — Return the HTTP proxy URL as plain text. Route HTTP clients through this URL to capture traffic.
@@ -57,6 +86,7 @@ Captured flows are stored as read-only files under `.odda/flows/`.
 ├── flows.jsonl                # append-only index, one JSON line per completed/errored flow
 └── <NNNNN>/                   # zero-padded monotonic flow id (e.g. 00001)
     ├── request                # reconstructed HTTP request (request line + headers + blank line + decoded body), CRLF
+    ├── meta.json              # read-only sidecar with {"scheme":"https","host":"...","port":443}
     ├── response_headers       # reconstructed status line + headers + blank line, CRLF (no body)
     ├── response_body.<ext>    # decoded response body, ext from Content-Type (e.g. .json, .html, .bin); omitted for excluded/empty bodies
     └── error                  # present only on errored flows (e.g. server unreachable)
@@ -70,7 +100,9 @@ One JSON object per line, in completion order:
 {
   "id": "00042",
   "method": "GET",
+  "scheme": "https",
   "host": "example.com",
+  "port": 443,
   "path": "/",
   "status_code": 200,
   "total_duration_ms": 12.3,
@@ -80,6 +112,7 @@ One JSON object per line, in completion order:
 ```
 
 - `id` — zero-padded flow id matching the directory name; lets you re-sort by capture order with `sort`.
+- `scheme` / `port` — request scheme (`http`/`https`) and port. Populated for new captures and `odda request send` flows; absent on records written by older odda versions (treat as `https`/`443`).
 - `status_code` — `null` for errored flows (the `error` field holds the message instead).
 - `body_file` — path relative to `.odda`; read it as `read ".odda/$body_file"`. `null` when the body was excluded (images/video/audio/fonts) or empty.
 - `error` — `null` for completed flows; the error message for failed flows.

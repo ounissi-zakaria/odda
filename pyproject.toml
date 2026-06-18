@@ -8,6 +8,7 @@ dependencies = [
     "typer>=0.15.0",
     "mitmproxy>=11.0.2",
     "patchright>=1.60",
+    "h2>=4.0.0",
 ]
 
 [project.scripts]
@@ -105,5 +106,6 @@ split-on-trailing-comma = false
 
 [tool.ruff.lint.per-file-ignores]
 "src/odda/cli.py" = ["B008", "FBT001", "FBT003"]
-"src/odda/flowstore.py" = ["PLW0603"]
+"src/odda/flowstore.py" = ["PLW0603", "PLR0913"]
 "src/odda/server.py" = ["TRY301"]
+"src/odda/request/*.py" = ["PLR0913", "PLR2004", "C901", "PLR0912", "PLR0915", "TC003"]
