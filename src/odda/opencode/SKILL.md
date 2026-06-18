@@ -24,9 +24,6 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Run JavaScript              | `odda eval "<js>"`                                       |
 | Screenshot                  | `odda screenshot`                                        |
 | List event listeners        | `odda event-listeners`                                   |
-| List captured flows         | `odda flows list [--n N]`                                |
-| Query flows with SQL        | `odda flows search "SELECT ..."`                         |
-| Inspect one flow            | `odda flows inspect <id>`                                |
 | Read server logs            | `odda logs [--follow] [--n N]`                           |
 
 ## Browser commands
@@ -47,14 +44,51 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 - `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
 - `odda event-listeners` — List JavaScript event listeners attached to `window` and `document`.
 
-## Proxy and flow commands
+## Proxy and flow capture
 
 - `odda proxy-url` — Return the HTTP proxy URL as plain text. Route HTTP clients through this URL to capture traffic.
-- `odda flows list [--n N]` — Return the latest captured HTTP flows. Default `--n` is 10.
-- `odda flows search "<SELECT ...>"` — Query captured flows with a read-only SQL SELECT.
-- `odda flows inspect <id>` — Return full request/response details for one flow.
 
-Captured request and response metadata is stored in `.odda/flows.db`. Response bodies are written to `.odda/bodies/` and can be read directly with filesystem tools.
+Captured flows are stored as read-only files under `.odda/flows/`.
+
+### Flow file layout
+
+```
+.odda/flows/
+├── flows.jsonl                # append-only index, one JSON line per completed/errored flow
+└── <NNNNN>/                   # zero-padded monotonic flow id (e.g. 00001)
+    ├── request                # reconstructed HTTP request (request line + headers + blank line + decoded body), CRLF
+    ├── response_headers       # reconstructed status line + headers + blank line, CRLF (no body)
+    ├── response_body.<ext>    # decoded response body, ext from Content-Type (e.g. .json, .html, .bin); omitted for excluded/empty bodies
+    └── error                  # present only on errored flows (e.g. server unreachable)
+```
+
+### flows.jsonl schema
+
+One JSON object per line, in completion order:
+
+```json
+{
+  "id": "00042",
+  "method": "GET",
+  "host": "example.com",
+  "path": "/",
+  "status_code": 200,
+  "total_duration_ms": 12.3,
+  "body_file": "flows/00042/response_body.json",
+  "error": null
+}
+```
+
+- `id` — zero-padded flow id matching the directory name; lets you re-sort by capture order with `sort`.
+- `status_code` — `null` for errored flows (the `error` field holds the message instead).
+- `body_file` — path relative to `.odda`; read it as `read ".odda/$body_file"`. `null` when the body was excluded (images/video/audio/fonts) or empty.
+- `error` — `null` for completed flows; the error message for failed flows.
+
+### Note on response bodies
+
+`response_body.<ext>` holds the **decoded** body (mitmproxy inflates gzip/br/deflate). The `response_headers` file shows the original on-wire headers, so `Content-Encoding: gzip` and the compressed `Content-Length` may not match the decoded body file. This is expected.
+
+Per-flow files (`request`, `response_headers`, `response_body.*`, `error`) are written read-only (mode 0444) so history cannot be edited.
 
 ## Server commands
 

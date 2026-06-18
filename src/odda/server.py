@@ -10,9 +10,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from odda import database, rpc
+from odda import flowstore, rpc
 from odda.browser import BrowserManager
-from odda.database import FlowStore
 from odda.proxy import ProxyServer
 
 
@@ -37,7 +36,6 @@ class OddaServer:
         self.parent_pid = parent_pid
         self.proxy: ProxyServer | None = None
         self.browser: BrowserManager | None = None
-        self.flow_store: FlowStore | None = None
         self._shutdown_event = asyncio.Event()
         self._parent_watch_task: asyncio.Task | None = None
 
@@ -47,10 +45,9 @@ class OddaServer:
         logger = logging.getLogger(__name__)
         logger.info("Starting odda server (data_dir=%s)", self.data_dir)
 
-        database.set_data_dir(self.data_dir)
+        flowstore.set_data_dir(self.data_dir)
         self.proxy = ProxyServer()
         self.browser = BrowserManager(proxy=self.proxy)
-        self.flow_store = FlowStore()
 
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         if self.socket_path.exists():
@@ -222,21 +219,6 @@ class OddaServer:
     async def method_event_listeners(self, _params: dict[str, Any]) -> list[dict]:
         """List JS event listeners on window and document."""
         return await self.browser.list_event_listeners()
-
-    async def method_flows_latest(self, params: dict[str, Any]) -> list[dict]:
-        """Return the latest N captured flows."""
-        return self.flow_store.get_latest(params.get("n", 10))
-
-    async def method_flows_search(self, params: dict[str, Any]) -> list[dict]:
-        """Execute a read-only SQL query against captured flows."""
-        return self.flow_store.execute_query(params["sql"])
-
-    async def method_flows_inspect(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Return full details for a single flow."""
-        flow = self.flow_store.get_by_id(params["id"])
-        if flow is None:
-            raise rpc.JsonRpcError(rpc.INTERNAL_ERROR, f"Flow {params['id']} not found")
-        return flow
 
 
 def run(

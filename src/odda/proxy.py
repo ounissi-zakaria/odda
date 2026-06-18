@@ -6,7 +6,7 @@ from contextlib import suppress
 from mitmproxy.options import Options
 from mitmproxy.tools.dump import DumpMaster
 
-from odda.database import DatabaseAddon
+from odda.flowstore import FlowFileAddon
 from odda.utils import find_available_port
 
 
@@ -38,8 +38,8 @@ class ProxyServer:
         # returns after request is dispatched, not after response received.
         self.m.options.client_replay_concurrency = -1
 
-        # Initialize database addon for flow storage
-        self.db_addon = DatabaseAddon()
+        # Initialize flow storage addon
+        self.db_addon = FlowFileAddon()
         self.m.addons.add(self.db_addon)
 
         self.task = asyncio.create_task(self.m.run())

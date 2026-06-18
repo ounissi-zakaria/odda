@@ -200,9 +200,16 @@ expect_json "status" "$ODDA_BIN" --socket "$SOCKET" status
 run_cmd "proxy-url" "$ODDA_BIN" --socket "$SOCKET" proxy-url
 expect_json "logs" "$ODDA_BIN" --socket "$SOCKET" logs --n 5
 
-# Flow commands (empty database)
-expect_json "flows list (empty)" "$ODDA_BIN" --socket "$SOCKET" flows list
-expect_json "flows search (empty)" "$ODDA_BIN" --socket "$SOCKET" flows search "SELECT * FROM flows LIMIT 1"
+# Flow capture (file layout)
+echo "=== Flow file layout (empty) ==="
+if [ ! -e "$DATA_DIR/flows/flows.jsonl" ]; then
+    echo "[OK] flows.jsonl absent before any capture"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] flows.jsonl exists before any capture"
+    FAILED=$((FAILED + 1))
+fi
+echo
 
 # Browser commands
 echo "=== Browser commands ==="
@@ -245,9 +252,68 @@ sleep 1
 kill "$HTTP_PID" 2>/dev/null || true
 HTTP_PID=""
 
-# Flow commands (with captured data)
-expect_json "flows list" "$ODDA_BIN" --socket "$SOCKET" flows list
-expect_json "flows inspect" "$ODDA_BIN" --socket "$SOCKET" flows inspect 1
+# Flow file layout (with captured data)
+echo "=== Flow file layout (captured) ==="
+JSONL="$DATA_DIR/flows/flows.jsonl"
+if [ -e "$JSONL" ] && [ -s "$JSONL" ]; then
+    echo "[OK] flows.jsonl exists and is non-empty"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] flows.jsonl missing or empty"
+    FAILED=$((FAILED + 1))
+fi
+
+LINE_COUNT=$(wc -l < "$JSONL" 2>/dev/null || echo 0)
+if [ "$LINE_COUNT" -ge 1 ]; then
+    echo "[OK] flows.jsonl has >= 1 line (got $LINE_COUNT)"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] flows.jsonl has no lines"
+    FAILED=$((FAILED + 1))
+fi
+
+# Find the curl's flow (host 127.0.0.1, path /). Chrome's background traffic
+# goes through the proxy too, so flow 00001 is not necessarily our curl request.
+CURL_ID=$(grep '"host": "127.0.0.1"' "$JSONL" | head -n 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null || echo "")
+if [ -n "$CURL_ID" ] && [ -d "$DATA_DIR/flows/$CURL_ID" ]; then
+    echo "[OK] curl flow dir $DATA_DIR/flows/$CURL_ID exists"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] curl flow dir for id '$CURL_ID' missing"
+    FAILED=$((FAILED + 1))
+fi
+
+MISSING=0
+for f in request response_headers response_body.html; do
+    if [ ! -e "$DATA_DIR/flows/$CURL_ID/$f" ]; then
+        echo "[FAIL] missing $DATA_DIR/flows/$CURL_ID/$f"
+        MISSING=$((MISSING + 1))
+    fi
+done
+if [ "$MISSING" -eq 0 ]; then
+    echo "[OK] request, response_headers, response_body.html all present"
+    PASSED=$((PASSED + 1))
+else
+    FAILED=$((FAILED + MISSING))
+fi
+
+# Per-flow files should be read-only (mode 0444)
+RO_FAIL=0
+for f in request response_headers response_body.html; do
+    PERMS=$(stat -c '%a' "$DATA_DIR/flows/$CURL_ID/$f" 2>/dev/null || echo "000")
+    if [ "$PERMS" != "444" ]; then
+        echo "[FAIL] $f mode is $PERMS, expected 444"
+        RO_FAIL=$((RO_FAIL + 1))
+    fi
+done
+if [ "$RO_FAIL" -eq 0 ]; then
+    echo "[OK] per-flow files are read-only (0444)"
+    PASSED=$((PASSED + 1))
+else
+    FAILED=$((FAILED + RO_FAIL))
+fi
+
+echo
 
 echo "=== Summary ==="
 echo "Passed: $PASSED"

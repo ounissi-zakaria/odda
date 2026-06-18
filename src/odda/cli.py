@@ -21,11 +21,9 @@ app = typer.Typer(
 )
 
 browser_app = typer.Typer(name="browser", help="Browser management commands")
-flows_app = typer.Typer(name="flows", help="Captured flow commands")
 tabs_app = typer.Typer(name="tabs", help="Tab management commands")
 
 app.add_typer(browser_app)
-app.add_typer(flows_app)
 app.add_typer(tabs_app)
 
 
@@ -260,33 +258,6 @@ def switch_tab(
 def event_listeners(ctx: typer.Context) -> None:
     """List JavaScript event listeners on window and document."""
     _run_coro(_client(ctx).call("event/listeners"))
-
-
-@flows_app.command("list")
-def flows_list(
-    ctx: typer.Context,
-    n: int = typer.Option(10, "--n", help="Number of flows to return"),
-) -> None:
-    """List latest captured flows."""
-    _run_coro(_client(ctx).call("flows/latest", {"n": n}))
-
-
-@flows_app.command("search")
-def flows_search(
-    ctx: typer.Context,
-    sql: str = typer.Argument(..., help="SELECT SQL query"),
-) -> None:
-    """Search captured flows with SQL."""
-    _run_coro(_client(ctx).call("flows/search", {"sql": sql}))
-
-
-@flows_app.command("inspect")
-def flows_inspect(
-    ctx: typer.Context,
-    id: int = typer.Argument(..., help="Flow ID to inspect"),
-) -> None:
-    """Inspect a single captured flow."""
-    _run_coro(_client(ctx).call("flows/inspect", {"id": id}))
 
 
 def main() -> None:
