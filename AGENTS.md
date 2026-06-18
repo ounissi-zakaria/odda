@@ -23,6 +23,8 @@ For a non-editable, global CLI install you can also use:
 uv tool install .
 ```
 
+If you add, remove, or change a dependency in `pyproject.toml`, regenerate the lockfile with `uv lock` so it stays in sync.
+
 ## Useful commands
 
 ```bash

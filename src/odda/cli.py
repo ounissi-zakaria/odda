@@ -22,9 +22,11 @@ app = typer.Typer(
 
 browser_app = typer.Typer(name="browser", help="Browser management commands")
 tabs_app = typer.Typer(name="tabs", help="Tab management commands")
+request_app = typer.Typer(name="request", help="Raw HTTP request commands")
 
 app.add_typer(browser_app)
 app.add_typer(tabs_app)
+app.add_typer(request_app)
 
 
 def _output_json(data: Any) -> None:
@@ -258,6 +260,82 @@ def switch_tab(
 def event_listeners(ctx: typer.Context) -> None:
     """List JavaScript event listeners on window and document."""
     _run_coro(_client(ctx).call("event/listeners"))
+
+
+@request_app.command("clone")
+def request_clone(
+    ctx: typer.Context,
+    flow_id: str = typer.Argument(..., help="Flow id to clone (e.g. 00042)"),
+    name: str = typer.Option(..., "--name", help="Name for the editable request"),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite an existing request of the same name"
+    ),
+) -> None:
+    """Clone a captured flow's request into an editable request."""
+    _run_coro(
+        _client(ctx).call(
+            "request/clone",
+            {"flow_id": flow_id, "name": name, "force": force},
+        )
+    )
+
+
+@request_app.command("new")
+def request_new(
+    ctx: typer.Context,
+    name: str = typer.Option(..., "--name", help="Name for the editable request"),
+    host: str = typer.Option(..., "--host", help="Target host"),
+    protocol: str = typer.Option(
+        "https", "--protocol", help="http or https (default https)"
+    ),
+    port: int | None = typer.Option(
+        None, "--port", help="Target port (default 80 for http, 443 for https)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite an existing request of the same name"
+    ),
+) -> None:
+    """Create a new empty editable request."""
+    _run_coro(
+        _client(ctx).call(
+            "request/new",
+            {
+                "name": name,
+                "host": host,
+                "protocol": protocol,
+                "port": port,
+                "force": force,
+            },
+        )
+    )
+
+
+@request_app.command("send")
+def request_send(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Name of the editable request to send"),
+    fix_content_length: bool = typer.Option(
+        False,
+        "--fix-content-length",
+        help="Recompute Content-Length from the body before sending",
+    ),
+    timeout: float = typer.Option(30.0, "--timeout", help="Total timeout in seconds"),
+    insecure: bool = typer.Option(
+        False, "--insecure", help="Skip TLS certificate verification"
+    ),
+) -> None:
+    """Send an editable request and record the response as a flow."""
+    _run_coro(
+        _client(ctx).call(
+            "request/send",
+            {
+                "name": name,
+                "fix_content_length": fix_content_length,
+                "timeout": timeout,
+                "insecure": insecure,
+            },
+        )
+    )
 
 
 def main() -> None:
