@@ -258,6 +258,62 @@ fi
 echo
 expect_json "screenshot" "$ODDA_BIN" --socket "$SOCKET" screenshot
 assert_event_listeners
+
+# Userscript tests
+echo "=== Userscript commands ==="
+cat > "$TMPDIR/us_helper.js" <<'EOF'
+if (!window.__usHelperRan__) {
+  window.__usHelperRan__ = 0;
+}
+window.__usHelperRan__ += 1;
+EOF
+expect_json "userscript install" "$ODDA_BIN" --socket "$SOCKET" userscript install --name helper --file "$TMPDIR/us_helper.js"
+expect_json "userscript list" "$ODDA_BIN" --socket "$SOCKET" userscript list
+# Navigate and verify the helper ran at document_start
+expect_json "navigate (with userscript)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
+sleep 1
+US_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__usHelperRan__)" 2>&1)
+echo ">>> userscript ran after navigate"
+echo "$US_OUT"
+if [ "$US_OUT" = '"1"' ]; then
+    echo "[OK] helper was injected at document_start"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected 1, got $US_OUT"
+    FAILED=$((FAILED + 1))
+fi
+echo
+# Navigate again and verify re-injection
+expect_json "navigate again (re-inject)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
+sleep 1
+US_OUT2=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__usHelperRan__)" 2>&1)
+echo ">>> userscript re-injected after second navigate"
+echo "$US_OUT2"
+if [ "$US_OUT2" = '"1"' ]; then
+    echo "[OK] helper was re-injected"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected 1, got $US_OUT2"
+    FAILED=$((FAILED + 1))
+fi
+echo
+# Remove and verify it's gone after navigate
+expect_json "userscript remove" "$ODDA_BIN" --socket "$SOCKET" userscript remove helper
+expect_json "userscript list (empty)" "$ODDA_BIN" --socket "$SOCKET" userscript list
+expect_json "navigate (no userscript)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
+sleep 1
+US_OUT3=$("$ODDA_BIN" --socket "$SOCKET" eval "String(typeof window.__usHelperRan__)" 2>&1)
+echo ">>> userscript gone after remove + navigate"
+echo "$US_OUT3"
+if [ "$US_OUT3" = '"undefined"' ]; then
+    echo "[OK] helper not injected after remove"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected undefined, got $US_OUT3"
+    FAILED=$((FAILED + 1))
+fi
+echo
+
 expect_json "switch-tab" "$ODDA_BIN" --socket "$SOCKET" switch-tab --browser-id "$BROWSER_ID" --index 0
 expect_json "browser close" "$ODDA_BIN" --socket "$SOCKET" browser close "$BROWSER_ID"
 

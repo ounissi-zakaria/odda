@@ -21,9 +21,12 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | List tabs                   | `odda tabs list` or `odda tabs list --browser-id <id>`   |
 | Switch tab                  | `odda switch-tab --browser-id <id> --index <n>`          |
 | Navigate                    | `odda navigate <url>` or `odda navigate <url> --new-tab` |
-| Run JavaScript              | `odda eval "<js>"` or `odda eval --file <path>`           |
+| Run JavaScript              | `odda eval "<js>"` or `odda eval --file <path>`          |
 | Screenshot                  | `odda screenshot`                                        |
 | List event listeners        | `odda event-listeners`                                   |
+| Install a userscript        | `odda userscript install --name <name> --file <path>`    |
+| List userscripts            | `odda userscript list`                                   |
+| Remove a userscript         | `odda userscript remove <name>`                          |
 | Read server logs            | `odda logs [--follow] [--n N]`                           |
 | Clone a flow to edit        | `odda request clone <flow-id> --name <name> [--force]`   |
 | Create an empty request     | `odda request new --name <name> [--force]`               |
@@ -48,25 +51,47 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 - `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
 - `odda event-listeners` — List JavaScript event listeners attached to `window` and `document`.
 
+## Userscripts
+
+`odda userscript` manages JavaScript helpers that auto-run at `document_start` on every navigation. Install a helper once and it runs before the page's own scripts on every `odda navigate`, `odda navigate --new-tab`, and tab switch.
+
+Userscripts are stored on disk under `.odda/userscripts/<name>/script.js`. A Chrome extension is generated at `.odda/userscripts-extension/` with a `content.js` that inlines all installed userscripts (each wrapped in try/catch). The extension is loaded via CDP `Extensions.loadUnpacked` when a browser is opened.
+
+Commands:
+
+- `odda userscript install --name <name> --file <path>` — Install a JS file as a userscript. Overwrites any existing userscript of the same name. If a browser is open, the extension is reloaded immediately. Alternatively, use `--source "<js>"` for inline source (mutually exclusive with `--file`).
+- `odda userscript list` — List installed userscripts with their names and sizes.
+- `odda userscript remove <name>` — Remove a userscript from disk and reload the extension. The script's effects on the current page are not undone; it won't run on future navigations.
+
+Behavior notes:
+
+- **Before page scripts.** Userscripts run at `document_start`, so `window` modifications are visible to the page before any of its own scripts execute. This is the key advantage over `odda eval` (which runs after navigation).
+- **All tabs and frames.** The extension's content script matches `<all_urls>` and runs in all frames (`all_frames: true`). There is no per-browser or per-tab scoping.
+- **Idempotent re-injection.** Scripts run on every navigation. Write them to be idempotent (e.g., guard with `if (window.__myHelper__) return;`).
+
 ## Raw request commands
 
 `odda request` lets you craft and send raw HTTP requests byte-for-byte, bypassing the browser. Use it to replay/modify captured flows or send hand-built requests for header-injection, smuggling, and parser-differential tests.
 
 Editable requests live in `.odda/requests/<name>/`:
+
 - `request` — the raw HTTP request bytes (request line + headers + blank line + body), **CRLF-terminated**, same format as `.odda/flows/<id>/request`. Edit this file with the built-in edit tool. Ensure `\r\n` line endings (use `printf` or `sed 's/$/\r/'` when writing via shell — heredocs use `\n` which will fail on the wire).
 - `meta.json` — sidecar with `{"scheme": "http"|"https", "host": "...", "port": N}`. `send` uses this to open the socket; the `request` file is origin-form and carries no scheme/port. The `host` here is the TCP destination — it may intentionally differ from the `Host` header in the request file (for vhost/host-header/SSRF tests).
 
 Commands:
+
 - `odda request clone <flow-id> --name <name> [--force]` — Copy `.odda/flows/<flow-id>/request` into `.odda/requests/<name>/request` and synthesize `meta.json` from the flow's `flows.jsonl` record (scheme/port) plus the `Host` header's explicit port. Refuses to overwrite an existing request unless `--force`.
 - `odda request new --name <name> --host <host> [--protocol http|https] [--port <port>] [--force]` — Create an empty `request` file (0 bytes) and a `meta.json` with the given host, protocol (default `https`), and port (default 80 for `http`, 443 for `https`). Fill the `request` file with the edit tool.
 - `odda request send <name> [--fix-content-length] [--timeout 30] [--insecure]` — Read both files, open a TCP socket (TLS for https, ALPN `h2` when the request line says `HTTP/2`), write the exact bytes from the `request` file, read the response, decode it (de-chunk + gzip/br/deflate/zstd), and write a flow record to `.odda/flows/<NNNNN>/`. The sent request is recorded before the network exchange (two-phase durability), so a crash leaves a durable request file. Output is the `flows.jsonl` record that was appended; read `.odda/flows/<id>/response_body.*` for the body.
 
 Flags for `send`:
+
 - `--fix-content-length` — Recompute `Content-Length` from the body and overwrite the header **in the bytes sent on the wire** (the `request` file on disk is untouched). Use this when you've edited the body and want the framing auto-corrected. Skip it for Content-Length smuggling/differential tests where the wrong value is the point.
 - `--timeout <seconds>` — Total timeout for connect + reads (default 30). On timeout, a flow record is written with whatever was received plus an `error` file.
 - `--insecure` — Skip TLS certificate verification. Default verifies.
 
 Behavior notes:
+
 - **Single-shot, no redirects.** A 3xx response is recorded as-is; re-`send` manually if you want to follow.
 - **No pre-flight validation.** Malformed requests fail at the socket/TLS/H2 layer; the error is captured in the flow's `error` file.
 - **HTTP/2** — if the request line says `HTTP/2`, `send` negotiates ALPN `h2` and emits real H2 frames (HPACK-encoded pseudo-headers synthesized from the request line + `Host` + `meta.json`). The stored `request` file stays H1-shaped text with `HTTP/2` in the version field (consistent with how mitmproxy stores captured H2 flows). If the server doesn't negotiate `h2`, `send` errors — edit the request line to `HTTP/1.1` and resend.
