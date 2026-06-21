@@ -189,9 +189,14 @@ def proxy_url(ctx: typer.Context) -> None:
 
 
 @browser_app.command("open")
-def browser_open(ctx: typer.Context) -> None:
+def browser_open(
+    ctx: typer.Context,
+    headless: bool = typer.Option(
+        False, "--headless", help="Run Chrome in headless mode"
+    ),
+) -> None:
     """Open a new browser window."""
-    _run_coro(_client(ctx).call("browser/open"))
+    _run_coro(_client(ctx).call("browser/open", {"headless": headless}))
 
 
 @browser_app.command("list")
@@ -214,9 +219,16 @@ def navigate(
     ctx: typer.Context,
     url: str = typer.Argument(..., help="URL to navigate to"),
     new_tab: bool = typer.Option(False, "--new-tab", help="Open in a new tab"),
+    headless: bool = typer.Option(
+        False, "--headless", help="Auto-open browser in headless mode"
+    ),
 ) -> None:
     """Navigate the active browser to a URL."""
-    _run_coro(_client(ctx).call("navigate", {"url": url, "new_tab": new_tab}))
+    _run_coro(
+        _client(ctx).call(
+            "navigate", {"url": url, "new_tab": new_tab, "headless": headless}
+        )
+    )
 
 
 @app.command("eval")

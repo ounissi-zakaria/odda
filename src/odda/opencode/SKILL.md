@@ -15,12 +15,12 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | --------------------------- | -------------------------------------------------------- |
 | Check the server is running | `odda status`                                            |
 | Get the HTTP proxy URL      | `odda proxy-url`                                         |
-| Open a Chrome window        | `odda browser open`                                      |
+| Open a Chrome window        | `odda browser open [--headless]`                         |
 | See open browsers           | `odda browser list`                                      |
 | Close a browser             | `odda browser close <id>`                                |
 | List tabs                   | `odda tabs list` or `odda tabs list --browser-id <id>`   |
 | Switch tab                  | `odda switch-tab --browser-id <id> --index <n>`          |
-| Navigate                    | `odda navigate <url>` or `odda navigate <url> --new-tab` |
+| Navigate                    | `odda navigate <url> [--new-tab] [--headless]`           |
 | Run JavaScript              | `odda eval "<js>"` or `odda eval --file <path>`          |
 | Screenshot                  | `odda screenshot`                                        |
 | List event listeners        | `odda event-listeners`                                   |
@@ -34,7 +34,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 
 ## Browser commands
 
-- `odda browser open` — Open a new Chrome window. Returns the browser ID.
+- `odda browser open [--headless]` — Open a new Chrome window. Returns the browser ID. `--headless` runs Chrome without a visible window (useful for CI and automated testing).
 - `odda browser list` — List open browser instances with their IDs and active state.
 - `odda browser close <id>` — Close a browser instance by ID.
 
@@ -45,7 +45,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 
 ## Navigation and page interaction
 
-- `odda navigate <url> [--new-tab]` — Navigate the active browser. If no browser is active, one is opened automatically and reported in the `auto_opened` field.
+- `odda navigate <url> [--new-tab] [--headless]` — Navigate the active browser. If no browser is active, one is opened automatically and reported in the `auto_opened` field. `--headless` auto-opens a headless browser.
 - `odda eval "<js>"` — Execute JavaScript in the active tab and return the result. Returned Promises are awaited automatically: `fetch(url).then(r => r.status)` returns `200`, not a Promise object. Return a serializable value from async expressions — bare `fetch(url)` returns `{}` because the resolved `Response` is not JSON-serializable; chain `.then(r => r.text())` or similar to extract a serializable value.
 - `odda eval --file <path>` — Load JavaScript from a file and execute it. Useful for multi-line scripts with comments; avoids shell-escaping headaches. Mutually exclusive with the inline argument.
 - `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
