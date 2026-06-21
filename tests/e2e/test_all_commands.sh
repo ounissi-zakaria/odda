@@ -137,7 +137,7 @@ LAST_BROWSER_ID=""
 open_browser() {
     local label="$1"
     local output
-    output=$("$ODDA_BIN" --socket "$SOCKET" browser open 2>&1)
+    output=$("$ODDA_BIN" --socket "$SOCKET" browser open --headless 2>&1)
     echo ">>> $label"
     echo "$output"
     LAST_BROWSER_ID=$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin).split()[1])')

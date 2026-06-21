@@ -331,17 +331,19 @@ class BrowserManager:
             for bid in sorted(self._instances.keys())
         ]
 
-    async def _ensure_browser(self, *, auto_open: bool = False) -> BrowserInstance:
+    async def _ensure_browser(
+        self, *, auto_open: bool = False, headless: bool = False
+    ) -> BrowserInstance:
         """Ensure an active browser exists, optionally auto-opening one."""
         if self._active_browser_id is not None:
             return self._instances[self._active_browser_id]
         if auto_open:
-            return await self._create_instance()
+            return await self._create_instance(headless=headless)
         raise RuntimeError(
             "No browser open. Navigate to a URL using navigate or open_browser first."
         )
 
-    async def _create_instance(self) -> BrowserInstance:
+    async def _create_instance(self, *, headless: bool = False) -> BrowserInstance:
         """Create and register a new BrowserInstance."""
         browser_id = self._next_id
         self._next_id += 1
@@ -357,7 +359,7 @@ class BrowserManager:
         context = await playwright.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             executable_path=chrome_executable,
-            headless=False,
+            headless=headless,
             proxy=proxy_config,
             ignore_https_errors=True,
             args=[
@@ -375,14 +377,17 @@ class BrowserManager:
         self._active_browser_id = browser_id
         return instance
 
-    async def open(self) -> str:
+    async def open(self, *, headless: bool = False) -> str:
         """Open a new Chrome browser window.
+
+        Args:
+            headless: If True, launch Chrome in headless mode.
 
         Returns:
             Status message including the new browser ID.
         """
         try:
-            instance = await self._create_instance()
+            instance = await self._create_instance(headless=headless)
         except Exception as e:
             return f"Failed to open browser: {e!s}"
         return f"Browser {instance.browser_id} launched"
@@ -452,7 +457,9 @@ class BrowserManager:
             self._active_browser_id = browser_id
         return result
 
-    async def navigate(self, url: str, *, new_tab: bool = False) -> dict:
+    async def navigate(
+        self, url: str, *, new_tab: bool = False, headless: bool = False
+    ) -> dict:
         """Navigate active browser to URL.
 
         Opens a new browser automatically if none is active and reports
@@ -462,7 +469,7 @@ class BrowserManager:
             Dict with status message and auto_opened flag.
         """
         auto_opened = self._active_browser_id is None
-        inst = await self._ensure_browser(auto_open=True)
+        inst = await self._ensure_browser(auto_open=True, headless=headless)
         status = await inst.navigate(url, new_tab=new_tab)
         return {"status": status, "auto_opened": auto_opened}
 

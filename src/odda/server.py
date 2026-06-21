@@ -187,9 +187,9 @@ class OddaServer:
             raise rpc.JsonRpcError(rpc.INTERNAL_ERROR, "Proxy not initialized")
         return self.proxy.proxy_url
 
-    async def method_browser_open(self, _params: dict[str, Any]) -> str:
+    async def method_browser_open(self, params: dict[str, Any]) -> str:
         """Open a new browser instance."""
-        return await self.browser.open()
+        return await self.browser.open(headless=params.get("headless", False))
 
     async def method_browser_list(self, _params: dict[str, Any]) -> list[dict]:
         """List open browser instances."""
@@ -202,7 +202,9 @@ class OddaServer:
     async def method_navigate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Navigate the active browser to a URL."""
         return await self.browser.navigate(
-            params["url"], new_tab=params.get("new_tab", False)
+            params["url"],
+            new_tab=params.get("new_tab", False),
+            headless=params.get("headless", False),
         )
 
     async def method_eval(self, params: dict[str, Any]) -> str:
