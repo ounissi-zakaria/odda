@@ -225,6 +225,38 @@ class OddaServer:
         """List JS event listeners on window and document."""
         return await self.browser.list_event_listeners()
 
+    # --- Userscript handlers ---
+
+    async def method_userscript_install(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Install a userscript from a file or inline source.
+
+        Params:
+            name: Userscript name.
+            file: Path to a JS file (read by the server), or
+            source: Inline JS source. ``file`` takes precedence.
+        """
+        name = params["name"]
+        file_path = params.get("file")
+        if file_path:
+            source = Path(file_path).read_text(encoding="utf-8")
+        else:
+            source = params.get("source", "")
+        if not source.strip():
+            raise rpc.JsonRpcError(rpc.INVALID_PARAMS, "source is empty")
+        return await self.browser.install_userscript(name, source)
+
+    async def method_userscript_list(self, _params: dict[str, Any]) -> list[dict]:
+        """List installed userscripts."""
+        return self.browser.list_userscripts()
+
+    async def method_userscript_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Remove a userscript.
+
+        Params:
+            name: Userscript name.
+        """
+        return await self.browser.remove_userscript(params["name"])
+
     # --- Request (raw resend) handlers ---
 
     async def method_request_clone(self, params: dict[str, Any]) -> dict[str, Any]:

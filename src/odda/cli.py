@@ -23,10 +23,14 @@ app = typer.Typer(
 browser_app = typer.Typer(name="browser", help="Browser management commands")
 tabs_app = typer.Typer(name="tabs", help="Tab management commands")
 request_app = typer.Typer(name="request", help="Raw HTTP request commands")
+userscript_app = typer.Typer(
+    name="userscript", help="Manage userscripts that auto-run on every page"
+)
 
 app.add_typer(browser_app)
 app.add_typer(tabs_app)
 app.add_typer(request_app)
+app.add_typer(userscript_app)
 
 
 def _output_json(data: Any) -> None:
@@ -357,6 +361,56 @@ def request_send(
             },
         )
     )
+
+
+@userscript_app.command("install")
+def userscript_install(
+    ctx: typer.Context,
+    name: str = typer.Option(..., "--name", help="Name for the userscript"),
+    file: Path | None = typer.Option(
+        None, "--file", "-f", help="JavaScript file to install"
+    ),
+    source: str | None = typer.Option(
+        None,
+        "--source",
+        help="Inline JavaScript source (mutually exclusive with --file)",
+    ),
+) -> None:
+    """Install a userscript from a file or inline source.
+
+    The script runs at document_start in the main world on every page,
+    before the page's own scripts. Overwrites any existing userscript
+    of the same name.
+    """
+    if file is not None and source is not None:
+        _output_json({"error": "Provide either --file or --source, not both"})
+        raise typer.Exit(code=1)
+    if file is None and source is None:
+        _output_json({"error": "Provide --file <path> or --source <js>"})
+        raise typer.Exit(code=1)
+    if file is not None:
+        if not file.is_file():
+            _output_json({"error": f"File not found: {file}"})
+            raise typer.Exit(code=1)
+        payload: dict[str, Any] = {"name": name, "file": str(file)}
+    else:
+        payload = {"name": name, "source": source}
+    _run_coro(_client(ctx).call("userscript/install", payload))
+
+
+@userscript_app.command("list")
+def userscript_list(ctx: typer.Context) -> None:
+    """List installed userscripts."""
+    _run_coro(_client(ctx).call("userscript/list"))
+
+
+@userscript_app.command("remove")
+def userscript_remove(
+    ctx: typer.Context,
+    name: str = typer.Argument(..., help="Name of the userscript to remove"),
+) -> None:
+    """Remove a userscript."""
+    _run_coro(_client(ctx).call("userscript/remove", {"name": name}))
 
 
 def main() -> None:

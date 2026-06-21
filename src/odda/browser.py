@@ -1,5 +1,6 @@
 """Browser automation module using patchright (Playwright)."""
 
+import logging
 import shutil
 import tempfile
 import time
@@ -14,6 +15,10 @@ from patchright.async_api import (
     Playwright,
     async_playwright,
 )
+
+from odda import userscript as userscript_mod
+
+logger = logging.getLogger(__name__)
 
 _BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
 
@@ -79,6 +84,8 @@ class BrowserInstance:
         self.page = page
         self._script_map: dict[str, str] = {}
         self._cdp_session: CDPSession | None = None
+        self._browser_cdp_session: CDPSession | None = None
+        self._extension_id: str | None = None
 
         self.page.on("framenavigated", self._on_frame_navigated)
 
@@ -112,6 +119,47 @@ class BrowserInstance:
                 await self._cdp_session.detach()
             self._cdp_session = None
         await self._setup_cdp_session()
+
+    async def _load_userscript_extension(self) -> str | None:
+        """Load the userscript extension into this browser via CDP.
+
+        Creates a browser-level CDP session and calls
+        ``Extensions.loadUnpacked``. The extension's content script runs at
+        ``document_start`` in the MAIN world on every page.
+
+        Returns:
+            The extension ID, or None if loading failed.
+        """
+        if self._browser_cdp_session is None:
+            browser = self.context.browser
+            if browser is None:
+                return None
+            self._browser_cdp_session = await browser.new_browser_cdp_session()
+        ext_path = str(userscript_mod.sync_extension())
+        try:
+            resp = await self._browser_cdp_session.send(
+                "Extensions.loadUnpacked", {"path": ext_path}
+            )
+        except Exception as exc:
+            logger.warning("Failed to load userscript extension: %s", exc)
+            return None
+        ext_id = resp.get("id")
+        self._extension_id = ext_id
+        return ext_id
+
+    async def _reload_userscript_extension(self) -> str | None:
+        """Reload the userscript extension: uninstall old, load new.
+
+        Returns:
+            The new extension ID, or None if loading failed.
+        """
+        if self._browser_cdp_session is not None and self._extension_id:
+            with suppress(Exception):
+                await self._browser_cdp_session.send(
+                    "Extensions.uninstall", {"id": self._extension_id}
+                )
+            self._extension_id = None
+        return await self._load_userscript_extension()
 
     async def _close(self) -> None:
         """Close the browser context and release resources."""
@@ -224,11 +272,14 @@ class BrowserInstance:
     async def eval_js(self, js_code: str) -> Any:
         """Execute JavaScript in the active tab.
 
+        Runs in the page's main world (``isolated_context=False``) so it
+        can read ``window`` globals set by userscripts and the page itself.
+
         Returns:
             Result of the evaluation (Playwright handles promise resolution).
         """
         try:
-            return await self.page.evaluate(js_code)
+            return await self.page.evaluate(js_code, isolated_context=False)
         except Exception as e:
             return f"JavaScript error: {e!s}"
 
@@ -312,12 +363,14 @@ class BrowserManager:
             args=[
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--enable-unsafe-extension-debugging",
             ],
         )
         page = context.pages[0] if context.pages else await context.new_page()
 
         instance = BrowserInstance(browser_id, playwright, context, page)
         await instance._setup_cdp_session()  # noqa: SLF001
+        await instance._load_userscript_extension()  # noqa: SLF001
         self._instances[browser_id] = instance
         self._active_browser_id = browser_id
         return instance
@@ -427,3 +480,25 @@ class BrowserManager:
         """List JS event listeners in the active browser tab."""
         inst = await self._ensure_browser()
         return await inst.list_event_listeners()
+
+    async def install_userscript(self, name: str, source: str) -> dict[str, Any]:
+        """Install a userscript and reload the extension on all open browsers."""
+        result = userscript_mod.install(name, source)
+        if self._active_browser_id is not None:
+            inst = self._instances[self._active_browser_id]
+            ext_id = await inst._reload_userscript_extension()  # noqa: SLF001
+            result["extension_id"] = ext_id
+        return result
+
+    async def remove_userscript(self, name: str) -> dict[str, Any]:
+        """Remove a userscript and reload the extension on all open browsers."""
+        result = userscript_mod.remove(name)
+        if self._active_browser_id is not None:
+            inst = self._instances[self._active_browser_id]
+            ext_id = await inst._reload_userscript_extension()  # noqa: SLF001
+            result["extension_id"] = ext_id
+        return result
+
+    def list_userscripts(self) -> list[dict[str, Any]]:
+        """List all installed userscripts from disk."""
+        return userscript_mod.list_scripts()
