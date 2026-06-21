@@ -43,7 +43,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 ## Navigation and page interaction
 
 - `odda navigate <url> [--new-tab]` — Navigate the active browser. If no browser is active, one is opened automatically and reported in the `auto_opened` field.
-- `odda eval "<js>"` — Execute JavaScript in the active tab and return the result.
+- `odda eval "<js>"` — Execute JavaScript in the active tab and return the result. Returned Promises are awaited automatically: `fetch(url).then(r => r.status)` returns `200`, not a Promise object. Return a serializable value from async expressions — bare `fetch(url)` returns `{}` because the resolved `Response` is not JSON-serializable; chain `.then(r => r.text())` or similar to extract a serializable value.
 - `odda eval --file <path>` — Load JavaScript from a file and execute it. Useful for multi-line scripts with comments; avoids shell-escaping headaches. Mutually exclusive with the inline argument.
 - `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
 - `odda event-listeners` — List JavaScript event listeners attached to `window` and `document`.
