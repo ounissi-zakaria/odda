@@ -21,7 +21,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | List tabs                   | `odda tabs list` or `odda tabs list --browser-id <id>`   |
 | Switch tab                  | `odda switch-tab --browser-id <id> --index <n>`          |
 | Navigate                    | `odda navigate <url>` or `odda navigate <url> --new-tab` |
-| Run JavaScript              | `odda eval "<js>"`                                       |
+| Run JavaScript              | `odda eval "<js>"` or `odda eval --file <path>`           |
 | Screenshot                  | `odda screenshot`                                        |
 | List event listeners        | `odda event-listeners`                                   |
 | Read server logs            | `odda logs [--follow] [--n N]`                           |
@@ -44,6 +44,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 
 - `odda navigate <url> [--new-tab]` — Navigate the active browser. If no browser is active, one is opened automatically and reported in the `auto_opened` field.
 - `odda eval "<js>"` — Execute JavaScript in the active tab and return the result.
+- `odda eval --file <path>` — Load JavaScript from a file and execute it. Useful for multi-line scripts with comments; avoids shell-escaping headaches. Mutually exclusive with the inline argument.
 - `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
 - `odda event-listeners` — List JavaScript event listeners attached to `window` and `document`.
 

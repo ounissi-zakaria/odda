@@ -218,9 +218,30 @@ def navigate(
 @app.command("eval")
 def eval_js(
     ctx: typer.Context,
-    js: str = typer.Argument(..., help="JavaScript code to execute"),
+    js: str | None = typer.Argument(None, help="JavaScript code to execute"),
+    file: Path | None = typer.Option(
+        None,
+        "--file",
+        "-f",
+        help="Read JavaScript from a file instead of the inline argument",
+    ),
 ) -> None:
-    """Execute JavaScript in the active browser tab."""
+    """Execute JavaScript in the active browser tab.
+
+    Pass JS inline as an argument, or use --file <path> to load a multi-line
+    script from a file. The two are mutually exclusive.
+    """
+    if file is not None and js is not None:
+        _output_json({"error": "Provide either inline JS or --file, not both"})
+        raise typer.Exit(code=1)
+    if file is None and js is None:
+        _output_json({"error": "Provide inline JS or --file <path>"})
+        raise typer.Exit(code=1)
+    if file is not None:
+        if not file.is_file():
+            _output_json({"error": f"File not found: {file}"})
+            raise typer.Exit(code=1)
+        js = file.read_text(encoding="utf-8")
     _run_coro(_client(ctx).call("eval", {"js": js}))
 
 

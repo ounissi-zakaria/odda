@@ -166,6 +166,13 @@ start_listener_http_server() {
 </body>
 </html>
 EOF
+    cat > "$TMPDIR/listener_http/eval.js" <<'EOF'
+// multi-line script with comments
+(() => {
+  const title = document.title;
+  return { title, ok: true };
+})()
+EOF
     python3 -m http.server 8766 --bind 127.0.0.1 --directory "$TMPDIR/listener_http" > "$TMPDIR/listener_http_server.log" 2>&1 &
     LISTENER_HTTP_PID=$!
     sleep 1
@@ -220,6 +227,35 @@ expect_json "browser list" "$ODDA_BIN" --socket "$SOCKET" browser list
 expect_json "tabs list" "$ODDA_BIN" --socket "$SOCKET" tabs list
 expect_json "navigate" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
 expect_json "eval" "$ODDA_BIN" --socket "$SOCKET" eval "document.title"
+expect_json "eval --file" "$ODDA_BIN" --socket "$SOCKET" eval --file "$TMPDIR/listener_http/eval.js"
+# eval --file error cases
+echo ">>> eval with neither inline nor --file should fail"
+if "$ODDA_BIN" --socket "$SOCKET" eval 2>&1 | grep -q '"error"'; then
+    echo "[OK]"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected error when no JS provided"
+    FAILED=$((FAILED + 1))
+fi
+echo
+echo ">>> eval with both inline and --file should fail"
+if "$ODDA_BIN" --socket "$SOCKET" eval "1" --file "$TMPDIR/listener_http/eval.js" 2>&1 | grep -q '"error"'; then
+    echo "[OK]"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected error when both inline and --file provided"
+    FAILED=$((FAILED + 1))
+fi
+echo
+echo ">>> eval --file with missing file should fail"
+if "$ODDA_BIN" --socket "$SOCKET" eval --file "$TMPDIR/nonexistent.js" 2>&1 | grep -q '"error"'; then
+    echo "[OK]"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected error for missing file"
+    FAILED=$((FAILED + 1))
+fi
+echo
 expect_json "screenshot" "$ODDA_BIN" --socket "$SOCKET" screenshot
 assert_event_listeners
 expect_json "switch-tab" "$ODDA_BIN" --socket "$SOCKET" switch-tab --browser-id "$BROWSER_ID" --index 0
