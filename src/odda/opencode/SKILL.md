@@ -22,6 +22,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Switch tab                  | `odda switch-tab --browser-id <id> --index <n>`          |
 | Navigate                    | `odda navigate <url> [--new-tab] [--headless]`           |
 | Run JavaScript              | `odda eval "<js>"` or `odda eval --file <path>`          |
+| Wait for a JS condition     | `odda wait-for "<expr>" [--timeout N]`                    |
 | Screenshot                  | `odda screenshot`                                        |
 | List event listeners        | `odda event-listeners`                                   |
 | Install a userscript        | `odda userscript install --name <name> --file <path>`    |
@@ -48,6 +49,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 - `odda navigate <url> [--new-tab] [--headless]` — Navigate the active browser. If no browser is active, one is opened automatically and reported in the `auto_opened` field. `--headless` auto-opens a headless browser.
 - `odda eval "<js>"` — Execute JavaScript in the active tab and return the result. Returned Promises are awaited automatically: `fetch(url).then(r => r.status)` returns `200`, not a Promise object. Return a serializable value from async expressions — bare `fetch(url)` returns `{}` because the resolved `Response` is not JSON-serializable; chain `.then(r => r.text())` or similar to extract a serializable value.
 - `odda eval --file <path>` — Load JavaScript from a file and execute it. Useful for multi-line scripts with comments; avoids shell-escaping headaches. Mutually exclusive with the inline argument.
+- `odda wait-for "<expr>" [--timeout N]` — Poll a JS expression until it's truthy or the timeout (default 30s) is reached. Uses Playwright's `wait_for_function`, which polls in-browser with no round-trips. Runs in the main world, so it sees page globals and userscript-injected helpers. Returns the truthy value on success; errors with non-zero exit code on timeout. Example: `odda wait-for "document.querySelector('.sdk-ready')" --timeout 10`.
 - `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
 - `odda event-listeners` — List JavaScript event listeners attached to `window` and `document`.
 

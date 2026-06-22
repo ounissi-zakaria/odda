@@ -259,6 +259,49 @@ echo
 expect_json "screenshot" "$ODDA_BIN" --socket "$SOCKET" screenshot
 assert_event_listeners
 
+# wait-for tests
+echo "=== wait-for tests ==="
+# Wait for a condition that's already true
+WAIT_OUT=$("$ODDA_BIN" --socket "$SOCKET" wait-for "document.title" --timeout 5 2>&1)
+echo ">>> wait-for (already true)"
+echo "$WAIT_OUT"
+if echo "$WAIT_OUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); exit(0 if d else 1)' 2>/dev/null; then
+    echo "[OK] returned truthy value"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected truthy value"
+    FAILED=$((FAILED + 1))
+fi
+echo
+
+# Wait for a condition that becomes true after a delay
+# Set a timeout that sets a global after 1s
+"$ODDA_BIN" --socket "$SOCKET" eval "setTimeout(() => { window.__waitTest__ = 'arrived'; }, 1000)" > /dev/null 2>&1
+WAIT_OUT2=$("$ODDA_BIN" --socket "$SOCKET" wait-for "window.__waitTest__" --timeout 5 2>&1)
+echo ">>> wait-for (delayed)"
+echo "$WAIT_OUT2"
+if echo "$WAIT_OUT2" | grep -q '"arrived"'; then
+    echo "[OK] waited for delayed value"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected 'arrived'"
+    FAILED=$((FAILED + 1))
+fi
+echo
+
+# Wait-for timeout (condition never becomes true)
+WAIT_OUT3=$("$ODDA_BIN" --socket "$SOCKET" wait-for "window.__never__" --timeout 2 2>&1)
+echo ">>> wait-for (timeout)"
+echo "$WAIT_OUT3"
+if echo "$WAIT_OUT3" | grep -qi "timeout\|error"; then
+    echo "[OK] timed out as expected"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected timeout error"
+    FAILED=$((FAILED + 1))
+fi
+echo
+
 # Userscript tests
 echo "=== Userscript commands ==="
 cat > "$TMPDIR/us_helper.js" <<'EOF'

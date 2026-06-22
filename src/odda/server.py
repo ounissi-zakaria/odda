@@ -147,7 +147,11 @@ class OddaServer:
                 method_name = request["method"]
                 params = request.get("params") or {}
                 request_id = request.get("id")
-                handler = getattr(self, f"method_{method_name.replace('/', '_')}", None)
+                handler = getattr(
+                    self,
+                    f"method_{method_name.replace('/', '_').replace('-', '_')}",
+                    None,
+                )
                 if handler is None:
                     raise rpc.JsonRpcError(
                         rpc.METHOD_NOT_FOUND, f"Method not found: {method_name}"
@@ -210,6 +214,18 @@ class OddaServer:
     async def method_eval(self, params: dict[str, Any]) -> str:
         """Evaluate JavaScript in the active browser tab."""
         return await self.browser.eval_js(params["js"])
+
+    async def method_wait_for(self, params: dict[str, Any]) -> Any:
+        """Poll a JS expression until truthy or timeout.
+
+        Params:
+            expression: JS expression to poll.
+            timeout: Timeout in seconds (default 30).
+        """
+        timeout_s = float(params.get("timeout", 30.0))
+        return await self.browser.wait_for(
+            params["expression"], timeout_ms=timeout_s * 1000
+        )
 
     async def method_screenshot(self, _params: dict[str, Any]) -> str:
         """Capture a screenshot of the active browser viewport."""
