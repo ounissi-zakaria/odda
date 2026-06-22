@@ -86,7 +86,7 @@ Commands:
 
 Flags for `send`:
 
-- `--fix-content-length` — Recompute `Content-Length` from the body and overwrite the header **in the bytes sent on the wire** (the `request` file on disk is untouched). Use this when you've edited the body and want the framing auto-corrected. Skip it for Content-Length smuggling/differential tests where the wrong value is the point.
+- `--fix-content-length` — Recompute `Content-Length` from the body and overwrite the header (the `request` file on disk is untouched). Use this when you've edited the body and want the framing auto-corrected. Skip it for Content-Length smuggling/differential tests where the wrong value is the point.
 - `--timeout <seconds>` — Total timeout for connect + reads (default 30). On timeout, a flow record is written with whatever was received plus an `error` file.
 - `--insecure` — Skip TLS certificate verification. Default verifies.
 
