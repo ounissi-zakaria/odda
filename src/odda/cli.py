@@ -261,6 +261,28 @@ def eval_js(
     _run_coro(_client(ctx).call("eval", {"js": js}))
 
 
+@app.command("wait-for")
+def wait_for(
+    ctx: typer.Context,
+    expression: str = typer.Argument(
+        ..., help="JavaScript expression to poll until truthy"
+    ),
+    timeout: float = typer.Option(
+        30.0, "--timeout", help="Timeout in seconds (default 30)"
+    ),
+) -> None:
+    """Poll a JS expression until it's truthy or timeout.
+
+    Uses Playwright's wait_for_function, which polls in-browser. Runs in
+    the main world, so it can see page globals and userscript-injected
+    helpers. Returns the truthy value on success; errors with non-zero
+    exit on timeout.
+    """
+    _run_coro(
+        _client(ctx).call("wait-for", {"expression": expression, "timeout": timeout})
+    )
+
+
 @app.command()
 def screenshot(ctx: typer.Context) -> None:
     """Capture a screenshot of the current browser viewport."""

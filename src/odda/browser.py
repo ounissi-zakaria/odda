@@ -283,6 +283,30 @@ class BrowserInstance:
         except Exception as e:
             return f"JavaScript error: {e!s}"
 
+    async def wait_for(self, expression: str, *, timeout_ms: float) -> Any:
+        """Poll a JS expression until truthy or timeout.
+
+        Uses ``page.wait_for_function``, which runs in the main world and
+        polls in-browser (no Python round-trips).
+
+        Args:
+            expression: JS expression to evaluate. Wrapped as an arrow
+                function so it's polled repeatedly.
+            timeout_ms: Timeout in milliseconds.
+
+        Returns:
+            The truthy value of the expression (JSON-serialized).
+
+        Raises:
+            TimeoutError: If the expression is not truthy within timeout.
+        """
+        fn = f"() => {{ const v = ({expression}); return v ? v : false; }}"
+        handle = await self.page.wait_for_function(fn, timeout=timeout_ms)
+        try:
+            return await handle.json_value()
+        except Exception:
+            return str(handle)
+
     async def screenshot(self) -> str:
         """Capture screenshot of the current viewport.
 
@@ -477,6 +501,11 @@ class BrowserManager:
         """Execute JavaScript in the active browser tab."""
         inst = await self._ensure_browser()
         return await inst.eval_js(js_code)
+
+    async def wait_for(self, expression: str, *, timeout_ms: float) -> Any:
+        """Poll a JS expression until truthy or timeout in the active browser tab."""
+        inst = await self._ensure_browser()
+        return await inst.wait_for(expression, timeout_ms=timeout_ms)
 
     async def screenshot(self) -> str:
         """Capture screenshot of the active browser viewport."""
