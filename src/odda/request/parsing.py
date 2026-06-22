@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import re
 
 from odda.request.types import ParsedRequest
 
@@ -74,37 +74,35 @@ def parse_request(data: bytes) -> ParsedRequest:
     )
 
 
-def fix_content_length(parsed: ParsedRequest) -> ParsedRequest:
-    """Return a new :class:`ParsedRequest` with ``Content-Length`` corrected.
+def fix_content_length_bytes(data: bytes) -> bytes:
+    r"""Fix ``Content-Length`` in raw HTTP request bytes in-place.
 
-    Replaces every ``Content-Length`` header value with ``len(body)``. If no
+    Replaces the value of every ``Content-Length`` header with the actual
+    body length, preserving the original header name casing. If no
     ``Content-Length`` header exists and the body is non-empty, one is
-    appended. Sets ``has_content_length`` to ``True`` when a body exists.
+    inserted before the blank line separator. All other bytes are preserved.
+
+    Args:
+        data: Raw HTTP request bytes.
+
+    Returns:
+        New bytes with ``Content-Length`` corrected.
     """
-    cl_value = str(len(parsed.body))
-    new_headers: list[tuple[str, str]] = []
-    found_cl = False
-    for name, value in parsed.headers:
-        if name.lower() == "content-length":
-            new_headers.append((name, cl_value))
-            found_cl = True
-        else:
-            new_headers.append((name, value))
-    if not found_cl and parsed.body:
-        new_headers.append(("Content-Length", cl_value))
+    sep = b"\r\n\r\n"
+    idx = data.find(sep)
+    head = data[:idx] if idx != -1 else data
+    body = data[idx + len(sep) :] if idx != -1 else b""
+    cl_value = str(len(body)).encode("ascii")
 
-    return replace(
-        parsed,
-        headers=new_headers,
-        has_content_length=found_cl or bool(parsed.body),
-    )
+    cl_pattern = re.compile(rb"(?im)^(content-length:)\s*\d+\s*$")
 
+    if cl_pattern.search(head):
+        new_head = cl_pattern.sub(rb"\1 " + cl_value, head)
+    elif body:
+        new_head = head + b"\r\nContent-Length: " + cl_value
+    else:
+        new_head = head
 
-def build_request_bytes(parsed: ParsedRequest) -> bytes:
-    """Reconstruct raw HTTP request bytes from a :class:`ParsedRequest`."""
-    lines = [f"{parsed.method} {parsed.path} {parsed.version}".encode("ascii")]
-    for name, value in parsed.headers:
-        lines.append(f"{name}: {value}".encode("ascii", errors="replace"))
-    lines.append(b"")
-    lines.append(b"")
-    return b"\r\n".join(lines) + parsed.body
+    if idx == -1:
+        return new_head
+    return new_head + b"\r\n\r\n" + body

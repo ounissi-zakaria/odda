@@ -11,11 +11,7 @@ from odda import flowstore
 from odda.flowstore import RequestMeta
 from odda.request.h1 import send_h1
 from odda.request.h2 import send_h2
-from odda.request.parsing import (
-    build_request_bytes,
-    fix_content_length as fix_cl,
-    parse_request,
-)
+from odda.request.parsing import fix_content_length_bytes, parse_request
 from odda.request.response import decode_content_encoding
 from odda.request.storage import read_meta, requests_dir, resolve_name_dir, write_meta
 from odda.request.types import REQUEST_FILENAME, EditableMeta
@@ -149,8 +145,7 @@ async def send(
     parsed = parse_request(request_bytes)
 
     if fix_content_length:
-        parsed = fix_cl(parsed)
-        request_bytes = build_request_bytes(parsed)
+        request_bytes = fix_content_length_bytes(request_bytes)
 
     is_h2 = parsed.version.upper().startswith("HTTP/2")
 
