@@ -173,6 +173,17 @@ EOF
   return { title, ok: true };
 })()
 EOF
+    cat > "$TMPDIR/listener_http/dialogs.html" <<'EOF'
+<!DOCTYPE html>
+<html>
+<head><title>Dialog Test</title></head>
+<body>
+<script>
+  // Empty page; tests trigger dialogs via odda eval.
+</script>
+</body>
+</html>
+EOF
     python3 -m http.server 8766 --bind 127.0.0.1 --directory "$TMPDIR/listener_http" > "$TMPDIR/listener_http_server.log" 2>&1 &
     LISTENER_HTTP_PID=$!
     sleep 1
@@ -340,6 +351,62 @@ else
     FAILED=$((FAILED + 1))
 fi
 echo
+# Default dialog interceptor test
+echo "=== Default dialog interceptor ==="
+expect_json "navigate (dialogs page)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/dialogs.html
+sleep 1
+echo ">>> eval default dialog interceptor present"
+INTERCEPTOR_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__oddaDialogInterceptorInstalled)" 2>&1)
+echo "$INTERCEPTOR_OUT"
+if [ "$INTERCEPTOR_OUT" = '"true"' ]; then
+    echo "[OK] dialog interceptor installed"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected true, got $INTERCEPTOR_OUT"
+    FAILED=$((FAILED + 1))
+fi
+echo
+echo ">>> trigger print (should not block)"
+PRINT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.print(); 'print-ok'" 2>&1)
+echo "$PRINT_OUT"
+if [ "$PRINT_OUT" = '"print-ok"' ]; then
+    echo "[OK] print did not block"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected print-ok, got $PRINT_OUT"
+    FAILED=$((FAILED + 1))
+fi
+echo
+echo ">>> trigger alert/confirm/prompt and check __oddaDialogs"
+ALERT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.alert('alert-msg'); 'alert-ok'" 2>&1)
+echo "$ALERT_OUT"
+CONFIRM_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.confirm('confirm-msg'); 'confirm-ok'" 2>&1)
+echo "$CONFIRM_OUT"
+PROMPT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.prompt('prompt-msg', 'prompt-default'); 'prompt-ok'" 2>&1)
+echo "$PROMPT_OUT"
+echo ">>> check __oddaDialogs entries"
+DIALOGS_COMPARE=$("$ODDA_BIN" --socket "$SOCKET" eval "
+(() => {
+  const actual = window.__oddaDialogs.slice(-4).map(e => ({type: e.type, message: e.message, defaultValue: e.defaultValue}));
+  const expected = [
+    {type: 'print'},
+    {type: 'alert', message: 'alert-msg'},
+    {type: 'confirm', message: 'confirm-msg'},
+    {type: 'prompt', message: 'prompt-msg', defaultValue: 'prompt-default'},
+  ];
+  return JSON.stringify(actual) === JSON.stringify(expected) ? 'OK' : 'DIFF: ' + JSON.stringify(actual);
+})()
+" 2>&1)
+echo "$DIALOGS_COMPARE"
+if [ "$DIALOGS_COMPARE" = '"OK"' ]; then
+    echo "[OK] captured print/alert/confirm/prompt in order"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] dialog list mismatch"
+    FAILED=$((FAILED + 1))
+fi
+echo
+
 # Remove and verify it's gone after navigate
 expect_json "userscript remove" "$ODDA_BIN" --socket "$SOCKET" userscript remove helper
 expect_json "userscript list (empty)" "$ODDA_BIN" --socket "$SOCKET" userscript list

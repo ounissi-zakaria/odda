@@ -59,6 +59,8 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 
 Userscripts are stored on disk under `.odda/userscripts/<name>/script.js`. A Chrome extension is generated at `.odda/userscripts-extension/` with a `content.js` that inlines all installed userscripts (each wrapped in try/catch). The extension is loaded via CDP `Extensions.loadUnpacked` when a browser is opened.
 
+odda also ships built-in default userscripts that are always injected before any installed userscripts. Currently this includes a dialog interceptor that records calls to `window.print`, `window.alert`, `window.confirm`, and `window.prompt` in `window.__oddaDialogs`.
+
 Commands:
 
 - `odda userscript install --name <name> --file <path>` — Install a JS file as a userscript. Overwrites any existing userscript of the same name. If a browser is open, the extension is reloaded immediately. Alternatively, use `--source "<js>"` for inline source (mutually exclusive with `--file`).
@@ -70,6 +72,7 @@ Behavior notes:
 - **Before page scripts.** Userscripts run at `document_start`, so `window` modifications are visible to the page before any of its own scripts execute. This is the key advantage over `odda eval` (which runs after navigation).
 - **All tabs and frames.** The extension's content script matches `<all_urls>` and runs in all frames (`all_frames: true`). There is no per-browser or per-tab scoping.
 - **Idempotent re-injection.** Scripts run on every navigation. Write them to be idempotent (e.g., guard with `if (window.__myHelper__) return;`).
+- **Dialog interceptor.** `odda eval "window.__oddaDialogs"` returns an array of captured dialog/print events. Each entry has `{type, url, timestamp, stack, result?}` plus `message` and `defaultValue` when applicable. `type` is one of `print`, `alert`, `confirm`, `prompt`. `message` is present for `alert`/`confirm`/`prompt`. `defaultValue` is present for `prompt`. `result` is recorded for `confirm`/`prompt`. Use this to inspect what modal dialogs or print calls a page triggered during automation.
 
 ## Raw request commands
 
