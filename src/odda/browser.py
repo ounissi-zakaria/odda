@@ -386,6 +386,10 @@ class BrowserManager:
             headless=headless,
             proxy=proxy_config,
             ignore_https_errors=True,
+            ignore_default_args=[
+                "--password-store=basic",
+                "--use-mock-keychain",
+            ],
             args=[
                 "--no-first-run",
                 "--no-default-browser-check",
