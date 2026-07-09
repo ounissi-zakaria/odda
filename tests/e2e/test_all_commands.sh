@@ -96,6 +96,28 @@ expect_json() {
     echo
 }
 
+expect_error() {
+    local label="$1"
+    shift
+    echo ">>> $label"
+    if output=$("$@" 2>&1); then
+        echo "$output"
+        echo "[FAIL] expected non-zero exit, got success"
+        FAILED=$((FAILED + 1))
+    else
+        if echo "$output" | grep -q '"error"'; then
+            echo "$output"
+            echo "[OK] non-zero exit with JSON error"
+            PASSED=$((PASSED + 1))
+        else
+            echo "$output"
+            echo "[FAIL] non-zero exit but no JSON error"
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+    echo
+}
+
 proxy_url() {
     "$ODDA_BIN" --socket "$SOCKET" proxy-url
 }
@@ -119,7 +141,7 @@ assert_tab_count() {
 assert_browser_count() {
     local expected="$1"
     local output
-    output=$("$ODDA_BIN" --socket "$SOCKET" browser list)
+    output=$("$ODDA_BIN" --socket "$SOCKET" tabs list)
     local count
     count=$(echo "$output" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
     if [ "$count" -eq "$expected" ]; then
@@ -133,6 +155,7 @@ assert_browser_count() {
 }
 
 LAST_BROWSER_ID=""
+LAST_TAB_ID=""
 
 open_browser() {
     local label="$1"
@@ -140,12 +163,32 @@ open_browser() {
     output=$("$ODDA_BIN" --socket "$SOCKET" browser open --headless 2>&1)
     echo ">>> $label"
     echo "$output"
-    LAST_BROWSER_ID=$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin).split()[1])')
+    LAST_BROWSER_ID=$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["browser_id"])')
+    LAST_TAB_ID=$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tab_id"])')
     if [ -n "$LAST_BROWSER_ID" ]; then
-        echo "[OK] browser id = $LAST_BROWSER_ID"
+        echo "[OK] browser id = $LAST_BROWSER_ID, initial tab id = $LAST_TAB_ID"
         PASSED=$((PASSED + 1))
     else
-        echo "[FAIL] could not parse browser ID"
+        echo "[FAIL] could not parse browser/tab IDs"
+        FAILED=$((FAILED + 1))
+    fi
+    echo
+}
+
+open_tab() {
+    local label="$1"
+    local browser_id="$2"
+    shift 2
+    local output
+    output=$("$ODDA_BIN" --socket "$SOCKET" tabs open --browser-id "$browser_id" "$@" 2>&1)
+    echo ">>> $label"
+    echo "$output"
+    NEW_TAB_ID=$(echo "$output" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tab_id"])')
+    if [ -n "$NEW_TAB_ID" ]; then
+        echo "[OK] new tab id = $NEW_TAB_ID"
+        PASSED=$((PASSED + 1))
+    else
+        echo "[FAIL] could not parse tab_id"
         FAILED=$((FAILED + 1))
     fi
     echo
@@ -190,8 +233,10 @@ EOF
 }
 
 assert_event_listeners() {
+    local browser_id="$1"
+    local tab_id="$2"
     local output
-    output=$("$ODDA_BIN" --socket "$SOCKET" event-listeners 2>&1)
+    output=$("$ODDA_BIN" --socket "$SOCKET" event-listeners --browser-id "$browser_id" --tab-id "$tab_id" 2>&1)
     echo ">>> event-listeners (with listeners)"
     echo "$output"
     local count
@@ -234,14 +279,14 @@ echo "=== Browser commands ==="
 start_listener_http_server
 open_browser "browser open"
 BROWSER_ID=$LAST_BROWSER_ID
-expect_json "browser list" "$ODDA_BIN" --socket "$SOCKET" browser list
+TAB_ID=$LAST_TAB_ID
 expect_json "tabs list" "$ODDA_BIN" --socket "$SOCKET" tabs list
-expect_json "navigate" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
-expect_json "eval" "$ODDA_BIN" --socket "$SOCKET" eval "document.title"
-expect_json "eval --file" "$ODDA_BIN" --socket "$SOCKET" eval --file "$TMPDIR/listener_http/eval.js"
+expect_json "navigate" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/ --browser-id "$BROWSER_ID" --tab-id "$TAB_ID"
+expect_json "eval" "$ODDA_BIN" --socket "$SOCKET" eval "document.title" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID"
+expect_json "eval --file" "$ODDA_BIN" --socket "$SOCKET" eval --file "$TMPDIR/listener_http/eval.js" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID"
 # eval --file error cases
 echo ">>> eval with neither inline nor --file should fail"
-if "$ODDA_BIN" --socket "$SOCKET" eval 2>&1 | grep -q '"error"'; then
+if "$ODDA_BIN" --socket "$SOCKET" eval --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1 | grep -q '"error"'; then
     echo "[OK]"
     PASSED=$((PASSED + 1))
 else
@@ -250,7 +295,7 @@ else
 fi
 echo
 echo ">>> eval with both inline and --file should fail"
-if "$ODDA_BIN" --socket "$SOCKET" eval "1" --file "$TMPDIR/listener_http/eval.js" 2>&1 | grep -q '"error"'; then
+if "$ODDA_BIN" --socket "$SOCKET" eval "1" --file "$TMPDIR/listener_http/eval.js" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1 | grep -q '"error"'; then
     echo "[OK]"
     PASSED=$((PASSED + 1))
 else
@@ -259,7 +304,7 @@ else
 fi
 echo
 echo ">>> eval --file with missing file should fail"
-if "$ODDA_BIN" --socket "$SOCKET" eval --file "$TMPDIR/nonexistent.js" 2>&1 | grep -q '"error"'; then
+if "$ODDA_BIN" --socket "$SOCKET" eval --file "$TMPDIR/nonexistent.js" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1 | grep -q '"error"'; then
     echo "[OK]"
     PASSED=$((PASSED + 1))
 else
@@ -267,13 +312,13 @@ else
     FAILED=$((FAILED + 1))
 fi
 echo
-expect_json "screenshot" "$ODDA_BIN" --socket "$SOCKET" screenshot
-assert_event_listeners
+expect_json "screenshot" "$ODDA_BIN" --socket "$SOCKET" screenshot --browser-id "$BROWSER_ID" --tab-id "$TAB_ID"
+assert_event_listeners "$BROWSER_ID" "$TAB_ID"
 
 # wait-for tests
 echo "=== wait-for tests ==="
 # Wait for a condition that's already true
-WAIT_OUT=$("$ODDA_BIN" --socket "$SOCKET" wait-for "document.title" --timeout 5 2>&1)
+WAIT_OUT=$("$ODDA_BIN" --socket "$SOCKET" wait-for "document.title" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" --timeout 5 2>&1)
 echo ">>> wait-for (already true)"
 echo "$WAIT_OUT"
 if echo "$WAIT_OUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); exit(0 if d else 1)' 2>/dev/null; then
@@ -287,8 +332,8 @@ echo
 
 # Wait for a condition that becomes true after a delay
 # Set a timeout that sets a global after 1s
-"$ODDA_BIN" --socket "$SOCKET" eval "setTimeout(() => { window.__waitTest__ = 'arrived'; }, 1000)" > /dev/null 2>&1
-WAIT_OUT2=$("$ODDA_BIN" --socket "$SOCKET" wait-for "window.__waitTest__" --timeout 5 2>&1)
+"$ODDA_BIN" --socket "$SOCKET" eval "setTimeout(() => { window.__waitTest__ = 'arrived'; }, 1000)" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" > /dev/null 2>&1
+WAIT_OUT2=$("$ODDA_BIN" --socket "$SOCKET" wait-for "window.__waitTest__" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" --timeout 5 2>&1)
 echo ">>> wait-for (delayed)"
 echo "$WAIT_OUT2"
 if echo "$WAIT_OUT2" | grep -q '"arrived"'; then
@@ -301,7 +346,7 @@ fi
 echo
 
 # Wait-for timeout (condition never becomes true)
-WAIT_OUT3=$("$ODDA_BIN" --socket "$SOCKET" wait-for "window.__never__" --timeout 2 2>&1)
+WAIT_OUT3=$("$ODDA_BIN" --socket "$SOCKET" wait-for "window.__never__" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" --timeout 2 2>&1)
 echo ">>> wait-for (timeout)"
 echo "$WAIT_OUT3"
 if echo "$WAIT_OUT3" | grep -qi "timeout\|error"; then
@@ -321,12 +366,12 @@ if (!window.__usHelperRan__) {
 }
 window.__usHelperRan__ += 1;
 EOF
-expect_json "userscript install" "$ODDA_BIN" --socket "$SOCKET" userscript install --name helper --file "$TMPDIR/us_helper.js"
+expect_json "userscript install" "$ODDA_BIN" --socket "$SOCKET" userscript install --name helper --browser-id "$BROWSER_ID" --file "$TMPDIR/us_helper.js"
 expect_json "userscript list" "$ODDA_BIN" --socket "$SOCKET" userscript list
 # Navigate and verify the helper ran at document_start
-expect_json "navigate (with userscript)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
+expect_json "navigate (with userscript)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/ --browser-id "$BROWSER_ID" --tab-id "$TAB_ID"
 sleep 1
-US_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__usHelperRan__)" 2>&1)
+US_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__usHelperRan__)" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo ">>> userscript ran after navigate"
 echo "$US_OUT"
 if [ "$US_OUT" = '"1"' ]; then
@@ -338,9 +383,9 @@ else
 fi
 echo
 # Navigate again and verify re-injection
-expect_json "navigate again (re-inject)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
+expect_json "navigate again (re-inject)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/ --browser-id "$BROWSER_ID" --tab-id "$TAB_ID"
 sleep 1
-US_OUT2=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__usHelperRan__)" 2>&1)
+US_OUT2=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__usHelperRan__)" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo ">>> userscript re-injected after second navigate"
 echo "$US_OUT2"
 if [ "$US_OUT2" = '"1"' ]; then
@@ -353,10 +398,10 @@ fi
 echo
 # Default dialog interceptor test
 echo "=== Default dialog interceptor ==="
-expect_json "navigate (dialogs page)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/dialogs.html
+expect_json "navigate (dialogs page)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/dialogs.html --browser-id "$BROWSER_ID" --tab-id "$TAB_ID"
 sleep 1
 echo ">>> eval default dialog interceptor present"
-INTERCEPTOR_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__oddaDialogInterceptorInstalled)" 2>&1)
+INTERCEPTOR_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "String(window.__oddaDialogInterceptorInstalled)" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo "$INTERCEPTOR_OUT"
 if [ "$INTERCEPTOR_OUT" = '"true"' ]; then
     echo "[OK] dialog interceptor installed"
@@ -367,7 +412,7 @@ else
 fi
 echo
 echo ">>> trigger print (should not block)"
-PRINT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.print(); 'print-ok'" 2>&1)
+PRINT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.print(); 'print-ok'" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo "$PRINT_OUT"
 if [ "$PRINT_OUT" = '"print-ok"' ]; then
     echo "[OK] print did not block"
@@ -378,11 +423,11 @@ else
 fi
 echo
 echo ">>> trigger alert/confirm/prompt and check __oddaDialogs"
-ALERT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.alert('alert-msg'); 'alert-ok'" 2>&1)
+ALERT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.alert('alert-msg'); 'alert-ok'" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo "$ALERT_OUT"
-CONFIRM_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.confirm('confirm-msg'); 'confirm-ok'" 2>&1)
+CONFIRM_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.confirm('confirm-msg'); 'confirm-ok'" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo "$CONFIRM_OUT"
-PROMPT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.prompt('prompt-msg', 'prompt-default'); 'prompt-ok'" 2>&1)
+PROMPT_OUT=$("$ODDA_BIN" --socket "$SOCKET" eval "window.prompt('prompt-msg', 'prompt-default'); 'prompt-ok'" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo "$PROMPT_OUT"
 echo ">>> check __oddaDialogs entries"
 DIALOGS_COMPARE=$("$ODDA_BIN" --socket "$SOCKET" eval "
@@ -396,7 +441,7 @@ DIALOGS_COMPARE=$("$ODDA_BIN" --socket "$SOCKET" eval "
   ];
   return JSON.stringify(actual) === JSON.stringify(expected) ? 'OK' : 'DIFF: ' + JSON.stringify(actual);
 })()
-" 2>&1)
+" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo "$DIALOGS_COMPARE"
 if [ "$DIALOGS_COMPARE" = '"OK"' ]; then
     echo "[OK] captured print/alert/confirm/prompt in order"
@@ -408,11 +453,11 @@ fi
 echo
 
 # Remove and verify it's gone after navigate
-expect_json "userscript remove" "$ODDA_BIN" --socket "$SOCKET" userscript remove helper
+expect_json "userscript remove" "$ODDA_BIN" --socket "$SOCKET" userscript remove helper --browser-id "$BROWSER_ID"
 expect_json "userscript list (empty)" "$ODDA_BIN" --socket "$SOCKET" userscript list
-expect_json "navigate (no userscript)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/
+expect_json "navigate (no userscript)" "$ODDA_BIN" --socket "$SOCKET" navigate http://127.0.0.1:8766/ --browser-id "$BROWSER_ID" --tab-id "$TAB_ID"
 sleep 1
-US_OUT3=$("$ODDA_BIN" --socket "$SOCKET" eval "String(typeof window.__usHelperRan__)" 2>&1)
+US_OUT3=$("$ODDA_BIN" --socket "$SOCKET" eval "String(typeof window.__usHelperRan__)" --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" 2>&1)
 echo ">>> userscript gone after remove + navigate"
 echo "$US_OUT3"
 if [ "$US_OUT3" = '"undefined"' ]; then
@@ -424,19 +469,102 @@ else
 fi
 echo
 
-expect_json "switch-tab" "$ODDA_BIN" --socket "$SOCKET" switch-tab --browser-id "$BROWSER_ID" --index 0
+# === Targeting model tests ===
+echo "=== Targeting model ==="
+
+# Bad browser_id errors with non-zero exit + JSON error
+expect_error "navigate bad browser_id" "$ODDA_BIN" --socket "$SOCKET" navigate http://x --browser-id 9999 --tab-id 1
+# Bad tab_id errors
+expect_error "navigate bad tab_id" "$ODDA_BIN" --socket "$SOCKET" navigate http://x --browser-id "$BROWSER_ID" --tab-id 9999
+# eval bad tab_id errors
+expect_error "eval bad tab_id" "$ODDA_BIN" --socket "$SOCKET" eval "1" --browser-id "$BROWSER_ID" --tab-id 9999
+# screenshot bad browser_id errors
+expect_error "screenshot bad browser_id" "$ODDA_BIN" --socket "$SOCKET" screenshot --browser-id 9999 --tab-id 1
+# tabs open bad browser_id errors
+expect_error "tabs open bad browser_id" "$ODDA_BIN" --socket "$SOCKET" tabs open --browser-id 9999
+# tabs close bad tab_id errors
+expect_error "tabs close bad tab_id" "$ODDA_BIN" --socket "$SOCKET" tabs close --browser-id "$BROWSER_ID" --tab-id 9999
+# event-listeners bad browser_id errors
+expect_error "event-listeners bad browser_id" "$ODDA_BIN" --socket "$SOCKET" event-listeners --browser-id 9999 --tab-id 1
+
+# === Tab lifecycle tests ===
+echo "=== Tab lifecycle ==="
+
+# Open a new tab (with url) and get its tab_id
+open_tab "tabs open (url)" "$BROWSER_ID" --url http://127.0.0.1:8766/
+TAB2=$NEW_TAB_ID
+assert_tab_count 2
+
+# Open a blank tab
+open_tab "tabs open (blank)" "$BROWSER_ID"
+TAB3=$NEW_TAB_ID
+assert_tab_count 3
+
+# Close one tab and verify tab count drops
+expect_json "tabs close" "$ODDA_BIN" --socket "$SOCKET" tabs close --browser-id "$BROWSER_ID" --tab-id "$TAB2"
+assert_tab_count 2
+
+# Closed tab_id errors on subsequent eval
+expect_error "eval on closed tab" "$ODDA_BIN" --socket "$SOCKET" eval "1" --browser-id "$BROWSER_ID" --tab-id "$TAB2"
+
+# Monotonic: new tab after closes should have a strictly higher id than TAB3
+open_tab "tabs open (after closes)" "$BROWSER_ID" --url http://127.0.0.1:8766/
+TAB4=$NEW_TAB_ID
+echo ">>> monotonic tab_id (TAB4=$TAB4 > TAB3=$TAB3)"
+if [ "$TAB4" -gt "$TAB3" ]; then
+    echo "[OK] new tab_id is strictly higher than previous max"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] tab_id was reused or did not increase (TAB4=$TAB4, TAB3=$TAB3)"
+    FAILED=$((FAILED + 1))
+fi
+echo
+
+# Closed tab_id is not reused: TAB2 should still error
+expect_error "closed tab_id not reused (TAB2)" "$ODDA_BIN" --socket "$SOCKET" eval "1" --browser-id "$BROWSER_ID" --tab-id "$TAB2"
+
+# Close all tabs: browser stays alive with zero tabs
+"$ODDA_BIN" --socket "$SOCKET" tabs close --browser-id "$BROWSER_ID" --tab-id "$TAB_ID" > /dev/null 2>&1
+"$ODDA_BIN" --socket "$SOCKET" tabs close --browser-id "$BROWSER_ID" --tab-id "$TAB3" > /dev/null 2>&1
+"$ODDA_BIN" --socket "$SOCKET" tabs close --browser-id "$BROWSER_ID" --tab-id "$TAB4" > /dev/null 2>&1
+echo ">>> after closing all tabs, tabs list shows empty tabs array"
+ZERO_OUT=$("$ODDA_BIN" --socket "$SOCKET" tabs list --browser-id "$BROWSER_ID" 2>&1)
+echo "$ZERO_OUT"
+ZERO_COUNT=$(echo "$ZERO_OUT" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)[0]["tabs"]))')
+if [ "$ZERO_COUNT" -eq 0 ]; then
+    echo "[OK] browser alive with zero tabs"
+    PASSED=$((PASSED + 1))
+else
+    echo "[FAIL] expected 0 tabs, got $ZERO_COUNT"
+    FAILED=$((FAILED + 1))
+fi
+echo
+
+# Browser can still open a tab after zero tabs
+open_tab "tabs open after zero tabs" "$BROWSER_ID" --url http://127.0.0.1:8766/
+assert_tab_count 1
+
+# Clean up this browser before the multi-browser section
 expect_json "browser close" "$ODDA_BIN" --socket "$SOCKET" browser close "$BROWSER_ID"
 
-# Multiple tabs and browsers
-open_browser "browser open (multi)"
+# === Multiple browsers ===
+echo "=== Multiple browsers ==="
+open_browser "browser open (multi 1)"
 BROWSER_ID_MULTI_1=$LAST_BROWSER_ID
-expect_json "navigate new-tab" "$ODDA_BIN" --socket "$SOCKET" navigate https://example.org --new-tab
-assert_tab_count 2
-open_browser "browser open second"
+TAB_MULTI_1=$LAST_TAB_ID
+expect_json "navigate browser 1 tab" "$ODDA_BIN" --socket "$SOCKET" navigate https://example.org --browser-id "$BROWSER_ID_MULTI_1" --tab-id "$TAB_MULTI_1"
+assert_tab_count 1
+open_browser "browser open (multi 2)"
 BROWSER_ID_MULTI_2=$LAST_BROWSER_ID
 assert_browser_count 2
+# Isolation: operating on browser 1 doesn't affect browser 2
+expect_json "eval browser 1" "$ODDA_BIN" --socket "$SOCKET" eval "document.title" --browser-id "$BROWSER_ID_MULTI_1" --tab-id "$TAB_MULTI_1"
 expect_json "browser close second" "$ODDA_BIN" --socket "$SOCKET" browser close "$BROWSER_ID_MULTI_2"
 expect_json "browser close first multi" "$ODDA_BIN" --socket "$SOCKET" browser close "$BROWSER_ID_MULTI_1"
+
+# === browser_id is monotonic / not reused ===
+echo "=== browser_id not reused ==="
+expect_error "closed browser_id errors (not reused)" "$ODDA_BIN" --socket "$SOCKET" navigate http://x --browser-id "$BROWSER_ID_MULTI_1" --tab-id 1
 
 # Generate a captured flow through the proxy
 echo "=== Capturing an HTTP flow through the proxy ==="
@@ -446,6 +574,7 @@ sleep 1
 
 if curl -s -x "$(proxy_url)" http://127.0.0.1:8765/ > "$TMPDIR/curl_output.html" 2>&1; then
     echo "curl through proxy succeeded"
+    PASSED=$((PASSED + 1))
 else
     echo "curl through proxy failed"
     FAILED=$((FAILED + 1))

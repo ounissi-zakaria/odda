@@ -32,8 +32,11 @@ This installs the `odda` CLI and copies the OpenCode plugin + skill into `~/.con
 From within an OpenCode session:
 
 ```bash
-odda navigate https://example.com
-odda screenshot
+# Open a browser; returns {browser_id, tab_id, status}
+odda browser open
+# Navigate the initial tab (browser 1, tab 1)
+odda navigate https://example.com --browser-id 1 --tab-id 1
+odda screenshot --browser-id 1 --tab-id 1
 odda flows search "SELECT * FROM flows WHERE host = 'example.com' LIMIT 10"
 ```
 
@@ -43,7 +46,8 @@ You can also run the server manually:
 
 ```bash
 odda server --socket /tmp/odda-$$.sock --data-dir ./.odda --parent-pid $$
-ODDA_SOCKET=/tmp/odda-$$.sock odda navigate https://example.com
+ODDA_SOCKET=/tmp/odda-$$.sock odda browser open
+ODDA_SOCKET=/tmp/odda-$$.sock odda navigate https://example.com --browser-id 1 --tab-id 1
 ```
 
 ## CLI commands
@@ -56,23 +60,28 @@ odda logs                # Server logs
 
 odda proxy-url           # HTTP proxy URL
 
-odda browser open        # Open a new Chrome window
-odda browser list        # List browser instances
+odda browser open        # Open a new Chrome window (returns browser_id + initial tab_id)
 odda browser close       # Close a browser instance
 
-odda navigate            # Navigate active browser
-odda eval                # Execute JavaScript
-odda screenshot          # Capture JPEG screenshot
+odda tabs list           # List tabs grouped by browser (overview)
+odda tabs open           # Open a new tab (returns tab_id)
+odda tabs close          # Close an individual tab
 
-odda tabs                # List tabs
-odda switch-tab          # Switch tab
+odda navigate            # Navigate an existing tab (--browser-id + --tab-id)
+odda eval                # Execute JavaScript (--browser-id + --tab-id)
+odda screenshot          # Capture JPEG screenshot (--browser-id + --tab-id)
 
-odda event-listeners     # List JS event listeners
+odda event-listeners     # List JS event listeners (--browser-id + --tab-id)
 
 odda flows list          # Latest captured flows
 odda flows search        # Query flows with SQL
 odda flows inspect       # Inspect a single flow
 ```
+
+Every browser/tab command takes an explicit `--browser-id` and tab-scoped
+commands also take `--tab-id`. IDs are integers, monotonic, and never reused,
+so multiple agents can share one odda server without racing on a shared
+cursor.
 
 ## Data storage
 

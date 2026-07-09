@@ -1,5 +1,8 @@
 """Browser automation module using patchright (Playwright)."""
 
+from __future__ import annotations
+
+import asyncio
 import logging
 import shutil
 import tempfile
@@ -60,15 +63,40 @@ def _prepare_user_data_dir() -> str:
     return temp_dir
 
 
+class BrowserOperationError(Exception):
+    """Raised when a browser/tab operation fails for a targetable reason.
+
+    Carries a short message that surfaces to the CLI as a JSON-RPC
+    INVALID_PARAMS error. Used for unknown browser/tab ids, mismatched
+    pairs, target-closed-during-op, goto failures, and screenshot
+    failures.
+    """
+
+    def __init__(self, message: str) -> None:
+        """Initialize with a short human-readable message."""
+        super().__init__(message)
+        self.message = message
+
+
+def _is_target_closed_error(exc: BaseException) -> bool:
+    """Return True if exc looks like a Playwright 'target closed' error."""
+    msg = str(exc).lower()
+    return "target closed" in msg or "has been closed" in msg
+
+
 class BrowserInstance:
-    """Manages a single Chrome browser context and its active page."""
+    """Manages a single Chrome browser context and its tabs.
+
+    Every operation targets a tab_id returned by open_tab / list_tabs /
+    the browser_open handler. tab_ids are monotonic per-instance and
+    never reused.
+    """
 
     def __init__(
         self,
         browser_id: int,
         playwright: Playwright,
         context: BrowserContext,
-        page: Page,
     ) -> None:
         """Initialize a browser instance.
 
@@ -76,49 +104,129 @@ class BrowserInstance:
             browser_id: Unique ID for this browser.
             playwright: Patchright Playwright object.
             context: BrowserContext (persistent context for this browser).
-            page: Initial active page.
         """
         self.browser_id = browser_id
         self.playwright = playwright
         self.context = context
-        self.page = page
-        self._script_map: dict[str, str] = {}
-        self._cdp_session: CDPSession | None = None
+        self._next_tab_id: int = 1
+        self._tabs: dict[int, Page] = {}
+        self._cdp_sessions: dict[int, CDPSession] = {}
+        self._script_maps: dict[int, dict[str, str]] = {}
         self._browser_cdp_session: CDPSession | None = None
         self._extension_id: str | None = None
 
-        self.page.on("framenavigated", self._on_frame_navigated)
+        # New pages (from context.new_page or window.open) auto-register.
+        self.context.on("page", self._on_context_page)
 
-    def _on_script_parsed(self, event: dict[str, Any]) -> None:
-        """Store mapping from script ID to URL."""
-        self._script_map[event.get("scriptId", "")] = event.get("url", "")
+    # --- tab lifecycle -------------------------------------------------
 
-    def _on_frame_navigated(self, frame) -> None:
-        """Clear script map on main-frame navigation."""
-        if frame.parent_frame is None:
-            self._script_map.clear()
+    def _on_context_page(self, page: Page) -> None:
+        """Register a page created by context.new_page() or window.open.
 
-    async def _setup_cdp_session(self) -> CDPSession:
-        """Create and configure a CDP session for the active page.
-
-        Only the Debugger domain is enabled so we can map script IDs to URLs.
-        Runtime, Console, and Page are intentionally NOT enabled to avoid
-        the detection leaks patchright works to prevent.
+        This is the single registration point: open_tab and the initial-page
+        path both let context.on('page') do the registration (Playwright
+        fires it synchronously during new_page()), then look up the
+        assigned tab_id by page identity.
         """
-        if self._cdp_session is not None:
-            return self._cdp_session
-        self._cdp_session = await self.context.new_cdp_session(self.page)
-        await self._cdp_session.send("Debugger.enable")
-        self._cdp_session.on("Debugger.scriptParsed", self._on_script_parsed)
-        return self._cdp_session
+        if any(p is page for p in self._tabs.values()):
+            return
+        self._register_page(page)
 
-    async def _reset_cdp_session(self) -> None:
-        """Reset the CDP session when the active page changes."""
-        if self._cdp_session is not None:
-            with suppress(Exception):
-                await self._cdp_session.detach()
-            self._cdp_session = None
-        await self._setup_cdp_session()
+    def _tab_id_for_page(self, page: Page) -> int:
+        """Return the tab_id assigned to a Page, or raise."""
+        for tab_id, p in self._tabs.items():
+            if p is page:
+                return tab_id
+        raise BrowserOperationError(
+            f"Page was not registered in browser {self.browser_id}."
+        )
+
+    def _register_page(self, page: Page) -> int:
+        """Assign a tab_id to a page, wire listeners, schedule CDP setup.
+
+        CDP setup (Debugger.enable + scriptParsed listener) is scheduled as
+        an asyncio task so it runs on the event loop without blocking. It
+        must complete before page scripts fire so that scriptParsed events
+        populate the script_map by the time list_event_listeners is called.
+
+        Returns:
+            The new tab_id.
+        """
+        tab_id = self._next_tab_id
+        self._next_tab_id += 1
+        self._tabs[tab_id] = page
+        self._script_maps[tab_id] = {}
+        page.on("framenavigated", lambda frame: self._on_frame_navigated(tab_id, frame))
+        page.on("close", lambda: self._on_page_close(tab_id))
+        with suppress(RuntimeError):
+            # No running loop: _get_cdp_session will lazily create it later.
+            asyncio.get_running_loop().create_task(
+                self._setup_cdp_session(tab_id, page)
+            )
+        return tab_id
+
+    def _on_frame_navigated(self, tab_id: int, frame) -> None:
+        """Clear that tab's script map on main-frame navigation."""
+        if frame.parent_frame is None:
+            self._script_maps.get(tab_id, {}).clear()
+
+    def _on_page_close(self, tab_id: int) -> None:
+        """Tear down per-tab state when a page closes."""
+        with suppress(Exception):
+            cdp = self._cdp_sessions.pop(tab_id, None)
+            if cdp is not None:
+                cdp.detach()
+        self._tabs.pop(tab_id, None)
+        self._script_maps.pop(tab_id, None)
+
+    async def _setup_cdp_session(self, tab_id: int, page: Page) -> None:
+        """Create and configure the per-tab CDP session (best-effort).
+
+        Enables Debugger so scriptParsed events populate the script_map.
+        Runtime, Console, and Page domains are intentionally left disabled
+        to avoid detection leaks. Errors are logged but not raised: a tab
+        whose CDP session can't be created still works for
+        eval/wait_for/screenshot/navigate; only list_event_listeners will
+        be unable to resolve script URLs (and _get_cdp_session will retry).
+        """
+        script_map = self._script_maps.setdefault(tab_id, {})
+
+        def _on_script_parsed(event: dict[str, Any]) -> None:
+            script_map[event.get("scriptId", "")] = event.get("url", "")
+
+        try:
+            cdp = await self.context.new_cdp_session(page)
+            await cdp.send("Debugger.enable")
+            cdp.on("Debugger.scriptParsed", _on_script_parsed)
+            self._cdp_sessions[tab_id] = cdp
+        except Exception as exc:
+            logger.warning("Failed to set up CDP session for tab %s: %s", tab_id, exc)
+
+    async def _get_cdp_session(self, tab_id: int) -> CDPSession:
+        """Return the CDP session for a tab, creating it lazily if absent."""
+        self._require_tab(tab_id)
+        cdp = self._cdp_sessions.get(tab_id)
+        if cdp is None:
+            page = self._tabs[tab_id]
+            await self._setup_cdp_session(tab_id, page)
+            cdp = self._cdp_sessions.get(tab_id)
+            if cdp is None:
+                raise BrowserOperationError(
+                    f"Failed to set up CDP session for tab {tab_id}."
+                )
+        return cdp
+
+    def _require_tab(self, tab_id: int) -> Page:
+        """Return the Page for tab_id or raise BrowserOperationError."""
+        page = self._tabs.get(tab_id)
+        if page is None or page.is_closed():
+            self._tabs.pop(tab_id, None)
+            raise BrowserOperationError(
+                f"Tab {tab_id} not found in browser {self.browser_id}."
+            )
+        return page
+
+    # --- userscript extension -----------------------------------------
 
     async def _load_userscript_extension(self) -> str | None:
         """Load the userscript extension into this browser via CDP.
@@ -161,28 +269,127 @@ class BrowserInstance:
             self._extension_id = None
         return await self._load_userscript_extension()
 
-    async def _close(self) -> None:
-        """Close the browser context and release resources."""
-        with suppress(Exception):
-            if self.context:
-                await self.context.close()
-        with suppress(Exception):
-            if self.playwright:
-                await self.playwright.stop()
-        self.context = None  # type: ignore[assignment]
-        self.page = None  # type: ignore[assignment]
-        self.playwright = None  # type: ignore[assignment]
-        self._cdp_session = None
-        self._script_map.clear()
+    # --- operations ----------------------------------------------------
 
-    async def list_event_listeners(self) -> list[dict]:
+    async def list_tabs(self) -> list[dict]:
+        """List all open tabs in this browser context."""
+        tabs = []
+        for tab_id, page in self._tabs.items():
+            if page.is_closed():
+                continue
+            title = ""
+            with suppress(Exception):
+                title = await page.title()
+            tabs.append(
+                {
+                    "tab_id": tab_id,
+                    "url": page.url,
+                    "title": title,
+                }
+            )
+        return tabs
+
+    async def open_tab(self, url: str | None = None) -> int:
+        """Open a new tab, optionally navigating to ``url``.
+
+        context.on('page') registers the new page synchronously during
+        new_page(); we look up the assigned tab_id by identity.
+
+        Returns:
+            The new tab_id.
+        """
+        page = await self.context.new_page()
+        tab_id = self._tab_id_for_page(page)
+        if url is not None:
+            await page.goto(url)
+        return tab_id
+
+    async def close_tab(self, tab_id: int) -> None:
+        """Close a tab by id. No-op if already closed."""
+        page = self._require_tab(tab_id)
+        with suppress(Exception):
+            await page.close()
+        self._on_page_close(tab_id)
+
+    async def navigate(self, tab_id: int, url: str) -> None:
+        """Navigate an existing tab to ``url``."""
+        page = self._require_tab(tab_id)
+        try:
+            await page.goto(url)
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during navigation."
+                ) from exc
+            raise BrowserOperationError(f"Failed to navigate: {exc!s}") from exc
+
+    async def eval_js(self, tab_id: int, js_code: str) -> Any:
+        """Execute JavaScript in the target tab's main world."""
+        page = self._require_tab(tab_id)
+        try:
+            return await page.evaluate(js_code, isolated_context=False)
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during eval."
+                ) from exc
+            return f"JavaScript error: {exc!s}"
+
+    async def wait_for(self, tab_id: int, expression: str, *, timeout_ms: float) -> Any:
+        """Poll a JS expression until truthy or timeout in the target tab."""
+        page = self._require_tab(tab_id)
+        fn = f"() => {{ const v = ({expression}); return v ? v : false; }}"
+        try:
+            handle = await page.wait_for_function(fn, timeout=timeout_ms)
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during wait-for."
+                ) from exc
+            raise
+        try:
+            return await handle.json_value()
+        except Exception:
+            return str(handle)
+
+    async def screenshot(self, tab_id: int) -> str:
+        """Capture a JPEG screenshot of the target tab's viewport."""
+        page = self._require_tab(tab_id)
+        try:
+            temp_dir = Path(tempfile.gettempdir())
+            temp_path = temp_dir / f"screenshot_{int(time.time())}.jpeg"
+            await page.screenshot(
+                path=str(temp_path),
+                type="jpeg",
+                full_page=False,
+            )
+            return str(temp_path)
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during screenshot."
+                ) from exc
+            raise BrowserOperationError(f"Screenshot error: {exc!s}") from exc
+
+    async def list_event_listeners(self, tab_id: int) -> list[dict]:
         """List JavaScript event listeners on window and document.
 
-        Uses DOMDebugger.getEventListeners so we get script IDs, line numbers,
-        and column numbers. Only Debugger.enable is required; Runtime, Console,
-        and Page domains are intentionally left disabled to avoid detection leaks.
+        Uses DOMDebugger.getEventListeners so we get script IDs, line
+        numbers, and column numbers. Only Debugger.enable is required;
+        Runtime, Console, and Page domains are intentionally left
+        disabled to avoid detection leaks.
         """
-        cdp = await self._setup_cdp_session()
+        page = self._require_tab(tab_id)
+        if page.is_closed():
+            raise BrowserOperationError(
+                f"Tab {tab_id} not found in browser {self.browser_id}."
+            )
+        cdp = await self._get_cdp_session(tab_id)
+        script_map = self._script_maps.get(tab_id, {})
 
         listeners: list[dict] = []
         for element_tag, expression in (("window", "window"), ("document", "document")):
@@ -204,126 +411,31 @@ class BrowserInstance:
                     "element_tag": element_tag,
                     "line_number": listener.get("lineNumber"),
                     "column_number": listener.get("columnNumber"),
-                    "script_url": self._script_map.get(listener.get("scriptId")),
+                    "script_url": script_map.get(listener.get("scriptId")),
                 }
                 for listener in response.get("listeners", [])
             )
 
         return listeners
 
-    async def list_tabs(self) -> list[dict]:
-        """List all open tabs (pages) in this browser context."""
-        tabs = []
-        for i, page in enumerate(self.context.pages):
-            title = ""
+    # --- teardown ------------------------------------------------------
+
+    async def _close(self) -> None:
+        """Close the browser context and release resources."""
+        for tab_id in list(self._cdp_sessions.keys()):
             with suppress(Exception):
-                title = await page.title()
-            tabs.append(
-                {
-                    "index": i,
-                    "url": page.url,
-                    "title": title,
-                }
-            )
-        return tabs
-
-    async def switch_tab(self, index: int) -> str:
-        """Switch to a specific tab by index within this browser.
-
-        Returns:
-            Status message.
-        """
-        pages = self.context.pages
-        if index < 0 or index >= len(pages):
-            return f"Tab index {index} not found."
-
-        self.page = pages[index]
+                await self._cdp_sessions[tab_id].detach()
+        self._cdp_sessions.clear()
+        self._tabs.clear()
+        self._script_maps.clear()
         with suppress(Exception):
-            await self.page.bring_to_front()
-        await self._reset_cdp_session()
-
-        title = ""
+            if self.context:
+                await self.context.close()
         with suppress(Exception):
-            title = await self.page.title()
-        return f"Switched to tab {index}: {title}"
-
-    async def navigate(self, url: str, *, new_tab: bool = False) -> str:
-        """Navigate browser to URL.
-
-        Args:
-            url: URL to navigate to.
-            new_tab: If True, open URL in a new tab.
-
-        Returns:
-            Status message.
-        """
-        try:
-            if new_tab:
-                self.page = await self.context.new_page()
-                self.page.on("framenavigated", self._on_frame_navigated)
-                await self.page.goto(url)
-            else:
-                await self.page.goto(url)
-            await self._reset_cdp_session()
-        except Exception as e:
-            return f"Failed to navigate: {e!s}"
-        return f"Navigated to: {url}"
-
-    async def eval_js(self, js_code: str) -> Any:
-        """Execute JavaScript in the active tab.
-
-        Runs in the page's main world (``isolated_context=False``) so it
-        can read ``window`` globals set by userscripts and the page itself.
-
-        Returns:
-            Result of the evaluation (Playwright handles promise resolution).
-        """
-        try:
-            return await self.page.evaluate(js_code, isolated_context=False)
-        except Exception as e:
-            return f"JavaScript error: {e!s}"
-
-    async def wait_for(self, expression: str, *, timeout_ms: float) -> Any:
-        """Poll a JS expression until truthy or timeout.
-
-        Uses ``page.wait_for_function``, which runs in the main world and
-        polls in-browser (no Python round-trips).
-
-        Args:
-            expression: JS expression to evaluate. Wrapped as an arrow
-                function so it's polled repeatedly.
-            timeout_ms: Timeout in milliseconds.
-
-        Returns:
-            The truthy value of the expression (JSON-serialized).
-
-        Raises:
-            TimeoutError: If the expression is not truthy within timeout.
-        """
-        fn = f"() => {{ const v = ({expression}); return v ? v : false; }}"
-        handle = await self.page.wait_for_function(fn, timeout=timeout_ms)
-        try:
-            return await handle.json_value()
-        except Exception:
-            return str(handle)
-
-    async def screenshot(self) -> str:
-        """Capture screenshot of the current viewport.
-
-        Returns:
-            Path to saved screenshot JPEG file.
-        """
-        try:
-            temp_dir = Path(tempfile.gettempdir())
-            temp_path = temp_dir / f"screenshot_{int(time.time())}.jpeg"
-            await self.page.screenshot(
-                path=str(temp_path),
-                type="jpeg",
-                full_page=False,
-            )
-            return str(temp_path)
-        except Exception as e:
-            return f"Screenshot error: {e!s}"
+            if self.playwright:
+                await self.playwright.stop()
+        self.context = None  # type: ignore[assignment]
+        self.playwright = None  # type: ignore[assignment]
 
 
 class BrowserManager:
@@ -336,7 +448,6 @@ class BrowserManager:
             proxy: Proxy server instance to share across browsers.
         """
         self._instances: dict[int, BrowserInstance] = {}
-        self._active_browser_id: int | None = None
         self._next_id: int = 1
         self.proxy = proxy
 
@@ -346,29 +457,28 @@ class BrowserManager:
         return len(self._instances)
 
     def list_instances(self) -> list[dict]:
-        """List open browser instances with active flag."""
+        """List open browser instances with tab counts (internal helper)."""
         return [
             {
                 "browser_id": bid,
-                "active": bid == self._active_browser_id,
+                "tab_count": len(inst._tabs),  # noqa: SLF001
             }
-            for bid in sorted(self._instances.keys())
+            for bid, inst in sorted(self._instances.items())
         ]
 
-    async def _ensure_browser(
-        self, *, auto_open: bool = False, headless: bool = False
-    ) -> BrowserInstance:
-        """Ensure an active browser exists, optionally auto-opening one."""
-        if self._active_browser_id is not None:
-            return self._instances[self._active_browser_id]
-        if auto_open:
-            return await self._create_instance(headless=headless)
-        raise RuntimeError(
-            "No browser open. Navigate to a URL using navigate or open_browser first."
-        )
+    def _require_instance(self, browser_id: int) -> BrowserInstance:
+        """Return the BrowserInstance for browser_id or raise."""
+        inst = self._instances.get(browser_id)
+        if inst is None:
+            raise BrowserOperationError(f"Browser {browser_id} not found.")
+        return inst
 
     async def _create_instance(self, *, headless: bool = False) -> BrowserInstance:
-        """Create and register a new BrowserInstance."""
+        """Create and register a new BrowserInstance.
+
+        Registers the initial page (the one Chrome creates at launch) and
+        returns the instance with at least one tab_id assigned.
+        """
         browser_id = self._next_id
         self._next_id += 1
 
@@ -396,147 +506,157 @@ class BrowserManager:
                 "--enable-unsafe-extension-debugging",
             ],
         )
-        page = context.pages[0] if context.pages else await context.new_page()
 
-        instance = BrowserInstance(browser_id, playwright, context, page)
-        await instance._setup_cdp_session()  # noqa: SLF001
+        instance = BrowserInstance(browser_id, playwright, context)
+
+        # Register the initial page (Chrome opens one automatically).
+        # context.on('page') may have already fired for it during context
+        # construction (before our handler was wired in __init__), so check
+        # first and only register if it's not already tracked.
+        initial_page = context.pages[0] if context.pages else await context.new_page()
+        if not any(p is initial_page for p in instance._tabs.values()):  # noqa: SLF001
+            instance._register_page(initial_page)  # noqa: SLF001
+
+        # Load the userscript extension (best-effort).
         await instance._load_userscript_extension()  # noqa: SLF001
+
+        # The initial page may have arrived before the context.on("page")
+        # handler was wired, or it may re-fire; the handler guards against
+        # double-registration by identity.
         self._instances[browser_id] = instance
-        self._active_browser_id = browser_id
         return instance
 
-    async def open(self, *, headless: bool = False) -> str:
+    async def open(self, *, headless: bool = False) -> dict[str, Any]:
         """Open a new Chrome browser window.
 
-        Args:
-            headless: If True, launch Chrome in headless mode.
-
         Returns:
-            Status message including the new browser ID.
+            Dict with browser_id, the initial tab_id, and a status.
         """
         try:
             instance = await self._create_instance(headless=headless)
+        except BrowserOperationError:
+            raise
         except Exception as e:
-            return f"Failed to open browser: {e!s}"
-        return f"Browser {instance.browser_id} launched"
+            raise BrowserOperationError(f"Failed to open browser: {e!s}") from e
+        initial_tab_id = next(iter(instance._tabs))  # noqa: SLF001
+        return {
+            "browser_id": instance.browser_id,
+            "tab_id": initial_tab_id,
+            "status": "launched",
+        }
 
-    async def close_instance(self, browser_id: int) -> str:
-        """Close a browser instance.
-
-        Args:
-            browser_id: ID of the browser to close.
+    async def close_instance(self, browser_id: int) -> dict[str, Any]:
+        """Close a browser instance by ID.
 
         Returns:
-            Status message.
+            Dict with browser_id and status.
         """
-        if browser_id not in self._instances:
-            return f"Browser {browser_id} not found."
-
-        instance = self._instances[browser_id]
-        await instance._close()  # noqa: SLF001
+        inst = self._require_instance(browser_id)
+        await inst._close()  # noqa: SLF001
         del self._instances[browser_id]
+        return {"browser_id": browser_id, "status": "closed"}
 
-        if self._active_browser_id == browser_id:
-            if self._instances:
-                self._active_browser_id = min(self._instances.keys())
-                return (
-                    f"Browser {browser_id} closed. "
-                    f"Active browser is now {self._active_browser_id}."
-                )
-            self._active_browser_id = None
-            return f"Browser {browser_id} closed. No browsers remaining."
+    async def list_tabs(self, browser_id: int | None = None) -> list[dict]:
+        """List tabs grouped by browser.
 
-        active_info = ""
-        if self._active_browser_id is not None:
-            active_info = f" Active browser is {self._active_browser_id}."
-        return f"Browser {browser_id} closed.{active_info}"
+        Args:
+            browser_id: If given, list only that browser's tabs.
 
-    async def list_tabs(self) -> list[dict]:
-        """List all open browser tabs grouped by browser."""
-        await self._ensure_browser()
+        Raises:
+            BrowserOperationError: If browser_id is given and not found.
+        """
+        if browser_id is not None:
+            inst = self._require_instance(browser_id)
+            return [
+                {
+                    "browser_id": inst.browser_id,
+                    "tabs": await inst.list_tabs(),
+                }
+            ]
         result = []
-        for browser_id, instance in sorted(self._instances.items()):
+        for bid, inst in sorted(self._instances.items()):
             result.append(
                 {
-                    "browser_id": browser_id,
-                    "tabs": await instance.list_tabs(),
+                    "browser_id": bid,
+                    "tabs": await inst.list_tabs(),
                 }
             )
         return result
 
-    async def switch_tab(self, browser_id: int, index: int) -> str:
-        """Switch to a specific tab in a specific browser.
-
-        Also sets the active browser to the target browser.
-
-        Args:
-            browser_id: ID of the target browser.
-            index: Tab index within that browser.
+    async def open_tab(self, browser_id: int, url: str | None = None) -> dict[str, Any]:
+        """Open a new tab in a specific browser.
 
         Returns:
-            Status message.
+            Dict with browser_id, the new tab_id, and status.
         """
-        if browser_id not in self._instances:
-            return f"Browser {browser_id} not found."
+        inst = self._require_instance(browser_id)
+        tab_id = await inst.open_tab(url)
+        return {"browser_id": browser_id, "tab_id": tab_id, "status": "opened"}
 
-        instance = self._instances[browser_id]
-        result = await instance.switch_tab(index)
-        if result.startswith("Switched to tab"):
-            self._active_browser_id = browser_id
-        return result
-
-    async def navigate(
-        self, url: str, *, new_tab: bool = False, headless: bool = False
-    ) -> dict:
-        """Navigate active browser to URL.
-
-        Opens a new browser automatically if none is active and reports
-        whether a browser was auto-opened.
+    async def close_tab(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+        """Close a tab in a specific browser.
 
         Returns:
-            Dict with status message and auto_opened flag.
+            Dict with browser_id, tab_id, and status.
         """
-        auto_opened = self._active_browser_id is None
-        inst = await self._ensure_browser(auto_open=True, headless=headless)
-        status = await inst.navigate(url, new_tab=new_tab)
-        return {"status": status, "auto_opened": auto_opened}
+        inst = self._require_instance(browser_id)
+        await inst.close_tab(tab_id)
+        return {"browser_id": browser_id, "tab_id": tab_id, "status": "closed"}
 
-    async def eval_js(self, js_code: str) -> Any:
-        """Execute JavaScript in the active browser tab."""
-        inst = await self._ensure_browser()
-        return await inst.eval_js(js_code)
+    async def navigate(self, browser_id: int, tab_id: int, url: str) -> dict[str, Any]:
+        """Navigate an existing tab to ``url``.
 
-    async def wait_for(self, expression: str, *, timeout_ms: float) -> Any:
-        """Poll a JS expression until truthy or timeout in the active browser tab."""
-        inst = await self._ensure_browser()
-        return await inst.wait_for(expression, timeout_ms=timeout_ms)
+        Returns:
+            Dict with status.
+        """
+        inst = self._require_instance(browser_id)
+        await inst.navigate(tab_id, url)
+        return {"status": f"Navigated to: {url}"}
 
-    async def screenshot(self) -> str:
-        """Capture screenshot of the active browser viewport."""
-        inst = await self._ensure_browser()
-        return await inst.screenshot()
+    async def eval_js(self, browser_id: int, tab_id: int, js_code: str) -> Any:
+        """Execute JavaScript in the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.eval_js(tab_id, js_code)
 
-    async def list_event_listeners(self) -> list[dict]:
-        """List JS event listeners in the active browser tab."""
-        inst = await self._ensure_browser()
-        return await inst.list_event_listeners()
+    async def wait_for(
+        self, browser_id: int, tab_id: int, expression: str, *, timeout_ms: float
+    ) -> Any:
+        """Poll a JS expression until truthy or timeout in the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.wait_for(tab_id, expression, timeout_ms=timeout_ms)
 
-    async def install_userscript(self, name: str, source: str) -> dict[str, Any]:
-        """Install a userscript and reload the extension on all open browsers."""
+    async def screenshot(self, browser_id: int, tab_id: int) -> str:
+        """Capture a screenshot of the target tab's viewport."""
+        inst = self._require_instance(browser_id)
+        return await inst.screenshot(tab_id)
+
+    async def list_event_listeners(self, browser_id: int, tab_id: int) -> list[dict]:
+        """List JS event listeners in the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.list_event_listeners(tab_id)
+
+    async def install_userscript(
+        self, browser_id: int, name: str, source: str
+    ) -> dict[str, Any]:
+        """Install a userscript and reload the extension on one browser."""
         result = userscript_mod.install(name, source)
-        if self._active_browser_id is not None:
-            inst = self._instances[self._active_browser_id]
+        inst = self._instances.get(browser_id)
+        if inst is not None:
             ext_id = await inst._reload_userscript_extension()  # noqa: SLF001
             result["extension_id"] = ext_id
+        else:
+            raise BrowserOperationError(f"Browser {browser_id} not found.")
         return result
 
-    async def remove_userscript(self, name: str) -> dict[str, Any]:
-        """Remove a userscript and reload the extension on all open browsers."""
+    async def remove_userscript(self, browser_id: int, name: str) -> dict[str, Any]:
+        """Remove a userscript and reload the extension on one browser."""
         result = userscript_mod.remove(name)
-        if self._active_browser_id is not None:
-            inst = self._instances[self._active_browser_id]
+        inst = self._instances.get(browser_id)
+        if inst is not None:
             ext_id = await inst._reload_userscript_extension()  # noqa: SLF001
             result["extension_id"] = ext_id
+        else:
+            raise BrowserOperationError(f"Browser {browser_id} not found.")
         return result
 
     def list_userscripts(self) -> list[dict[str, Any]]:

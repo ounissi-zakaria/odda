@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from odda import flowstore, rpc
-from odda.browser import BrowserManager
+from odda.browser import BrowserManager, BrowserOperationError
 from odda.proxy import ProxyServer
 from odda.request import (
     clone as clone_request,
@@ -164,6 +164,8 @@ class OddaServer:
                 response = rpc.build_response(request_id, result)
             except rpc.JsonRpcError as exc:
                 response = rpc.build_error(request_id, exc.code, exc.message, exc.data)
+            except BrowserOperationError as exc:
+                response = rpc.build_error(request_id, rpc.INVALID_PARAMS, exc.message)
             except Exception as exc:  # pragma: no cover
                 response = rpc.build_error(request_id, rpc.INTERNAL_ERROR, str(exc))
 
@@ -191,57 +193,110 @@ class OddaServer:
             raise rpc.JsonRpcError(rpc.INTERNAL_ERROR, "Proxy not initialized")
         return self.proxy.proxy_url
 
-    async def method_browser_open(self, params: dict[str, Any]) -> str:
-        """Open a new browser instance."""
+    async def method_browser_open(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Open a new browser instance.
+
+        Returns:
+            Dict with browser_id, the initial tab_id, and status.
+        """
         return await self.browser.open(headless=params.get("headless", False))
 
-    async def method_browser_list(self, _params: dict[str, Any]) -> list[dict]:
-        """List open browser instances."""
-        return self.browser.list_instances()
+    async def method_browser_close(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Close a browser instance by ID.
 
-    async def method_browser_close(self, params: dict[str, Any]) -> str:
-        """Close a browser instance by ID."""
+        Returns:
+            Dict with browser_id and status.
+        """
         return await self.browser.close_instance(params["id"])
 
     async def method_navigate(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Navigate the active browser to a URL."""
+        """Navigate an existing tab to a URL.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            url: URL to navigate to.
+        """
         return await self.browser.navigate(
-            params["url"],
-            new_tab=params.get("new_tab", False),
-            headless=params.get("headless", False),
+            params["browser_id"], params["tab_id"], params["url"]
         )
 
-    async def method_eval(self, params: dict[str, Any]) -> str:
-        """Evaluate JavaScript in the active browser tab."""
-        return await self.browser.eval_js(params["js"])
+    async def method_eval(self, params: dict[str, Any]) -> Any:
+        """Evaluate JavaScript in the target tab.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            js: JavaScript code to execute.
+        """
+        return await self.browser.eval_js(
+            params["browser_id"], params["tab_id"], params["js"]
+        )
 
     async def method_wait_for(self, params: dict[str, Any]) -> Any:
         """Poll a JS expression until truthy or timeout.
 
         Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
             expression: JS expression to poll.
             timeout: Timeout in seconds (default 30).
         """
         timeout_s = float(params.get("timeout", 30.0))
         return await self.browser.wait_for(
-            params["expression"], timeout_ms=timeout_s * 1000
+            params["browser_id"],
+            params["tab_id"],
+            params["expression"],
+            timeout_ms=timeout_s * 1000,
         )
 
-    async def method_screenshot(self, _params: dict[str, Any]) -> str:
-        """Capture a screenshot of the active browser viewport."""
-        return await self.browser.screenshot()
+    async def method_screenshot(self, params: dict[str, Any]) -> str:
+        """Capture a screenshot of the target tab's viewport.
 
-    async def method_tabs_list(self, _params: dict[str, Any]) -> list[dict]:
-        """List tabs grouped by browser."""
-        return await self.browser.list_tabs()
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.screenshot(params["browser_id"], params["tab_id"])
 
-    async def method_tabs_switch(self, params: dict[str, Any]) -> str:
-        """Switch to a specific tab."""
-        return await self.browser.switch_tab(params["browser_id"], params["index"])
+    async def method_tabs_list(self, params: dict[str, Any]) -> list[dict]:
+        """List tabs grouped by browser.
 
-    async def method_event_listeners(self, _params: dict[str, Any]) -> list[dict]:
-        """List JS event listeners on window and document."""
-        return await self.browser.list_event_listeners()
+        Params:
+            browser_id: Optional filter to one browser.
+        """
+        browser_id = params.get("browser_id")
+        return await self.browser.list_tabs(browser_id)
+
+    async def method_tabs_open(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Open a new tab in a browser, optionally navigating to a URL.
+
+        Params:
+            browser_id: Target browser ID.
+            url: Optional URL to navigate the new tab to (about:blank if
+                omitted).
+        """
+        return await self.browser.open_tab(params["browser_id"], params.get("url"))
+
+    async def method_tabs_close(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Close a tab in a browser.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.close_tab(params["browser_id"], params["tab_id"])
+
+    async def method_event_listeners(self, params: dict[str, Any]) -> list[dict]:
+        """List JS event listeners on window and document in the target tab.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.list_event_listeners(
+            params["browser_id"], params["tab_id"]
+        )
 
     # --- Userscript handlers ---
 
@@ -249,10 +304,12 @@ class OddaServer:
         """Install a userscript from a file or inline source.
 
         Params:
+            browser_id: Browser to reload the extension on.
             name: Userscript name.
             file: Path to a JS file (read by the server), or
             source: Inline JS source. ``file`` takes precedence.
         """
+        browser_id = params["browser_id"]
         name = params["name"]
         file_path = params.get("file")
         if file_path:
@@ -261,7 +318,7 @@ class OddaServer:
             source = params.get("source", "")
         if not source.strip():
             raise rpc.JsonRpcError(rpc.INVALID_PARAMS, "source is empty")
-        return await self.browser.install_userscript(name, source)
+        return await self.browser.install_userscript(browser_id, name, source)
 
     async def method_userscript_list(self, _params: dict[str, Any]) -> list[dict]:
         """List installed userscripts."""
@@ -271,9 +328,12 @@ class OddaServer:
         """Remove a userscript.
 
         Params:
+            browser_id: Browser to reload the extension on.
             name: Userscript name.
         """
-        return await self.browser.remove_userscript(params["name"])
+        return await self.browser.remove_userscript(
+            params["browser_id"], params["name"]
+        )
 
     # --- Request (raw resend) handlers ---
 

@@ -11,51 +11,68 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 
 ## Quick command reference
 
-| What you want to do         | Command                                                  |
-| --------------------------- | -------------------------------------------------------- |
-| Check the server is running | `odda status`                                            |
-| Get the HTTP proxy URL      | `odda proxy-url`                                         |
-| Open a Chrome window        | `odda browser open [--headless]`                         |
-| See open browsers           | `odda browser list`                                      |
-| Close a browser             | `odda browser close <id>`                                |
-| List tabs                   | `odda tabs list` or `odda tabs list --browser-id <id>`   |
-| Switch tab                  | `odda switch-tab --browser-id <id> --index <n>`          |
-| Navigate                    | `odda navigate <url> [--new-tab] [--headless]`           |
-| Run JavaScript              | `odda eval "<js>"` or `odda eval --file <path>`          |
-| Wait for a JS condition     | `odda wait-for "<expr>" [--timeout N]`                    |
-| Screenshot                  | `odda screenshot`                                        |
-| List event listeners        | `odda event-listeners`                                   |
-| Install a userscript        | `odda userscript install --name <name> --file <path>`    |
-| List userscripts            | `odda userscript list`                                   |
-| Remove a userscript         | `odda userscript remove <name>`                          |
-| Read server logs            | `odda logs [--follow] [--n N]`                           |
-| Clone a flow to edit        | `odda request clone <flow-id> --name <name> [--force]`   |
-| Create an empty request     | `odda request new --name <name> [--force]`               |
-| Send an editable request    | `odda request send <name> [flags]`                       |
+| What you want to do         | Command                                                            |
+| --------------------------- | ----------------------------------------------------------------- |
+| Check the server is running | `odda status`                                                      |
+| Get the HTTP proxy URL      | `odda proxy-url`                                                   |
+| Open a Chrome window        | `odda browser open [--headless]`                                  |
+| Close a browser             | `odda browser close <id>`                                          |
+| List tabs (overview)        | `odda tabs list [--browser-id <id>]`                              |
+| Open a new tab              | `odda tabs open --browser-id <id> [--url <url>]`                   |
+| Close a tab                 | `odda tabs close --browser-id <id> --tab-id <n>`                   |
+| Navigate an existing tab    | `odda navigate <url> --browser-id <id> --tab-id <n>`               |
+| Run JavaScript              | `odda eval "<js>" --browser-id <id> --tab-id <n>` or `--file <path>` |
+| Wait for a JS condition     | `odda wait-for "<expr>" --browser-id <id> --tab-id <n> [--timeout N]` |
+| Screenshot                  | `odda screenshot --browser-id <id> --tab-id <n>`                   |
+| List event listeners        | `odda event-listeners --browser-id <id> --tab-id <n>`              |
+| Install a userscript        | `odda userscript install --name <name> --browser-id <id> --file <path>` |
+| List userscripts            | `odda userscript list`                                             |
+| Remove a userscript         | `odda userscript remove <name> --browser-id <id>`                  |
+| Read server logs            | `odda logs [--follow] [--n N]`                                     |
+| Clone a flow to edit        | `odda request clone <flow-id> --name <name> [--force]`             |
+| Create an empty request     | `odda request new --name <name> [--force]`                         |
+| Send an editable request    | `odda request send <name> [flags]`                                 |
+
+## Targeting model
+
+Every browser/tab command takes an explicit target. Agents always specify which browser and which tab they mean.
+
+- **Browser-scoped commands** take `--browser-id`: `browser open`, `browser close`, `tabs list` (optional filter), `tabs open`, `userscript install/remove`.
+- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`.
+
+IDs are integers, monotonic, and **never reused**. A closed tab's id is retired forever; a stale `--tab-id` errors cleanly instead of silently hitting a different tab. This makes it safe for multiple agents to share one odda server: each agent owns the IDs it captured and never disturbs another agent's target.
+
+Get IDs once and reuse them:
+- `odda browser open` returns `{browser_id, tab_id, status}` — the initial tab is ready to use immediately.
+- `odda tabs open --browser-id B [--url U]` returns `{browser_id, tab_id, status}` — the new tab_id.
+- `odda tabs list` returns `[{browser_id, tabs: [{tab_id, url, title}]}]`.
+
+Errors surface as JSON `{error: ...}` with a **non-zero exit code**: unknown `--browser-id`, unknown/mismatched `--tab-id`, navigation failure, screenshot failure, and "tab closed during operation" (another agent closed the tab mid-op) all raise. JS-execution errors (script throws) still return as strings inside a successful response, and `wait-for` timeout still raises a timeout error.
 
 ## Browser commands
 
-- `odda browser open [--headless]` — Open a new Chrome window. Returns the browser ID. `--headless` runs Chrome without a visible window (useful for CI and automated testing).
-- `odda browser list` — List open browser instances with their IDs and active state.
-- `odda browser close <id>` — Close a browser instance by ID.
+- `odda browser open [--headless]` — Open a new Chrome window. Returns `{browser_id, tab_id, status}`. The `tab_id` is the initial tab; you can navigate/eval it immediately. `--headless` runs Chrome without a visible window (useful for CI and automated testing).
+- `odda browser close <id>` — Close a browser instance by ID. Returns `{browser_id, status}`. Tearing down is immediate; any in-flight tab ops on that browser error cleanly with "tab closed during operation". For an overview of all browsers and their tabs use `odda tabs list` (no `--browser-id`); `odda status` reports the open browser count.
 
 ## Tab commands
 
-- `odda tabs list [--browser-id <id>]` — List tabs grouped by browser. Use `--browser-id` to filter to one browser.
-- `odda switch-tab --browser-id <id> --index <n>` — Switch the active tab. Tab indices come from `odda tabs list`.
+- `odda tabs list [--browser-id <id>]` — List tabs grouped by browser as `[{browser_id, tabs: [{tab_id, url, title}]}]`. Without `--browser-id`, lists every open browser (a browser with zero tabs appears with `tabs: []`). With `--browser-id`, lists one browser's tabs.
+- `odda tabs open --browser-id <id> [--url <url>]` — Open a new tab in the target browser. Without `--url` the tab opens at `about:blank`. Returns `{browser_id, tab_id, status}`.
+- `odda tabs close --browser-id <id> --tab-id <n>` — Close an individual tab. Returns `{browser_id, tab_id, status}`. Closing the **last** tab leaves the browser open with zero tabs (matching Chrome's behavior); the browser can still accept `tabs open` later. To close the whole browser use `odda browser close`.
+
+Tab ids are per-browser, monotonic, and never reused. After a tab closes, its id is gone; a later `tabs open` gets a strictly higher id.
 
 ## Navigation and page interaction
 
-- `odda navigate <url> [--new-tab] [--headless]` — Navigate the active browser. If no browser is active, one is opened automatically and reported in the `auto_opened` field. `--headless` auto-opens a headless browser.
-- `odda eval "<js>"` — Execute JavaScript in the active tab and return the result. Returned Promises are awaited automatically: `fetch(url).then(r => r.status)` returns `200`, not a Promise object. Return a serializable value from async expressions — bare `fetch(url)` returns `{}` because the resolved `Response` is not JSON-serializable; chain `.then(r => r.text())` or similar to extract a serializable value.
-- `odda eval --file <path>` — Load JavaScript from a file and execute it. Useful for multi-line scripts with comments; avoids shell-escaping headaches. Mutually exclusive with the inline argument.
-- `odda wait-for "<expr>" [--timeout N]` — Poll a JS expression until it's truthy or the timeout (default 30s) is reached. Uses Playwright's `wait_for_function`, which polls in-browser with no round-trips. Runs in the main world, so it sees page globals and userscript-injected helpers. Returns the truthy value on success; errors with non-zero exit code on timeout. Example: `odda wait-for "document.querySelector('.sdk-ready')" --timeout 10`.
-- `odda screenshot` — Capture a JPEG screenshot. Returns the path to the temp file.
-- `odda event-listeners` — List JavaScript event listeners attached to `window` and `document`.
+- `odda navigate <url> --browser-id <id> --tab-id <n>` — Navigate an existing tab to a URL. Returns `{status}`. To open a tab, use `odda tabs open`. Navigation failures (network error, invalid URL) raise a JSON error with non-zero exit.
+- `odda eval "<js>" --browser-id <id> --tab-id <n>` — Execute JavaScript in the target tab and return the result. Returned Promises are awaited automatically: `fetch(url).then(r => r.status)` returns `200`, not a Promise object. Return a serializable value from async expressions — bare `fetch(url)` returns `{}` because the resolved `Response` is not JSON-serializable; chain `.then(r => r.text())` or similar to extract a serializable value. `odda eval --file <path> --browser-id <id> --tab-id <n>` loads JavaScript from a file (mutually exclusive with the inline argument; useful for multi-line scripts and shell-escape avoidance).
+- `odda wait-for "<expr>" --browser-id <id> --tab-id <n> [--timeout N]` — Poll a JS expression until it's truthy or the timeout (default 30s) is reached. Uses Playwright's `wait_for_function`, which polls in-browser with no round-trips. Runs in the main world, so it sees page globals and userscript-injected helpers. Returns the truthy value on success; errors with non-zero exit code on timeout. Example: `odda wait-for "document.querySelector('.sdk-ready')" --browser-id 1 --tab-id 1 --timeout 10`.
+- `odda screenshot --browser-id <id> --tab-id <n>` — Capture a JPEG screenshot of the target tab's viewport. Returns the path to the temp file (a bare string). Screenshot failures raise a JSON error with non-zero exit.
+- `odda event-listeners --browser-id <id> --tab-id <n>` — List JavaScript event listeners attached to `window` and `document` in the target tab.
 
 ## Userscripts
 
-`odda userscript` manages JavaScript helpers that auto-run at `document_start` on every navigation. Install a helper once and it runs before the page's own scripts on every `odda navigate`, `odda navigate --new-tab`, and tab switch.
+`odda userscript` manages JavaScript helpers that auto-run at `document_start` on every navigation. Install a helper once and it runs before the page's own scripts on every `odda navigate` and `odda tabs open`.
 
 Userscripts are stored on disk under `.odda/userscripts/<name>/script.js`. A Chrome extension is generated at `.odda/userscripts-extension/` with a `content.js` that inlines all installed userscripts (each wrapped in try/catch). The extension is loaded via CDP `Extensions.loadUnpacked` when a browser is opened.
 
@@ -63,16 +80,17 @@ odda also ships built-in default userscripts that are always injected before any
 
 Commands:
 
-- `odda userscript install --name <name> --file <path>` — Install a JS file as a userscript. Overwrites any existing userscript of the same name. If a browser is open, the extension is reloaded immediately. Alternatively, use `--source "<js>"` for inline source (mutually exclusive with `--file`).
-- `odda userscript list` — List installed userscripts with their names and sizes.
-- `odda userscript remove <name>` — Remove a userscript from disk and reload the extension. The script's effects on the current page are not undone; it won't run on future navigations.
+- `odda userscript install --name <name> --browser-id <id> --file <path>` — Install a JS file as a userscript. Overwrites any existing userscript of the same name and reloads the extension on the given browser. Alternatively, use `--source "<js>"` for inline source (mutually exclusive with `--file`).
+- `odda userscript list` — List installed userscripts with their names and sizes. (Global — lists files on disk, not per-browser state.)
+- `odda userscript remove <name> --browser-id <id>` — Remove a userscript from disk and reload the extension on the given browser. The script's effects on the current page are not undone; it won't run on future navigations.
 
 Behavior notes:
 
 - **Before page scripts.** Userscripts run at `document_start`, so `window` modifications are visible to the page before any of its own scripts execute. This is the key advantage over `odda eval` (which runs after navigation).
-- **All tabs and frames.** The extension's content script matches `<all_urls>` and runs in all frames (`all_frames: true`). There is no per-browser or per-tab scoping.
+- **All tabs and frames.** The extension's content script matches `<all_urls>` and runs in all frames (`all_frames: true`), applying to every tab in every browser.
 - **Idempotent re-injection.** Scripts run on every navigation. Write them to be idempotent (e.g., guard with `if (window.__myHelper__) return;`).
-- **Dialog interceptor.** `odda eval "window.__oddaDialogs"` returns an array of captured dialog/print events. Each entry has `{type, url, timestamp, stack, result?}` plus `message` and `defaultValue` when applicable. `type` is one of `print`, `alert`, `confirm`, `prompt`. `message` is present for `alert`/`confirm`/`prompt`. `defaultValue` is present for `prompt`. `result` is recorded for `confirm`/`prompt`. Use this to inspect what modal dialogs or print calls a page triggered during automation.
+- **Reload applies on next navigation.** `install`/`remove` reload the extension for the given browser, but already-loaded tabs are not re-injected. Re-navigate an existing tab (or open a new one) for the change to take effect there.
+- **Dialog interceptor.** `odda eval "window.__oddaDialogs" --browser-id <id> --tab-id <n>` returns an array of captured dialog/print events. Each entry has `{type, url, timestamp, stack, result?}` plus `message` and `defaultValue` when applicable. `type` is one of `print`, `alert`, `confirm`, `prompt`. `message` is present for `alert`/`confirm`/`prompt`. `defaultValue` is present for `prompt`. `result` is recorded for `confirm`/`prompt`. Use this to inspect what modal dialogs or print calls a page triggered during automation.
 
 ## Raw request commands
 

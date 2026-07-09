@@ -199,12 +199,6 @@ def browser_open(
     _run_coro(_client(ctx).call("browser/open", {"headless": headless}))
 
 
-@browser_app.command("list")
-def browser_list(ctx: typer.Context) -> None:
-    """List open browser instances."""
-    _run_coro(_client(ctx).call("browser/list"))
-
-
 @browser_app.command("close")
 def browser_close(
     ctx: typer.Context,
@@ -218,15 +212,14 @@ def browser_close(
 def navigate(
     ctx: typer.Context,
     url: str = typer.Argument(..., help="URL to navigate to"),
-    new_tab: bool = typer.Option(False, "--new-tab", help="Open in a new tab"),
-    headless: bool = typer.Option(
-        False, "--headless", help="Auto-open browser in headless mode"
-    ),
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
 ) -> None:
-    """Navigate the active browser to a URL."""
+    """Navigate an existing tab to a URL."""
     _run_coro(
         _client(ctx).call(
-            "navigate", {"url": url, "new_tab": new_tab, "headless": headless}
+            "navigate",
+            {"url": url, "browser_id": browser_id, "tab_id": tab_id},
         )
     )
 
@@ -241,8 +234,10 @@ def eval_js(
         "-f",
         help="Read JavaScript from a file instead of the inline argument",
     ),
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
 ) -> None:
-    """Execute JavaScript in the active browser tab.
+    """Execute JavaScript in the target tab.
 
     Pass JS inline as an argument, or use --file <path> to load a multi-line
     script from a file. The two are mutually exclusive.
@@ -258,7 +253,12 @@ def eval_js(
             _output_json({"error": f"File not found: {file}"})
             raise typer.Exit(code=1)
         js = file.read_text(encoding="utf-8")
-    _run_coro(_client(ctx).call("eval", {"js": js}))
+    _run_coro(
+        _client(ctx).call(
+            "eval",
+            {"js": js, "browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
 
 
 @app.command("wait-for")
@@ -267,11 +267,13 @@ def wait_for(
     expression: str = typer.Argument(
         ..., help="JavaScript expression to poll until truthy"
     ),
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
     timeout: float = typer.Option(
         30.0, "--timeout", help="Timeout in seconds (default 30)"
     ),
 ) -> None:
-    """Poll a JS expression until it's truthy or timeout.
+    """Poll a JS expression until it's truthy or timeout in the target tab.
 
     Uses Playwright's wait_for_function, which polls in-browser. Runs in
     the main world, so it can see page globals and userscript-injected
@@ -279,14 +281,28 @@ def wait_for(
     exit on timeout.
     """
     _run_coro(
-        _client(ctx).call("wait-for", {"expression": expression, "timeout": timeout})
+        _client(ctx).call(
+            "wait-for",
+            {
+                "expression": expression,
+                "timeout": timeout,
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+            },
+        )
     )
 
 
 @app.command()
-def screenshot(ctx: typer.Context) -> None:
-    """Capture a screenshot of the current browser viewport."""
-    _run_coro(_client(ctx).call("screenshot"))
+def screenshot(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Capture a screenshot of the target tab's viewport."""
+    _run_coro(
+        _client(ctx).call("screenshot", {"browser_id": browser_id, "tab_id": tab_id})
+    )
 
 
 @tabs_app.command("list")
@@ -297,28 +313,55 @@ def tabs_list(
     ),
 ) -> None:
     """List open tabs grouped by browser."""
-    result = _run_coro_raw(_client(ctx).call("tabs/list"))
-    if browser_id is not None and isinstance(result, list):
-        result = [b for b in result if b.get("browser_id") == browser_id]
-    _output_json(result)
+    payload: dict[str, Any] = {}
+    if browser_id is not None:
+        payload["browser_id"] = browser_id
+    _run_coro(_client(ctx).call("tabs/list", payload))
 
 
-@app.command()
-def switch_tab(
+@tabs_app.command("open")
+def tabs_open(
     ctx: typer.Context,
-    browser_id: int = typer.Option(..., "--browser-id", help="Browser ID"),
-    index: int = typer.Option(..., "--index", help="Tab index"),
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    url: str | None = typer.Option(
+        None, "--url", help="URL to navigate the new tab to (about:blank if omitted)"
+    ),
 ) -> None:
-    """Switch to a specific tab."""
+    """Open a new tab in a browser.
+
+    Without --url the new tab opens at about:blank. Returns the new tab_id.
+    """
+    payload: dict[str, Any] = {"browser_id": browser_id}
+    if url is not None:
+        payload["url"] = url
+    _run_coro(_client(ctx).call("tabs/open", payload))
+
+
+@tabs_app.command("close")
+def tabs_close(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Close a tab in a browser."""
     _run_coro(
-        _client(ctx).call("tabs/switch", {"browser_id": browser_id, "index": index})
+        _client(ctx).call("tabs/close", {"browser_id": browser_id, "tab_id": tab_id})
     )
 
 
 @app.command("event-listeners")
-def event_listeners(ctx: typer.Context) -> None:
-    """List JavaScript event listeners on window and document."""
-    _run_coro(_client(ctx).call("event/listeners"))
+def event_listeners(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """List JavaScript event listeners on window and document in the target tab."""
+    _run_coro(
+        _client(ctx).call(
+            "event/listeners",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
 
 
 @request_app.command("clone")
@@ -401,6 +444,9 @@ def request_send(
 def userscript_install(
     ctx: typer.Context,
     name: str = typer.Option(..., "--name", help="Name for the userscript"),
+    browser_id: int = typer.Option(
+        ..., "--browser-id", help="Browser to reload the extension on"
+    ),
     file: Path | None = typer.Option(
         None, "--file", "-f", help="JavaScript file to install"
     ),
@@ -414,7 +460,9 @@ def userscript_install(
 
     The script runs at document_start in the main world on every page,
     before the page's own scripts. Overwrites any existing userscript
-    of the same name.
+    of the same name. The extension is reloaded on the given browser;
+    existing already-loaded tabs are not re-injected (re-navigate to
+    apply).
     """
     if file is not None and source is not None:
         _output_json({"error": "Provide either --file or --source, not both"})
@@ -426,9 +474,13 @@ def userscript_install(
         if not file.is_file():
             _output_json({"error": f"File not found: {file}"})
             raise typer.Exit(code=1)
-        payload: dict[str, Any] = {"name": name, "file": str(file)}
+        payload: dict[str, Any] = {
+            "name": name,
+            "browser_id": browser_id,
+            "file": str(file),
+        }
     else:
-        payload = {"name": name, "source": source}
+        payload = {"name": name, "browser_id": browser_id, "source": source}
     _run_coro(_client(ctx).call("userscript/install", payload))
 
 
@@ -442,9 +494,14 @@ def userscript_list(ctx: typer.Context) -> None:
 def userscript_remove(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="Name of the userscript to remove"),
+    browser_id: int = typer.Option(
+        ..., "--browser-id", help="Browser to reload the extension on"
+    ),
 ) -> None:
-    """Remove a userscript."""
-    _run_coro(_client(ctx).call("userscript/remove", {"name": name}))
+    """Remove a userscript and reload the extension on the given browser."""
+    _run_coro(
+        _client(ctx).call("userscript/remove", {"name": name, "browser_id": browser_id})
+    )
 
 
 def main() -> None:
