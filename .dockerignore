@@ -1,0 +1,8 @@
+# Ignore everything by default, then whitelist what the test image needs
+
+*
+!src/
+!tests/
+!pyproject.toml
+!uv.lock
+!README.md

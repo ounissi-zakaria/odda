@@ -1,6 +1,8 @@
 ---
 prepend:
-  - _lib/setup.md
+  - _lib/boot.md
+append:
+  - _lib/teardown.md
 ---
 
 # `odda request clone`
@@ -9,18 +11,6 @@ Clones a captured flow into an editable request. The captured flow
 must come from a previous `curl` (or browser navigation) through
 the proxy, which is set up at the start of this document.
 
-## Boot the server
-
-```scrut {detached: true, detached_kill_signal: term}
-$ ( "$ODDA_BIN" server --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   >"$PWD/server.log" 2>&1 & )
-```
-
-```scrut {wait: {timeout: 10s, path: "odda.sock"}}
-$ echo "server is up"
-server is up
-```
-
 ## Capture a flow through the proxy
 
 Use `curl` through `proxy-url` against the local `xs2.top` testing
@@ -28,7 +18,7 @@ server. The body, status, and a header are all controlled by the
 query string so we can verify them later.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url > "$PWD/proxy_url"
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url > "$PWD/proxy_url"
 ```
 
 ```scrut
@@ -50,6 +40,10 @@ $ grep '"host": "xs2.top"' "$PWD/data/flows/flows.jsonl" | head -n 1 \
 ```
 
 ```scrut
+$ flow_id=$(cat "$PWD/flow_id")
+```
+
+```scrut
 $ cat "$PWD/flow_id"
 * (glob)
 ```
@@ -58,7 +52,7 @@ $ cat "$PWD/flow_id"
 
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request clone "$flow_id" --name clone-test \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"], d["port"])'
 clone-test https xs2.top 443
@@ -80,7 +74,7 @@ meta.json non-empty
 
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request clone "$flow_id" --name clone-test 2>&1 \
 >   | grep -F "already exists" >/dev/null && echo "refused" || echo "ERROR: did not refuse"
 refused
@@ -90,14 +84,8 @@ refused
 
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request clone "$flow_id" --name clone-test --force \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"], d["port"])'
 clone-test https xs2.top 443
-```
-
-## Teardown: stop the odda server
-
-```scrut
-$ pkill -f "odda.*--data-dir $PWD/data" 2>/dev/null || true
 ```

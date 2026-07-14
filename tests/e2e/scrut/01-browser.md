@@ -1,6 +1,8 @@
 ---
 prepend:
-  - _lib/setup.md
+  - _lib/boot.md
+append:
+  - _lib/teardown.md
 ---
 
 # Browser, tabs, navigation, eval, screenshot, event-listeners, wait-for
@@ -8,18 +10,6 @@ prepend:
 Covers everything you'd want to do to a single browser instance: open
 it, list its tabs, navigate, run JavaScript, take a screenshot, list
 event listeners, and wait for a JS condition.
-
-## Boot the server
-
-```scrut {detached: true, detached_kill_signal: term}
-$ ( "$ODDA_BIN" server --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   >"$PWD/server.log" 2>&1 & )
-```
-
-```scrut {wait: {timeout: 10s, path: "odda.sock"}}
-$ echo "server is up"
-server is up
-```
 
 ## Helper: spin up a tiny local HTTP server
 
@@ -44,7 +34,7 @@ $ for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8766/ && exit 0
 ## `browser open` returns browser_id and initial tab_id
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sorted(d), d["browser_id"], d["tab_id"])'
 ['browser_id', 'status', 'tab_id'] 1 1
 ```
@@ -55,7 +45,7 @@ server — `browser_id` and the initial `tab_id` start at 1.)
 ## `tabs list` reports the new browser with its initial tab
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d), d[0]["browser_id"], len(d[0]["tabs"]), d[0]["tabs"][0]["tab_id"])'
 1 1 1 1
 ```
@@ -63,7 +53,7 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list \
 ## `navigate` returns `{status: "Navigated to: ..."}`
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   navigate http://127.0.0.1:8766/ --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
 Navigated to: http://127.0.0.1:8766/
@@ -72,7 +62,7 @@ Navigated to: http://127.0.0.1:8766/
 ## `eval` runs JavaScript and returns the result
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval "document.title" --browser-id 1 --tab-id 1
 "Listener Test"
 ```
@@ -80,7 +70,7 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ### `eval --file` reads JavaScript from a file
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --file "$TESTDIR/fixtures/eval.js" --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sorted(d.items()))'
 [('ok', True), ('title', 'Listener Test')]
@@ -89,7 +79,7 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ### `eval` with neither inline JS nor `--file` is rejected
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --browser-id 1 --tab-id 1
 [1]
 {"error": "Provide inline JS or --file <path>"}
@@ -98,7 +88,7 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ### `eval` with both inline JS and `--file` is rejected
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval "1" --file "$TESTDIR/fixtures/eval.js" --browser-id 1 --tab-id 1
 [1]
 {"error": "Provide either inline JS or --file, not both"}
@@ -107,7 +97,7 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ### `eval --file` with a missing file is rejected
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --file "$PWD/nope.js" --browser-id 1 --tab-id 1
 [1]
 {"error": "File not found: *"} (glob)
@@ -118,7 +108,7 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 The return value is a JSON-quoted string containing the screenshot path.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   screenshot --browser-id 1 --tab-id 1
 "*/screenshot_*.jpeg" (glob)
 ```
@@ -130,7 +120,7 @@ The fixture page registers a `resize` listener on `window` and a
 least those two.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   event-listeners --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); ts=sorted({l["type"] for l in d}); print(ts, "resize" in ts and "scroll" in ts)'
 ['resize', 'scroll'] True
@@ -139,7 +129,7 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ## `wait-for` returns the truthy value when the condition is already true
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wait-for "document.title" --browser-id 1 --tab-id 1 --timeout 5
 "Listener Test"
 ```
@@ -147,13 +137,13 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ## `wait-for` polls until a delayed value lands
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval "setTimeout(() => { window.__waitTest__ = 'arrived'; }, 1000)" \
 >   --browser-id 1 --tab-id 1 > /dev/null
 ```
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wait-for "window.__waitTest__" --browser-id 1 --tab-id 1 --timeout 5
 "arrived"
 ```
@@ -161,7 +151,7 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ## `wait-for` times out when the condition never becomes truthy
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wait-for "window.__never__" --browser-id 1 --tab-id 1 --timeout 2
 [1]
 {*"error": "*Timeout*"*} (glob)
@@ -183,10 +173,4 @@ $ sleep 1
 ```scrut
 $ pgrep -f "http.server 8766.*$PWD/site" >/dev/null && echo "still running" || echo "stopped"
 stopped
-```
-
-## Teardown: stop the odda server
-
-```scrut
-$ pkill -f "odda.*--data-dir $PWD/data" 2>/dev/null || true
 ```

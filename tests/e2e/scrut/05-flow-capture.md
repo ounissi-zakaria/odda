@@ -1,6 +1,8 @@
 ---
 prepend:
-  - _lib/setup.md
+  - _lib/boot.md
+append:
+  - _lib/teardown.md
 ---
 
 # Proxy and flow capture
@@ -9,18 +11,6 @@ A captured HTTP flow through `odda proxy-url` lands in
 `$data_dir/flows/flows.jsonl` plus a per-flow directory with
 `request`, `response_headers`, `response_body.<ext>`, all
 read-only (mode 0444).
-
-## Boot the server
-
-```scrut {detached: true, detached_kill_signal: term}
-$ ( "$ODDA_BIN" server --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   >"$PWD/server.log" 2>&1 & )
-```
-
-```scrut {wait: {timeout: 10s, path: "odda.sock"}}
-$ echo "server is up"
-server is up
-```
 
 ## Helper: local HTTP server to capture against
 
@@ -52,14 +42,14 @@ $ for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8765/ && exit 0
 ## `odda proxy-url` returns the proxy URL
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url
 http://127.0.0.1:* (glob)
 ```
 
 ## Send one request through the proxy
 
 ```scrut
-$ curl -s -x "$(odda proxy-url)" \
+$ curl -s -x "$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url)" \
 >   http://127.0.0.1:8765/ -o /dev/null -w "curl_status=%{http_code}\n"
 curl_status=200
 ```
@@ -152,10 +142,4 @@ $ sleep 1
 ```scrut
 $ pgrep -f "http.server 8765.*$PWD/site" >/dev/null && echo "still running" || echo "stopped"
 stopped
-```
-
-## Teardown: stop the odda server
-
-```scrut
-$ pkill -f "odda.*--data-dir $PWD/data" 2>/dev/null || true
 ```

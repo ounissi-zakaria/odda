@@ -1,6 +1,8 @@
 ---
 prepend:
-  - _lib/setup.md
+  - _lib/boot.md
+append:
+  - _lib/teardown.md
 ---
 
 # `odda request new` + `request send` (HTTP/1.1)
@@ -9,22 +11,10 @@ Create an empty editable request, fill in a raw HTTP/1.1 request,
 and `send` it. The sent request is recorded as a flow with the
 scheme + port in `flows.jsonl`.
 
-## Boot the server
-
-```scrut {detached: true, detached_kill_signal: term}
-$ ( "$ODDA_BIN" server --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   >"$PWD/server.log" 2>&1 & )
-```
-
-```scrut {wait: {timeout: 10s, path: "odda.sock"}}
-$ echo "server is up"
-server is up
-```
-
 ## `request new` creates an empty `request` and a `meta.json`
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request new --name h1-test --host xs2.top \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"])'
 h1-test https xs2.top
@@ -52,7 +42,7 @@ $ sed 's/$/\r/' > "$PWD/data/requests/h1-test/request" <<'REQEOF'
 ## `request send` records the flow and returns the `flows.jsonl` record
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send h1-test --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status_code"], "id=" + d["id"], d["body_file"])'
 200 id=* flows/*/response_body.json (glob)
@@ -61,9 +51,13 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 The response body is the body we asked for in the query string.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send h1-test --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/flow_id"
+```
+
+```scrut
+$ flow_id=$(cat "$PWD/flow_id")
 ```
 
 ```scrut
@@ -93,10 +87,4 @@ $ grep "\"id\": \"$flow_id\"" "$PWD/data/flows/flows.jsonl" | grep -F '"scheme":
 >   && grep "\"id\": \"$flow_id\"" "$PWD/data/flows/flows.jsonl" | grep -F '"port": 443' >/dev/null \
 >   && echo "jsonl has scheme+port" || echo "missing"
 jsonl has scheme+port
-```
-
-## Teardown: stop the odda server
-
-```scrut
-$ pkill -f "odda.*--data-dir $PWD/data" 2>/dev/null || true
 ```

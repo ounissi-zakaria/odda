@@ -1,23 +1,13 @@
 ---
 prepend:
-  - _lib/setup.md
+  - _lib/boot.md
+append:
+  - _lib/teardown.md
 ---
 
 # `odda request send` (HTTP/2, fix-content-length, gzip, insecure, empty)
 
 Miscellaneous `odda request send` behavior.
-
-## Boot the server
-
-```scrut {detached: true, detached_kill_signal: term}
-$ ( "$ODDA_BIN" server --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   >"$PWD/server.log" 2>&1 & )
-```
-
-```scrut {wait: {timeout: 10s, path: "odda.sock"}}
-$ echo "server is up"
-server is up
-```
 
 ## `request send` negotiates HTTP/2 when the request line says `HTTP/2`
 
@@ -25,7 +15,7 @@ First, capture an HTTP/2 request via the proxy to get a real
 H2-shaped request to clone.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url > "$PWD/proxy_url"
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url > "$PWD/proxy_url"
 ```
 
 ```scrut
@@ -45,6 +35,10 @@ $ grep '"host": "xs2.top"' "$PWD/data/flows/flows.jsonl" | head -n 1 \
 ```
 
 ```scrut
+$ flow_id=$(cat "$PWD/flow_id")
+```
+
+```scrut
 $ cat "$PWD/flow_id"
 * (glob)
 ```
@@ -53,7 +47,7 @@ Now clone the captured H2 request and rewrite it for the H2 send test.
 
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request clone "$flow_id" --name h2-test --force > /dev/null
 ```
 
@@ -67,7 +61,7 @@ $ sed 's/$/\r/' > "$PWD/data/requests/h2-test/request" <<'REQEOF'
 ```
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send h2-test --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status_code"])'
 200
@@ -76,9 +70,13 @@ $ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 The response body matches.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send h2-test --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/h2_flow_id"
+```
+
+```scrut
+$ h2_flow_id=$(cat "$PWD/h2_flow_id")
 ```
 
 ```scrut
@@ -110,7 +108,7 @@ server would hang; with the flag the send succeeds and the stored
 request shows the corrected `Content-Length: 17`.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request new --name cl-test --host xs2.top --force > /dev/null
 ```
 
@@ -127,18 +125,21 @@ $ sed 's/$/\r/' > "$PWD/data/requests/cl-test/request" <<'REQEOF'
 ```
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send cl-test --fix-content-length --timeout 10 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
 200
 ```
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send cl-test --fix-content-length --timeout 10 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/cl_flow_id"
 ```
 
+```scrut
+$ cl_flow_id=$(cat "$PWD/cl_flow_id")
+```
 
 ```scrut
 $ grep -F "Content-Length: 17" "$PWD/data/flows/$cl_flow_id/request" >/dev/null \
@@ -161,7 +162,7 @@ as a response header. The send must not crash; the recorded
 `response_body.*` file is empty (or absent).
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request new --name gzip-test --host xs2.top --force > /dev/null
 ```
 
@@ -175,14 +176,14 @@ $ sed 's/$/\r/' > "$PWD/data/requests/gzip-test/request" <<'REQEOF'
 ```
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send gzip-test --timeout 10 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
 200
 ```
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send gzip-test --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["body_file"])'
 * flows/*/response_body.json (glob)
@@ -211,7 +212,7 @@ $ for i in $(seq 1 30); do curl -s -k -o /dev/null https://127.0.0.1:8771/ && ex
 ```
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request new --name insecure-test --host xs2.top --force > /dev/null
 ```
 
@@ -233,7 +234,7 @@ $ cat > "$PWD/data/requests/insecure-test/meta.json" <<'METAEOF'
 Without `--insecure`, the send errors with a TLS error.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send insecure-test --timeout 5 2>&1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("error" in d)'
 True
@@ -242,7 +243,7 @@ True
 With `--insecure`, the send succeeds.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send insecure-test --insecure --timeout 5 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
 200
@@ -273,19 +274,13 @@ stopped
 file must error.
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request new --name empty-test --host xs2.top --force > /dev/null
 ```
 
 ```scrut
-$ "$ODDA_BIN" --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send empty-test --timeout 5 2>&1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("error" in d, "error" in d and d["error"] != "")'
 True True
-```
-
-## Teardown: stop the odda server
-
-```scrut
-$ pkill -f "odda.*--data-dir $PWD/data" 2>/dev/null || true
 ```

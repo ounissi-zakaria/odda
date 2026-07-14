@@ -29,10 +29,10 @@ If you add, remove, or change a dependency in `pyproject.toml`, regenerate the l
 
 ```bash
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
-ODDA_BIN=$(pwd)/.venv/bin/odda scrut test tests/e2e/scrut/
+./scripts/test-e2e.sh
 ```
 
-E2E tests require Chrome.
+E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that carries Chrome, scrut, and all system deps. No host Chrome or scrut installation required.
 
 ## Key files
 
