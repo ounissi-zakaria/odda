@@ -29,7 +29,7 @@ If you add, remove, or change a dependency in `pyproject.toml`, regenerate the l
 
 ```bash
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
-bash tests/e2e/test_all_commands.sh
+ODDA_BIN=$(pwd)/.venv/bin/odda scrut test tests/e2e/scrut/
 ```
 
 E2E tests require Chrome.
