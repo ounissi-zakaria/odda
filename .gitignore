@@ -5,6 +5,9 @@
 # /teach lessons
 classroom/
 
+# issues to implement
+.scratch/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
