@@ -2,6 +2,9 @@
 *.pyc
 .venv
 
+# /teach lessons
+classroom/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
