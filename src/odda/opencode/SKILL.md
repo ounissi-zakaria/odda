@@ -31,6 +31,12 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Start block coverage        | `odda coverage start --browser-id <id> --tab-id <n>`               |
 | Read coverage mid-recording | `odda coverage snapshot --browser-id <id> --tab-id <n>`             |
 | Stop coverage + final counts| `odda coverage stop --browser-id <id> --tab-id <n>`                |
+| Wrap a function (calls)     | `odda wrap calls add --browser-id <id> --tab-id <n> --expr "<js>" --name <name>` |
+| Wrap a property accessor    | `odda wrap access add --browser-id <id> --tab-id <n> --expr "<js>" --name <name>` |
+| List installed wraps        | `odda wrap list --browser-id <id> --tab-id <n>`                    |
+| Remove a wrap               | `odda wrap remove --browser-id <id> --tab-id <n> <name>`           |
+| Dump wrap records           | `odda wrap dump --browser-id <id> --tab-id <n>`                    |
+| Clear wrap records          | `odda wrap clear --browser-id <id> --tab-id <n>`                   |
 | Read server logs            | `odda logs [--follow] [--n N]`                                     |
 | Clone a flow to edit        | `odda request clone <flow-id> --name <name> [--force]`             |
 | Create an empty request     | `odda request new --name <name> [--force]`                         |
@@ -41,7 +47,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 Every browser/tab command takes an explicit target. Agents always specify which browser and which tab they mean.
 
 - **Browser-scoped commands** take `--browser-id`: `browser open`, `browser close`, `tabs list` (optional filter), `tabs open`, `userscript install/remove`.
-- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`, `coverage start`/`snapshot`/`stop`.
+- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`, `coverage start`/`snapshot`/`stop`, `wrap calls add`/`access add`/`list`/`remove`/`dump`/`clear`.
 
 IDs are integers, monotonic, and **never reused**. A closed tab's id is retired forever; a stale `--tab-id` errors cleanly instead of silently hitting a different tab. This makes it safe for multiple agents to share one odda server: each agent owns the IDs it captured and never disturbs another agent's target.
 
@@ -140,6 +146,51 @@ So the workflow is: `start` → trigger → (optional `snapshot` to peek) → tr
 - **Navigation resets the window.** A navigate clears the recording flag (and best-effort stops the Profiler), so a `snapshot`/`stop` after navigation errors as "not recording". Start again after navigating.
 - **Scope.** Main frame and same-origin iframes only (CDP `Profiler` domain is attached to the page session). Cross-origin iframes and worker contexts are out of scope.
 - **Errors.** Commands on a missing or closed tab, a missing browser, or a tab that is not recording return `{"error": ...}` with a non-zero exit code. Calling `start` on a tab that is already recording errors so you know the previous recording is still live.
+
+## Wrap
+
+`odda wrap` installs a transparent wrapper at a named function or property accessor. The wrapper is generated as a named userscript and installed via the existing userscript mechanism, so it runs at `document_start` on every navigation. Each call or access is recorded with its receiver, arguments, return value, and call stack. Use it when you know the function or property and want to see what flows through it.
+
+Per ADR-0003, wraps are **leaf-only**: a wrap records the call it was placed on and does not follow callbacks passed as arguments. To see what a registered callback does, use Coverage to find the handler's code path and a Logpoint to read locals at the interesting line.
+
+Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
+
+- `odda wrap calls add --browser-id <id> --tab-id <n> --expr "<js>" --name <name>` — Install a wrap on a function (e.g. `JSON.parse`, `EventTarget.prototype.addEventListener`). The wrapper calls through to the original and pushes a record with `{wrap, type: "call", this, args, ret, stack}`. The wrap takes effect on the next navigation (re-navigate the tab or open a new one).
+- `odda wrap access add --browser-id <id> --tab-id <n> --expr "<js>" --name <name>` — Install a wrap on a property accessor (e.g. `HTMLElement.prototype.innerHTML`, `document.cookie`). Both getter and setter are wrapped if present. A get records `ret` as the value read; a set records `args[0]` as the value written with `ret: null`.
+- `odda wrap list --browser-id <id> --tab-id <n>` — List installed wraps as `[{name, type, expr}]`. Wraps are stored on disk as named userscripts and apply to all tabs; the `--tab-id` is validated for targeting consistency but does not filter the list.
+- `odda wrap remove --browser-id <id> --tab-id <n> <name>` — Remove a wrap's userscript and reload the extension. The wrap stops recording on future navigations. Records already captured in the current page are not affected.
+- `odda wrap dump --browser-id <id> --tab-id <n>` — Read the per-tab wrap record array. Returns `[{wrap, type, this, args, ret, stack, error?}]`. The agent does not need to know the internal array name.
+- `odda wrap clear --browser-id <id> --tab-id <n>` — Zero the per-tab wrap record array without navigating. Returns `{status: "cleared", count: <records dropped>}`. Wrap installations are unaffected; subsequent calls continue to record.
+
+### Wrap record shape
+
+```json
+{
+  "wrap": "<name>",
+  "type": "call" | "access",
+  "this": "<serialized receiver>",
+  "args": ["<serialized values>"],
+  "ret": "<serialized return value, or null for setters>",
+  "stack": [{"fn": "string|null", "url": "string|null", "line": "int|null", "col": "int|null"}],
+  "error": "string (only present if the wrapped call threw)"
+}
+```
+
+### Serialization rules
+
+- **Functions** (in `args`, `ret`, or `this`): serialized as `{type: "function", name: "<inferred name or null>"}`. The function body is not captured; you cannot invoke captured functions.
+- **Large or cyclic values**: truncated and marked. Objects with more than 50 keys become `{type: "object", truncated: true, keys: [...]}`. Arrays longer than 100 become `{type: "array", truncated: true, length: N}`. Strings longer than 10000 characters become `{type: "string", truncated: true, length: N, preview: "..."}`. Cycles become `{type: "object", truncated: true, cycle: true}`. Depth beyond 5 levels is truncated.
+- **Call stack frames**: one shape `{fn, url, line, col}`; native or eval frames leave `url`/`line`/`col` null. Extension frames (from `chrome-extension://`) are filtered out.
+- **DOM nodes**: serialized as `{type: "node", name: "<nodeName>", tag: "<tagName>"}`.
+- **Property accessors** on serialized objects: marked as `{type: "accessor"}` (the getter is not invoked during serialization, so wrapping a property does not cause recursive recording when the receiver is serialized).
+
+### Lifecycle and scope
+
+- **Takes effect on next navigation.** `wrap calls add`/`access add` install a userscript and reload the extension, but already-loaded tabs are not re-injected. Re-navigate an existing tab (or open a new one) for the wrap to run. This matches the existing userscript model.
+- **Records wipe on navigation.** The userscript re-initializes `window.__oddaWrap = []` on each `document_start`, so records from the previous page load are gone. **Dump before navigating again** or the records are lost. Per ADR-0004.
+- **Installations persist across navigation.** The wrap's userscript re-runs on every `document_start`, so the wrap is re-installed on every page load until you `wrap remove` it.
+- **Scope: all frames.** Wraps reach all frames in the tab including cross-origin iframes (inherited from the userscript extension's `all_frames: true`). Same-origin iframes aggregate records to the top frame's `__oddaWrap` (so `wrap dump` on the main tab sees them); cross-origin iframes keep their own records (the wrap still runs there, but the records stay in the iframe's context — read them by evaluating in the iframe). Wraps do not reach worker contexts.
+- **Errors.** Commands on a missing or closed tab or a missing browser return `{"error": ...}` with a non-zero exit code. `wrap remove` on a non-existent wrap name errors.
 
 ## Raw request commands
 

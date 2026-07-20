@@ -110,3 +110,4 @@ split-on-trailing-comma = false
 "src/odda/flowstore.py" = ["PLW0603", "PLR0913"]
 "src/odda/server.py" = ["TRY301"]
 "src/odda/request/*.py" = ["PLR0913", "PLR2004", "C901", "PLR0912", "PLR0915", "TC003"]
+"src/odda/wrap.py" = ["E501"]

@@ -329,6 +329,83 @@ class OddaServer:
         """
         return await self.browser.coverage_stop(params["browser_id"], params["tab_id"])
 
+    # --- Wrap handlers ---
+
+    async def method_wrap_calls_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Install a call wrap on a named function.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID (validated for targeting; the wrap
+                applies to all tabs via the userscript extension).
+            name: Wrap name (used in records and as the userscript
+                name suffix).
+            expr: JS expression resolving to the function to wrap
+                (e.g. ``JSON.parse``).
+        """
+        return await self.browser.wrap_calls_add(
+            params["browser_id"],
+            params["tab_id"],
+            params["name"],
+            params["expr"],
+        )
+
+    async def method_wrap_access_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Install an access wrap on a property accessor.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            name: Wrap name.
+            expr: Dotted JS path to the property (e.g.
+                ``document.cookie``).
+        """
+        return await self.browser.wrap_access_add(
+            params["browser_id"],
+            params["tab_id"],
+            params["name"],
+            params["expr"],
+        )
+
+    async def method_wrap_list(self, params: dict[str, Any]) -> list[dict]:
+        """List installed wraps.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID (validated for targeting).
+        """
+        return await self.browser.wrap_list(params["browser_id"], params["tab_id"])
+
+    async def method_wrap_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Remove a wrap's userscript and reload the extension.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            name: Wrap name to remove.
+        """
+        return await self.browser.wrap_remove(
+            params["browser_id"], params["tab_id"], params["name"]
+        )
+
+    async def method_wrap_dump(self, params: dict[str, Any]) -> list[dict]:
+        """Read the per-tab wrap record array.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.wrap_dump(params["browser_id"], params["tab_id"])
+
+    async def method_wrap_clear(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Zero the per-tab wrap record array without navigating.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.wrap_clear(params["browser_id"], params["tab_id"])
+
     # --- Userscript handlers ---
 
     async def method_userscript_install(self, params: dict[str, Any]) -> dict[str, Any]:

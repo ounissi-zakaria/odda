@@ -19,7 +19,11 @@ from patchright.async_api import (
     async_playwright,
 )
 
-from odda import coverage as coverage_mod, userscript as userscript_mod
+from odda import (
+    coverage as coverage_mod,
+    userscript as userscript_mod,
+    wrap as wrap_mod,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +537,49 @@ class BrowserInstance:
         self._coverage_recording.pop(tab_id, None)
         return coverage_mod.format_accumulated(accumulator)
 
+    # --- wrap ----------------------------------------------------------
+
+    async def wrap_dump(self, tab_id: int) -> list[dict[str, Any]]:
+        """Read the per-tab wrap record array from ``window.__oddaWrap``.
+
+        The array is initialized to ``[]`` by the wrap userscripts on
+        each ``document_start`` (per ADR-0004, records are wiped on
+        navigation). If no wrap userscript has run on the current
+        page (e.g. the wrap was installed after the page loaded and
+        the page has not been navigated since), ``window.__oddaWrap``
+        is ``undefined`` and we return ``[]``.
+
+        Returns:
+            The list of wrap records (see the wrap module for the
+            record shape).
+        """
+        self._require_tab(tab_id)
+        result = await self.eval_js(
+            tab_id,
+            "typeof window.__oddaWrap === 'undefined' ? [] : window.__oddaWrap",
+        )
+        if isinstance(result, list):
+            return result
+        return []
+
+    async def wrap_clear(self, tab_id: int) -> dict[str, Any]:
+        """Zero the per-tab wrap record array without navigating.
+
+        Sets ``window.__oddaWrap = []`` in the tab. The wrap
+        installations are unaffected; subsequent calls will continue
+        to record.
+
+        Returns:
+            ``{"status": "cleared", "count": <records dropped>}``.
+        """
+        self._require_tab(tab_id)
+        prev = await self.eval_js(
+            tab_id,
+            "typeof window.__oddaWrap === 'undefined' ? 0 : window.__oddaWrap.length",
+        )
+        await self.eval_js(tab_id, "window.__oddaWrap = []")
+        return {"status": "cleared", "count": prev if isinstance(prev, int) else 0}
+
     # --- teardown ------------------------------------------------------
 
     async def _close(self) -> None:
@@ -792,3 +839,93 @@ class BrowserManager:
     def list_userscripts(self) -> list[dict[str, Any]]:
         """List all installed userscripts from disk."""
         return userscript_mod.list_scripts()
+
+    # --- wrap ----------------------------------------------------------
+
+    async def _wrap_add(
+        self,
+        browser_id: int,
+        tab_id: int,
+        name: str,
+        expr: str,
+        install_fn,
+    ) -> dict[str, Any]:
+        """Install a wrap (call or access) and reload the extension.
+
+        Validates that the target tab exists (so a stale ``--tab-id``
+        errors cleanly), installs the wrap as a named userscript via
+        ``install_fn``, and reloads the extension on the target
+        browser. The wrap takes effect on the next navigation (the
+        userscript re-runs at ``document_start``).
+
+        Returns:
+            The install result from the wrap module.
+        """
+        inst = self._require_instance(browser_id)
+        inst._require_tab(tab_id)  # noqa: SLF001
+        result = install_fn(name, expr)
+        result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
+        return result
+
+    async def wrap_calls_add(
+        self, browser_id: int, tab_id: int, name: str, expr: str
+    ) -> dict[str, Any]:
+        """Install a call wrap on a named function and reload the extension."""
+        return await self._wrap_add(
+            browser_id, tab_id, name, expr, wrap_mod.install_call
+        )
+
+    async def wrap_access_add(
+        self, browser_id: int, tab_id: int, name: str, expr: str
+    ) -> dict[str, Any]:
+        """Install an access wrap on a property accessor and reload the extension."""
+        return await self._wrap_add(
+            browser_id, tab_id, name, expr, wrap_mod.install_access
+        )
+
+    async def wrap_list(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
+        """List installed wraps.
+
+        Wraps are stored on disk as named userscripts and apply to all
+        tabs (the userscript extension's ``all_frames: true`` and
+        ``matches: <all_urls>`` mean a wrap reaches every tab). The
+        ``--tab-id`` is validated for targeting consistency with the
+        other wrap commands but does not filter the list.
+
+        Returns:
+            A list of ``{name, type, expr}`` dicts.
+        """
+        inst = self._require_instance(browser_id)
+        inst._require_tab(tab_id)  # noqa: SLF001
+        return wrap_mod.list_wraps()
+
+    async def wrap_remove(
+        self, browser_id: int, tab_id: int, name: str
+    ) -> dict[str, Any]:
+        """Remove a wrap's userscript and reload the extension.
+
+        The wrap stops recording on future navigations. Existing
+        records in already-loaded tabs are not affected (the wrapper
+        function is still in place until the page navigates).
+
+        Returns:
+            The remove result from the wrap module.
+        """
+        inst = self._require_instance(browser_id)
+        inst._require_tab(tab_id)  # noqa: SLF001
+        try:
+            result = wrap_mod.remove(name)
+        except ValueError as exc:
+            raise BrowserOperationError(str(exc)) from exc
+        result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
+        return result
+
+    async def wrap_dump(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
+        """Read the per-tab wrap record array."""
+        inst = self._require_instance(browser_id)
+        return await inst.wrap_dump(tab_id)
+
+    async def wrap_clear(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+        """Zero the per-tab wrap record array without navigating."""
+        inst = self._require_instance(browser_id)
+        return await inst.wrap_clear(tab_id)

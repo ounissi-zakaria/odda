@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head><title>Wrap Test</title></head>
+<body>
+<div id="sink"></div>
+<iframe id="xframe" src="iframe-inner.html"></iframe>
+<script>
+  // A function that takes a callback (to verify opaque function refs
+  // in args and the leaf-only rule: the callback itself is not
+  // wrapped, only the addEventListener call is recorded).
+  function registerClickHandler(target, type, cb) {
+    target.addEventListener(type, cb);
+    return 'registered';
+  }
+  window.__oddaWrapFixture = registerClickHandler;
+
+  // A property accessor target: a setter on a custom element that
+  // stores into a backing field.
+  function setSinkHtml(v) {
+    document.getElementById('sink').innerHTML = v;
+    return v;
+  }
+  window.__oddaWrapSetSink = setSinkHtml;
+
+  // A function that calls JSON.parse, so we can wrap JSON.parse and
+  // trigger it from the page.
+  function parseAndReturn(s) {
+    return JSON.parse(s);
+  }
+  window.__oddaWrapParseAndReturn = parseAndReturn;
+</script>
+</body>
+</html>

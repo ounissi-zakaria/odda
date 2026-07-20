@@ -29,12 +29,18 @@ userscript_app = typer.Typer(
 coverage_app = typer.Typer(
     name="coverage", help="Block-level code coverage (start, snapshot, stop)"
 )
+wrap_app = typer.Typer(name="wrap", help="Function and property wraps")
+wrap_calls_app = typer.Typer(name="calls", help="Install function (call) wraps")
+wrap_access_app = typer.Typer(name="access", help="Install property accessor wraps")
 
 app.add_typer(browser_app)
 app.add_typer(tabs_app)
 app.add_typer(request_app)
 app.add_typer(userscript_app)
 app.add_typer(coverage_app)
+app.add_typer(wrap_app)
+wrap_app.add_typer(wrap_calls_app)
+wrap_app.add_typer(wrap_access_app)
 
 
 def _output_json(data: Any) -> None:
@@ -420,6 +426,151 @@ def coverage_stop(
     _run_coro(
         _client(ctx).call(
             "coverage/stop",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@wrap_calls_app.command("add")
+def wrap_calls_add(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    expr: str = typer.Option(
+        ...,
+        "--expr",
+        help="JS expression resolving to the function to wrap (e.g. JSON.parse)",
+    ),
+    name: str = typer.Option(..., "--name", help="Name for the wrap"),
+) -> None:
+    """Install a wrap on a named function (records each call).
+
+    The wrapper is installed as a named userscript and the extension is
+    reloaded on the target browser. The wrap takes effect on the next
+    navigation (re-navigate the tab or open a new one). Per ADR-0003,
+    the wrap is leaf-only: it records the call it was placed on and
+    does not follow callbacks passed as arguments.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "wrap/calls/add",
+            {
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "expr": expr,
+                "name": name,
+            },
+        )
+    )
+
+
+@wrap_access_app.command("add")
+def wrap_access_add(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    expr: str = typer.Option(
+        ...,
+        "--expr",
+        help="Dotted JS path to the property to wrap (e.g. document.cookie)",
+    ),
+    name: str = typer.Option(..., "--name", help="Name for the wrap"),
+) -> None:
+    """Install a wrap on a property accessor (records each get/set).
+
+    Both getter and setter are wrapped if present. A get records
+    ``ret`` as the value read; a set records ``args[0]`` as the value
+    written with ``ret: null``. The wrap takes effect on the next
+    navigation.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "wrap/access/add",
+            {
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "expr": expr,
+                "name": name,
+            },
+        )
+    )
+
+
+@wrap_app.command("list")
+def wrap_list(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """List installed wraps.
+
+    Wraps are stored on disk as named userscripts and apply to all
+    tabs. The ``--tab-id`` is validated for targeting consistency but
+    does not filter the list.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "wrap/list",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@wrap_app.command("remove")
+def wrap_remove(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    name: str = typer.Argument(..., help="Name of the wrap to remove"),
+) -> None:
+    """Remove a wrap's userscript and reload the extension.
+
+    The wrap stops recording on future navigations. Records already
+    captured in the current page are not affected.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "wrap/remove",
+            {"browser_id": browser_id, "tab_id": tab_id, "name": name},
+        )
+    )
+
+
+@wrap_app.command("dump")
+def wrap_dump(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Read the per-tab wrap record array.
+
+    Each record is ``{wrap, type, this, args, ret, stack, error?}``.
+    Functions in args/ret/this are serialized as ``{type: "function",
+    name}``; large or cyclic values are truncated. Records are wiped
+    on navigation, so dump before navigating again.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "wrap/dump",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@wrap_app.command("clear")
+def wrap_clear(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Zero the per-tab wrap record array without navigating.
+
+    Wrap installations are unaffected; subsequent calls continue to
+    record. Use this to reset between triggers within one page load.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "wrap/clear",
             {"browser_id": browser_id, "tab_id": tab_id},
         )
     )
