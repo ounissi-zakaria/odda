@@ -19,7 +19,7 @@ from patchright.async_api import (
     async_playwright,
 )
 
-from odda import userscript as userscript_mod
+from odda import coverage as coverage_mod, userscript as userscript_mod
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,8 @@ class BrowserInstance:
         self._tabs: dict[int, Page] = {}
         self._cdp_sessions: dict[int, CDPSession] = {}
         self._script_maps: dict[int, dict[str, str]] = {}
+        self._coverage_recording: dict[int, bool] = {}
+        self._coverage_accumulators: dict[int, dict[str, Any]] = {}
         self._browser_cdp_session: CDPSession | None = None
         self._extension_id: str | None = None
 
@@ -166,9 +168,42 @@ class BrowserInstance:
         return tab_id
 
     def _on_frame_navigated(self, tab_id: int, frame) -> None:
-        """Clear that tab's script map on main-frame navigation."""
+        """Clear that tab's script map on main-frame navigation.
+
+        Per ADR-0004, navigation resets the coverage recording window:
+        the per-tab recording flag and accumulator are cleared and the
+        CDP Profiler is best-effort stopped (the session survives
+        navigation, so a later ``coverage start`` must not collide with
+        a leftover recording). The stop is scheduled on the event loop
+        because this callback is synchronous.
+        """
         if frame.parent_frame is None:
             self._script_maps.get(tab_id, {}).clear()
+            self._coverage_accumulators.pop(tab_id, None)
+            if self._coverage_recording.pop(tab_id, False):
+                with suppress(RuntimeError):
+                    asyncio.get_running_loop().create_task(
+                        self._best_effort_coverage_stop(tab_id)
+                    )
+
+    async def _best_effort_coverage_stop(self, tab_id: int) -> None:
+        """Best-effort stop a leftover CDP Profiler recording.
+
+        Used on navigation: the per-tab recording flag is already
+        cleared by the caller, but the CDP Profiler domain may still be
+        running. We stop it so a later ``coverage start`` does not
+        collide with a stale recording. Errors are logged and
+        swallowed — the tab may have closed or the session detached.
+        """
+        cdp = self._cdp_sessions.get(tab_id)
+        if cdp is None:
+            return
+        try:
+            await coverage_mod.stop(cdp)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning(
+                "Best-effort coverage stop failed for tab %s: %s", tab_id, exc
+            )
 
     def _on_page_close(self, tab_id: int) -> None:
         """Tear down per-tab state when a page closes."""
@@ -178,6 +213,8 @@ class BrowserInstance:
                 cdp.detach()
         self._tabs.pop(tab_id, None)
         self._script_maps.pop(tab_id, None)
+        self._coverage_recording.pop(tab_id, None)
+        self._coverage_accumulators.pop(tab_id, None)
 
     async def _setup_cdp_session(self, tab_id: int, page: Page) -> None:
         """Create and configure the per-tab CDP session (best-effort).
@@ -418,6 +455,84 @@ class BrowserInstance:
 
         return listeners
 
+    # --- coverage ------------------------------------------------------
+
+    async def coverage_start(self, tab_id: int) -> dict[str, Any]:
+        """Enable precise block-level coverage on the tab.
+
+        Marks the tab as recording and resets the per-tab accumulator.
+        Per-tab: starting on one tab does not affect another. Calling
+        ``start`` on a tab that is already recording is an error so the
+        agent knows the previous recording is still live.
+
+        Returns:
+            ``{"status": "recording"}``.
+        """
+        self._require_tab(tab_id)
+        if self._coverage_recording.get(tab_id):
+            raise BrowserOperationError(f"Tab {tab_id} is already recording coverage.")
+        cdp = await self._get_cdp_session(tab_id)
+        await coverage_mod.start(cdp)
+        self._coverage_accumulators[tab_id] = coverage_mod.new_accumulator()
+        self._coverage_recording[tab_id] = True
+        return {"status": "recording"}
+
+    async def coverage_snapshot(self, tab_id: int) -> dict[str, Any]:
+        """Read the delta since the last take without stopping.
+
+        CDP ``Profiler.takePreciseCoverage`` resets its counters on each
+        read, so this returns the delta since the previous take (or
+        since ``start`` if this is the first take). The delta is also
+        merged into the per-tab accumulator so ``coverage_stop`` can
+        return the cumulative counts for the whole window. Zero-hit
+        blocks are included. The recording flag stays set.
+
+        Returns:
+            The shaped coverage delta (see
+            ``coverage._format_coverage``).
+        """
+        self._require_tab(tab_id)
+        if not self._coverage_recording.get(tab_id):
+            raise BrowserOperationError(f"Tab {tab_id} is not recording coverage.")
+        cdp = await self._get_cdp_session(tab_id)
+        script_map = self._script_maps.get(tab_id, {})
+        delta = await coverage_mod.take_precise_coverage(cdp, script_map)
+        accumulator = self._coverage_accumulators.get(tab_id)
+        if accumulator is not None:
+            coverage_mod.merge_delta(accumulator, delta)
+        return delta
+
+    async def coverage_stop(self, tab_id: int) -> dict[str, Any]:
+        """Take a final delta and return the cumulative counts for the window.
+
+        Takes one final delta, merges it into the per-tab accumulator,
+        stops the CDP Profiler, clears the recording flag, and returns
+        the accumulator formatted as the public coverage shape. The
+        returned counts are the cumulative totals for the whole
+        recording window (the sum of every take since ``start``,
+        including any intermediate ``snapshot`` reads), so the agent
+        gets the full-window picture regardless of whether they
+        snapshotted mid-way. To slice a sub-window, subtract two
+        ``snapshot`` deltas.
+
+        Returns:
+            The shaped cumulative coverage object for the recording
+            window.
+        """
+        self._require_tab(tab_id)
+        if not self._coverage_recording.get(tab_id):
+            raise BrowserOperationError(f"Tab {tab_id} is not recording coverage.")
+        cdp = await self._get_cdp_session(tab_id)
+        script_map = self._script_maps.get(tab_id, {})
+        delta = await coverage_mod.take_precise_coverage(cdp, script_map)
+        accumulator = self._coverage_accumulators.pop(tab_id, None)
+        if accumulator is None:
+            accumulator = coverage_mod.new_accumulator()
+        coverage_mod.merge_delta(accumulator, delta)
+        await coverage_mod.stop(cdp)
+        self._coverage_recording.pop(tab_id, None)
+        return coverage_mod.format_accumulated(accumulator)
+
     # --- teardown ------------------------------------------------------
 
     async def _close(self) -> None:
@@ -634,6 +749,21 @@ class BrowserManager:
         """List JS event listeners in the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.list_event_listeners(tab_id)
+
+    async def coverage_start(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+        """Enable precise block-level coverage on the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.coverage_start(tab_id)
+
+    async def coverage_snapshot(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+        """Read per-block hit counts on the target tab without stopping."""
+        inst = self._require_instance(browser_id)
+        return await inst.coverage_snapshot(tab_id)
+
+    async def coverage_stop(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+        """Take a final coverage snapshot and stop recording on the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.coverage_stop(tab_id)
 
     async def install_userscript(
         self, browser_id: int, name: str, source: str

@@ -26,11 +26,15 @@ request_app = typer.Typer(name="request", help="Raw HTTP request commands")
 userscript_app = typer.Typer(
     name="userscript", help="Manage userscripts that auto-run on every page"
 )
+coverage_app = typer.Typer(
+    name="coverage", help="Block-level code coverage (start, snapshot, stop)"
+)
 
 app.add_typer(browser_app)
 app.add_typer(tabs_app)
 app.add_typer(request_app)
 app.add_typer(userscript_app)
+app.add_typer(coverage_app)
 
 
 def _output_json(data: Any) -> None:
@@ -359,6 +363,63 @@ def event_listeners(
     _run_coro(
         _client(ctx).call(
             "event/listeners",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@coverage_app.command("start")
+def coverage_start(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Enable precise block-level coverage on the target tab.
+
+    Marks the tab as recording. Per-tab: starting on one tab does not
+    affect another. The recording window resets on navigation.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "coverage/start",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@coverage_app.command("snapshot")
+def coverage_snapshot(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Read per-script, per-block hit counts without stopping the recording.
+
+    Zero-hit blocks are included. Script URLs are resolved via the
+    server's scriptId-to-url map.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "coverage/snapshot",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@coverage_app.command("stop")
+def coverage_stop(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Take a final coverage snapshot, stop the Profiler, and end recording.
+
+    Returns the same per-script, per-block output as ``snapshot``; the
+    recording flag is cleared as a side effect.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "coverage/stop",
             {"browser_id": browser_id, "tab_id": tab_id},
         )
     )

@@ -298,6 +298,37 @@ class OddaServer:
             params["browser_id"], params["tab_id"]
         )
 
+    # --- Coverage handlers ---
+
+    async def method_coverage_start(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Enable precise block-level coverage on the target tab.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.coverage_start(params["browser_id"], params["tab_id"])
+
+    async def method_coverage_snapshot(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Read per-block hit counts on the target tab without stopping.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.coverage_snapshot(
+            params["browser_id"], params["tab_id"]
+        )
+
+    async def method_coverage_stop(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Take a final coverage snapshot and stop recording on the target tab.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.coverage_stop(params["browser_id"], params["tab_id"])
+
     # --- Userscript handlers ---
 
     async def method_userscript_install(self, params: dict[str, Any]) -> dict[str, Any]:

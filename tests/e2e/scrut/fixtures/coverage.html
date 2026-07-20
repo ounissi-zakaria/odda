@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><title>Coverage Test</title></head>
+<body>
+<button id="btn">Trigger</button>
+<script>
+  function handleBranch(flag) {
+    var result;
+    if (flag) {
+      result = 'taken-branch';
+    } else {
+      result = 'not-taken-branch';
+    }
+    return result;
+  }
+  window.__oddaCoverageFixture = handleBranch;
+</script>
+</body>
+</html>

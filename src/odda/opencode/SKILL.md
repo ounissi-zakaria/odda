@@ -28,6 +28,9 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Install a userscript        | `odda userscript install --name <name> --browser-id <id> --file <path>` |
 | List userscripts            | `odda userscript list`                                             |
 | Remove a userscript         | `odda userscript remove <name> --browser-id <id>`                  |
+| Start block coverage        | `odda coverage start --browser-id <id> --tab-id <n>`               |
+| Read coverage mid-recording | `odda coverage snapshot --browser-id <id> --tab-id <n>`             |
+| Stop coverage + final counts| `odda coverage stop --browser-id <id> --tab-id <n>`                |
 | Read server logs            | `odda logs [--follow] [--n N]`                                     |
 | Clone a flow to edit        | `odda request clone <flow-id> --name <name> [--force]`             |
 | Create an empty request     | `odda request new --name <name> [--force]`                         |
@@ -38,7 +41,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 Every browser/tab command takes an explicit target. Agents always specify which browser and which tab they mean.
 
 - **Browser-scoped commands** take `--browser-id`: `browser open`, `browser close`, `tabs list` (optional filter), `tabs open`, `userscript install/remove`.
-- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`.
+- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`, `coverage start`/`snapshot`/`stop`.
 
 IDs are integers, monotonic, and **never reused**. A closed tab's id is retired forever; a stale `--tab-id` errors cleanly instead of silently hitting a different tab. This makes it safe for multiple agents to share one odda server: each agent owns the IDs it captured and never disturbs another agent's target.
 
@@ -91,6 +94,52 @@ Behavior notes:
 - **Idempotent re-injection.** Scripts run on every navigation. Write them to be idempotent (e.g., guard with `if (window.__myHelper__) return;`).
 - **Reload applies on next navigation.** `install`/`remove` reload the extension for the given browser, but already-loaded tabs are not re-injected. Re-navigate an existing tab (or open a new one) for the change to take effect there.
 - **Dialog interceptor.** `odda eval "window.__oddaDialogs" --browser-id <id> --tab-id <n>` returns an array of captured dialog/print events. Each entry has `{type, url, timestamp, stack, result?}` plus `message` and `defaultValue` when applicable. `type` is one of `print`, `alert`, `confirm`, `prompt`. `message` is present for `alert`/`confirm`/`prompt`. `defaultValue` is present for `prompt`. `result` is recorded for `confirm`/`prompt`. Use this to inspect what modal dialogs or print calls a page triggered during automation.
+
+## Coverage
+
+`odda coverage` records which code blocks execute during a window of interest. It is an **aggregate query** — you start it, do the thing, then read back per-block hit counts. Not placed at any target; records counts, not events. Use it when you know neither the function nor the line and need to find the code path that ran.
+
+Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
+
+- `odda coverage start --browser-id <id> --tab-id <n>` — Enable the CDP Profiler domain with precise block-level coverage (`callCount` + `detailed`) and mark the tab as recording. Returns `{"status": "recording"}`. Starting on one tab does not affect another tab's recording.
+- `odda coverage snapshot --browser-id <id> --tab-id <n>` — Read per-script, per-block hit counts without stopping. Returns the coverage object. Zero-hit blocks are included (the negative space is as informative as the positive). The recording flag stays set.
+- `odda coverage stop --browser-id <id> --tab-id <n>` — Take a final coverage snapshot, stop the Profiler, clear the recording flag, and return the same per-script, per-block output as `snapshot`.
+
+### Coverage output shape
+
+```json
+{
+  "scripts": [
+    {
+      "url": "<script url or null>",
+      "functions": [
+        {
+          "name": "<function name or null>",
+          "ranges": [{"startOffset": 0, "endOffset": 42, "count": 1}]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`url` is resolved from the server's scriptId-to-url map (populated by `Debugger.scriptParsed`); `null` for inline scripts or scripts odda could not resolve. Each `range` is a block; `count` is the number of times that block executed within the take window. Zero-hit blocks appear with `count: 0`.
+
+### Delta and cumulative semantics (important)
+
+CDP `Profiler.takePreciseCoverage` **resets its counters on each read**, so each take returns the delta since the previous take. odda accumulates these deltas server-side so:
+
+- `snapshot` returns the **delta** since the previous take (or since `start` for the first take). Use it to read mid-window progress or to slice a sub-window (subtract two `snapshot` deltas).
+- `stop` returns the **cumulative counts for the whole recording window** (the sum of every take since `start`, including any intermediate `snapshot` reads). You always get the full-window picture at `stop`, regardless of whether you snapshotted mid-way.
+
+So the workflow is: `start` → trigger → (optional `snapshot` to peek) → trigger more → `stop` for the full window. To slice a sub-window, take a `snapshot` at the boundary, take another (or `stop`) later, and subtract.
+
+### Lifecycle and scope
+
+- **Per-tab.** Coverage state is per-tab: starting on one tab does not affect another. Multiple agents sharing one odda server do not disturb each other's recordings.
+- **Navigation resets the window.** A navigate clears the recording flag (and best-effort stops the Profiler), so a `snapshot`/`stop` after navigation errors as "not recording". Start again after navigating.
+- **Scope.** Main frame and same-origin iframes only (CDP `Profiler` domain is attached to the page session). Cross-origin iframes and worker contexts are out of scope.
+- **Errors.** Commands on a missing or closed tab, a missing browser, or a tab that is not recording return `{"error": ...}` with a non-zero exit code. Calling `start` on a tab that is already recording errors so you know the previous recording is still live.
 
 ## Raw request commands
 
