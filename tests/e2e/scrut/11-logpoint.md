@@ -1,6 +1,8 @@
 ---
 prepend:
   - _lib/boot.md
+  - _lib/fixture-server.md
+  - _lib/browser-fixture.md
 append:
   - _lib/teardown.md
 ---
@@ -20,29 +22,7 @@ The agent supplies `--url`, `--line` (0-based), `--col` (0-based), and
 `--expr`. Minified code packs many statements per line, so the column
 is required to hit the right statement.
 
-## Helper: spin up a tiny local HTTP server
-
-```scrut {detached: true, detached_kill_signal: term}
-$ ( mkdir -p "$PWD/site" && \
->   cp "$TESTDIR/fixtures/logpoint.html" "$PWD/site/logpoint.html" && \
->   cp "$TESTDIR/fixtures/logpoint.js" "$PWD/site/logpoint.js" && \
->   python3 -m http.server 8766 --bind 127.0.0.1 --directory "$PWD/site" \
->     >"$PWD/http.log" 2>&1 & )
-```
-
-```scrut
-$ for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8766/ && exit 0; sleep 0.5; done; exit 1
-```
-
-## Set up a browser
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["tab_id"])'
-1 1
-```
-
-## Navigate to the fixture page
+## Set up the fixture server and browser
 
 The fixture defines `window.__oddaLogpointFixture(name)` in an external
 `logpoint.js` so line/column numbers are 0-based offsets in the file.
@@ -51,14 +31,19 @@ line 1, the return is on line 2, the closing brace is on line 3, and
 the fixture export is on line 4.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/logpoint.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/logpoint.html
+$ setup_fixture_site logpoint.html logpoint.js
+```
+
+```scrut {detached: true, detached_kill_signal: term}
+$ port=$(cat "$PWD/fixture_port"); ( python3 -m http.server "$port" --bind 127.0.0.1 --directory "$PWD/site" >"$PWD/http.log" 2>&1 < /dev/null & )
 ```
 
 ```scrut
-$ sleep 1
+$ wait_for_fixture_server
+```
+
+```scrut
+$ open_browser_fixture /logpoint.html "typeof window.__oddaLogpointFixture === 'function'"
 ```
 
 ## `logpoint add` plants a non-pausing observation that records a local
@@ -68,9 +53,9 @@ with expression `greeting`. At that point `greeting` has been assigned
 on line 1, so the logpoint records its value.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   logpoint add --browser-id 1 --tab-id 1 \
->     --url http://127.0.0.1:8766/logpoint.js --line 2 --col 0 \
+>     --url "http://127.0.0.1:$port/logpoint.js" --line 2 --col 0 \
 >     --expr "greeting" \
 >   | python3 -c '
 > import json, sys
@@ -107,7 +92,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 > '
 True
 True
-http://127.0.0.1:8766/logpoint.js
+http://127.0.0.1:*/logpoint.js (glob)
 2 0
 hello world
 null
@@ -123,10 +108,10 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 > d = json.load(sys.stdin)
 > print(len(d) == 1)
 > lp = d[0]
-> print(lp["url"], lp["line"], lp["col"], lp["expr"])
+> print("/logpoint.js" in lp["url"], lp["line"], lp["col"], lp["expr"])
 > '
 True
-http://127.0.0.1:8766/logpoint.js 2 0 greeting
+True 2 0 greeting
 ```
 
 ## A wrong local name produces an error record
@@ -137,9 +122,9 @@ throws a ReferenceError; the record carries `{error:
 "ReferenceError: ..."}` rather than silently recording nothing.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   logpoint add --browser-id 1 --tab-id 1 \
->     --url http://127.0.0.1:8766/logpoint.js --line 1 --col 0 \
+>     --url "http://127.0.0.1:$port/logpoint.js" --line 1 --col 0 \
 >     --expr "noSuchLocal" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], "warning" not in d)'
 planted True
@@ -221,14 +206,7 @@ re-binds to the re-loaded script. After re-navigating and triggering,
 the logpoint records again without re-planting.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/logpoint.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/logpoint.html
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /logpoint.html "typeof window.__oddaLogpointFixture === 'function'"
 ```
 
 After navigation, `dump` is empty (records wiped).
@@ -314,14 +292,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/logpoint.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/logpoint.html
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /logpoint.html "typeof window.__oddaLogpointFixture === 'function'"
 ```
 
 ```scrut
@@ -351,9 +322,9 @@ fixture produces no records from this logpoint (the breakpoint never
 binds).
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   logpoint add --browser-id 1 --tab-id 1 \
->     --url http://127.0.0.1:8766/does-not-exist.js --line 0 --col 0 \
+>     --url "http://127.0.0.1:$port/does-not-exist.js" --line 0 --col 0 \
 >     --expr "x" \
 >   | python3 -c '
 > import json, sys
@@ -429,12 +400,12 @@ existing one errors cleanly (CDP allows only one logpoint per
 location).
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   logpoint add --browser-id 1 --tab-id 1 \
->     --url http://127.0.0.1:8766/logpoint.js --line 2 --col 0 \
+>     --url "http://127.0.0.1:$port/logpoint.js" --line 2 --col 0 \
 >     --expr "greeting"
 [1]
-{"error": "Server error (-32602): A logpoint already exists at http://127.0.0.1:8766/logpoint.js:2:0 (id=lp-1); remove it first."}
+{"error": "Server error (-32602): A logpoint already exists at http://127.0.0.1:*/logpoint.js:2:0 (id=lp-1); remove it first."} (glob)
 ```
 
 ## Logpoints do not survive tab close (per-tab-session)
@@ -451,14 +422,15 @@ closed
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   tabs open --browser-id 1 --url http://127.0.0.1:8766/logpoint.html \
+$ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   tabs open --browser-id 1 --url "http://127.0.0.1:$port/logpoint.html" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["tab_id"])'
 2
 ```
 
 ```scrut
-$ sleep 1
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   wait-for "typeof window.__oddaLogpointFixture === 'function'" --browser-id 1 --tab-id 2 --timeout 10 > /dev/null
 ```
 
 ```scrut
@@ -467,17 +439,8 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 []
 ```
 
-## Teardown: stop the local HTTP server
+## Teardown: stop the fixture server
 
 ```scrut
-$ pkill -f "http.server 8766.*$PWD/site" 2>/dev/null
-```
-
-```scrut
-$ sleep 1
-```
-
-```scrut
-$ pgrep -f "http.server 8766.*$PWD/site" >/dev/null && echo "still running" || echo "stopped"
-stopped
+$ stop_fixture_server
 ```

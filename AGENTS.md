@@ -29,10 +29,10 @@ If you add, remove, or change a dependency in `pyproject.toml`, regenerate the l
 
 ```bash
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
-./scripts/test-e2e.sh
+./scripts/test-e2e.sh -j4
 ```
 
-E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that carries Chrome, scrut, and all system deps. No host Chrome or scrut installation required.
+E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that carries Chrome, scrut, and all system deps. No host Chrome or scrut installation required. `-j N` controls parallelism across test documents (default 1, use `-j4` for speed, `-j0` for unlimited). Each `scrut test <file>` runs in its own `$PWD` with its own odda server and auto-picked fixture port, so parallel docs never collide.
 
 ## Key files
 

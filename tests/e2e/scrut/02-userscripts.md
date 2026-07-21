@@ -1,6 +1,8 @@
 ---
 prepend:
   - _lib/boot.md
+  - _lib/fixture-server.md
+  - _lib/browser-fixture.md
 append:
   - _lib/teardown.md
 ---
@@ -12,33 +14,22 @@ navigation. `odda` also ships a built-in dialog interceptor that
 captures `window.print`/`alert`/`confirm`/`prompt` calls in
 `window.__oddaDialogs`.
 
-## Helper: spin up a tiny local HTTP server
+## Set up the fixture server and browser
+
+```scrut
+$ setup_fixture_site index.html dialogs.html
+```
 
 ```scrut {detached: true, detached_kill_signal: term}
-$ ( mkdir -p "$PWD/site" && \
->   cp "$TESTDIR/fixtures/index.html" "$PWD/site/index.html" && \
->   cp "$TESTDIR/fixtures/dialogs.html" "$PWD/site/dialogs.html" && \
->   python3 -m http.server 8766 --bind 127.0.0.1 --directory "$PWD/site" \
->     >"$PWD/http.log" 2>&1 & )
+$ port=$(cat "$PWD/fixture_port"); ( python3 -m http.server "$port" --bind 127.0.0.1 --directory "$PWD/site" >"$PWD/http.log" 2>&1 < /dev/null & )
 ```
 
 ```scrut
-$ for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8766/ && exit 0; sleep 0.5; done; exit 1
-```
-
-## Set up a browser
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["tab_id"])'
-1 1
+$ wait_for_fixture_server
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/ --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/
+$ open_browser_fixture /
 ```
 
 ## `userscript install` registers a userscript on disk
@@ -71,14 +62,7 @@ counter to 0 if absent, then increments, so every navigate leaves it
 at `1`).
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/ --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture / "window.__usHelperRan__ !== undefined"
 ```
 
 ```scrut
@@ -92,14 +76,7 @@ userscript re-runs on every navigation but the counter is reset on
 each fresh page.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/ --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture / "window.__usHelperRan__ !== undefined"
 ```
 
 ```scrut
@@ -114,14 +91,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 dialog interceptor userscript.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/dialogs.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/dialogs.html
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /dialogs.html "window.__oddaDialogInterceptorInstalled"
 ```
 
 ```scrut
@@ -186,14 +156,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" userscript list \
 After removing and navigating, the helper variable should be `undefined`.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/ --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /
 ```
 
 ```scrut
@@ -202,20 +165,8 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 "undefined"
 ```
 
-## Teardown: stop the local HTTP server
-
-The local HTTP server was started in a subshell earlier; kill it
-explicitly here so the test doc finishes cleanly.
+## Teardown: stop the fixture server
 
 ```scrut
-$ pkill -f "http.server 8766.*$PWD/site" 2>/dev/null
-```
-
-```scrut
-$ sleep 1
-```
-
-```scrut
-$ pgrep -f "http.server 8766.*$PWD/site" >/dev/null && echo "still running" || echo "stopped"
-stopped
+$ stop_fixture_server
 ```

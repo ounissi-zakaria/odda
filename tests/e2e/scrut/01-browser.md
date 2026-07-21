@@ -1,6 +1,8 @@
 ---
 prepend:
   - _lib/boot.md
+  - _lib/fixture-server.md
+  - _lib/browser-fixture.md
 append:
   - _lib/teardown.md
 ---
@@ -11,38 +13,25 @@ Covers everything you'd want to do to a single browser instance: open
 it, list its tabs, navigate, run JavaScript, take a screenshot, list
 event listeners, and wait for a JS condition.
 
-## Helper: spin up a tiny local HTTP server
-
-A few tests need a real URL to navigate to. Use Python's built-in
-HTTP server bound to 127.0.0.1 on a fixed port. The `( ... & )`
-keeps the process alive after the test case's bash exits.
-
-```scrut {detached: true, detached_kill_signal: term}
-$ ( mkdir -p "$PWD/site" && \
->   cp "$TESTDIR/fixtures/index.html" "$PWD/site/index.html" && \
->   cp "$TESTDIR/fixtures/dialogs.html" "$PWD/site/dialogs.html" && \
->   python3 -m http.server 8766 --bind 127.0.0.1 --directory "$PWD/site" \
->     >"$PWD/http.log" 2>&1 & )
-```
-
-Wait until the HTTP server answers on port 8766.
+## Set up the fixture server and browser
 
 ```scrut
-$ for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8766/ && exit 0; sleep 0.5; done; exit 1
+$ setup_fixture_site index.html dialogs.html
+```
+
+```scrut {detached: true, detached_kill_signal: term}
+$ port=$(cat "$PWD/fixture_port"); ( python3 -m http.server "$port" --bind 127.0.0.1 --directory "$PWD/site" >"$PWD/http.log" 2>&1 < /dev/null & )
+```
+
+```scrut
+$ wait_for_fixture_server
+```
+
+```scrut
+$ open_browser_fixture /
 ```
 
 ## `browser open` returns browser_id and initial tab_id
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sorted(d), d["browser_id"], d["tab_id"])'
-['browser_id', 'status', 'tab_id'] 1 1
-```
-
-(We can hard-code `1 1` because the test is the only consumer of the
-server — `browser_id` and the initial `tab_id` start at 1.)
-
-## `tabs list` reports the new browser with its initial tab
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list \
@@ -53,10 +42,10 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list \
 ## `navigate` returns `{status: "Navigated to: ..."}`
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/ --browser-id 1 --tab-id 1 \
+$ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   navigate "http://127.0.0.1:$port/" --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/
+Navigated to: http://127.0.0.1:* (glob)
 ```
 
 ## `eval` runs JavaScript and returns the result
@@ -157,20 +146,8 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 {*"error": "*Timeout*"*} (glob)
 ```
 
-## Teardown: stop the local HTTP server
-
-The local HTTP server was started in a subshell earlier; kill it
-explicitly here so the test doc finishes cleanly.
+## Teardown: stop the fixture server
 
 ```scrut
-$ pkill -f "http.server 8766.*$PWD/site" 2>/dev/null
-```
-
-```scrut
-$ sleep 1
-```
-
-```scrut
-$ pgrep -f "http.server 8766.*$PWD/site" >/dev/null && echo "still running" || echo "stopped"
-stopped
+$ stop_fixture_server
 ```

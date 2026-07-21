@@ -1,6 +1,7 @@
 ---
 prepend:
   - _lib/boot.md
+  - _lib/browser-fixture.md
 append:
   - _lib/teardown.md
 ---
@@ -14,16 +15,7 @@ non-zero exit code, never silently hit a different tab/browser.
 ## Set up a browser
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["tab_id"])'
-1 1
-```
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/ --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/
+$ open_browser_fixture
 ```
 
 ## `navigate` errors on an unknown browser_id

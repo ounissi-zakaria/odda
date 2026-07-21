@@ -1,6 +1,8 @@
 ---
 prepend:
   - _lib/boot.md
+  - _lib/fixture-server.md
+  - _lib/browser-fixture.md
 append:
   - _lib/teardown.md
 ---
@@ -20,39 +22,28 @@ leaf-only: they record the call they were placed on, not callbacks
 passed as arguments. Per ADR-0004, records wipe on navigation;
 installations persist (the userscript re-runs on every load).
 
-## Helper: spin up a tiny local HTTP server
+## Set up the fixture server and browser
+
+Start the fixture server with `wrap.html` and the same-origin iframe
+fixture, then open a browser and navigate to the wrap fixture page.
+No `wait-for` marker is needed yet — no wraps are installed, so the
+wrap loader has nothing to set up; `page.goto` waiting for `load` is
+enough.
+
+```scrut
+$ setup_fixture_site wrap.html iframe-inner.html
+```
 
 ```scrut {detached: true, detached_kill_signal: term}
-$ ( mkdir -p "$PWD/site" && \
->   cp "$TESTDIR/fixtures/wrap.html" "$PWD/site/wrap.html" && \
->   cp "$TESTDIR/fixtures/iframe-inner.html" "$PWD/site/iframe-inner.html" && \
->   python3 -m http.server 8766 --bind 127.0.0.1 --directory "$PWD/site" \
->     >"$PWD/http.log" 2>&1 & )
+$ port=$(cat "$PWD/fixture_port"); ( python3 -m http.server "$port" --bind 127.0.0.1 --directory "$PWD/site" >"$PWD/http.log" 2>&1 < /dev/null & )
 ```
 
 ```scrut
-$ for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8766/ && exit 0; sleep 0.5; done; exit 1
-```
-
-## Set up a browser
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["tab_id"])'
-1 1
-```
-
-Navigate to the fixture page so the wrap userscript has a target.
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/wrap.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/wrap.html
+$ wait_for_fixture_server
 ```
 
 ```scrut
-$ sleep 1
+$ open_browser_fixture /wrap.html
 ```
 
 ## `wrap calls add` installs a function wrap
@@ -80,14 +71,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 Re-navigate so the wrap userscript runs at `document_start`.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/wrap.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/wrap.html
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /wrap.html "window.__oddaWrapFixture"
 ```
 
 ## Triggering the wrapped function records args, ret, and stack
@@ -140,14 +124,7 @@ ael call
 Re-navigate so the new wrap takes effect.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/wrap.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/wrap.html
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /wrap.html "window.__oddaWrapFixture"
 ```
 
 Trigger `addEventListener` with a named callback via the fixture.
@@ -165,7 +142,8 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   | python3 -c '
 > import json, sys
 > d = json.load(sys.stdin)
-> ael = [r for r in d if r["wrap"] == "ael"]
+> ael = [r for r in d if r["wrap"] == "ael" and r["args"] and r["args"][0] == "click"
+>         and isinstance(r["args"][1], dict) and r["args"][1].get("name") == "myHandler"]
 > print(len(ael) >= 1)
 > r = ael[0]
 > print(r["args"][0])
@@ -198,14 +176,7 @@ ih access HTMLElement.prototype.innerHTML
 Re-navigate so the wrap takes effect.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/wrap.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/wrap.html
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /wrap.html "window.__oddaWrapFixture"
 ```
 
 Trigger the setter via the fixture's `__oddaWrapSetSink` helper.
@@ -271,17 +242,17 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 True
 ```
 
-Navigate (which wipes the records) and confirm `dump` is empty.
+Navigate (which wipes the records), wait for Playwright's internal
+setup to settle, then clear any records it produced and confirm
+`dump` is empty.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/wrap.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/wrap.html
+$ navigate_fixture /wrap.html "window.__oddaWrapFixture"
 ```
 
 ```scrut
-$ sleep 1
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   wrap clear --browser-id 1 --tab-id 1 > /dev/null
 ```
 
 ```scrut
@@ -358,14 +329,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/wrap.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/wrap.html
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /wrap.html "window.__oddaWrapFixture"
 ```
 
 ```scrut
@@ -414,14 +378,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 Re-navigate so the removed wrap's userscript no longer runs.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://127.0.0.1:8766/wrap.html --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
-Navigated to: http://127.0.0.1:8766/wrap.html
-```
-
-```scrut
-$ sleep 1
+$ navigate_fixture /wrap.html "window.__oddaWrapFixture"
 ```
 
 ```scrut
@@ -515,17 +472,8 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 {"error": "Server error (-32602): Userscript '__odda-wrap__no-such-wrap' not found"}
 ```
 
-## Teardown: stop the local HTTP server
+## Teardown: stop the fixture server
 
 ```scrut
-$ pkill -f "http.server 8766.*$PWD/site" 2>/dev/null
-```
-
-```scrut
-$ sleep 1
-```
-
-```scrut
-$ pgrep -f "http.server 8766.*$PWD/site" >/dev/null && echo "still running" || echo "stopped"
-stopped
+$ stop_fixture_server
 ```

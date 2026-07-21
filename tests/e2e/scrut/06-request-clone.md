@@ -1,6 +1,7 @@
 ---
 prepend:
   - _lib/boot.md
+  - _lib/fixture-server.md
 append:
   - _lib/teardown.md
 ---
@@ -28,8 +29,11 @@ $ curl -s -x "$(cat "$PWD/proxy_url")" -k --proxy-insecure \
 curl_status=200
 ```
 
+Wait for mitmproxy to flush the flow to disk, matching the unique
+body marker.
+
 ```scrut
-$ sleep 1
+$ wait_for_flow "clone-test"
 ```
 
 ## Find the flow id for `xs2.top`
@@ -48,7 +52,7 @@ $ cat "$PWD/flow_id"
 * (glob)
 ```
 
-## `request clone` writes a `request` and `meta.json`
+## `request clone` writes a `request` and a `meta.json`
 
 
 ```scrut

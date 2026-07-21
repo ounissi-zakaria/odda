@@ -1,6 +1,7 @@
 ---
 prepend:
   - _lib/boot.md
+  - _lib/fixture-server.md
 append:
   - _lib/teardown.md
 ---
@@ -25,8 +26,11 @@ $ curl -s -x "$(cat "$PWD/proxy_url")" -k --proxy-insecure \
 curl_status=200
 ```
 
+Wait for mitmproxy to flush the flow to disk, matching the unique
+body marker.
+
 ```scrut
-$ sleep 1
+$ wait_for_flow "h2-capture"
 ```
 
 ```scrut
@@ -134,7 +138,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send cl-test --fix-content-length --timeout 10 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/cl_flow_id"
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/cl_flow_id"
 ```
 
 ```scrut
@@ -191,7 +195,12 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ## `--insecure` skips TLS verification against a self-signed server
 
-Spin up a local HTTPS server with a self-signed cert.
+Spin up a local HTTPS server with a self-signed cert. Pick a free
+port for it.
+
+```scrut
+$ https_port=$(pick_port)
+```
 
 ```scrut {detached: true, detached_kill_signal: term}
 $ ( openssl req -x509 -newkey rsa:2048 \
@@ -201,14 +210,14 @@ $ ( openssl req -x509 -newkey rsa:2048 \
 > import http.server, ssl
 > ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 > ctx.load_cert_chain(certfile='$PWD/selfsigned.pem', keyfile='$PWD/selfsigned.key')
-> server = http.server.HTTPServer(('127.0.0.1', 8771), http.server.SimpleHTTPRequestHandler)
+> server = http.server.HTTPServer(('127.0.0.1', ${https_port}), http.server.SimpleHTTPRequestHandler)
 > server.socket = ctx.wrap_socket(server.socket, server_side=True)
 > server.serve_forever()
 > " > "$PWD/https_server.log" 2>&1 & )
 ```
 
 ```scrut
-$ for i in $(seq 1 30); do curl -s -k -o /dev/null https://127.0.0.1:8771/ && exit 0; sleep 0.5; done; exit 1
+$ for i in $(seq 1 100); do curl -s -k -o /dev/null "https://127.0.0.1:$https_port/" && exit 0; sleep 0.05; done; exit 1
 ```
 
 ```scrut
@@ -217,17 +226,17 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```
 
 ```scrut
-$ sed 's/$/\r/' > "$PWD/data/requests/insecure-test/request" <<'REQEOF'
+$ sed 's/$/\r/' > "$PWD/data/requests/insecure-test/request" <<REQEOF
 > GET / HTTP/1.1
-> Host: 127.0.0.1:8771
+> Host: 127.0.0.1:$https_port
 > Connection: close
 > 
 > REQEOF
 ```
 
 ```scrut
-$ cat > "$PWD/data/requests/insecure-test/meta.json" <<'METAEOF'
-> {"scheme": "https", "host": "127.0.0.1", "port": 8771}
+$ cat > "$PWD/data/requests/insecure-test/meta.json" <<METAEOF
+> {"scheme": "https", "host": "127.0.0.1", "port": $https_port}
 > METAEOF
 ```
 
@@ -252,20 +261,11 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ## Teardown: stop the local HTTPS server
 
 ```scrut
-$ pkill -f "HTTPServer.*8771.*$PWD/selfsigned.pem" 2>/dev/null || true
+$ pkill -f "HTTPServer.*$PWD/selfsigned.pem" 2>/dev/null || true
 ```
 
 ```scrut
-$ pkill -f "127.0.0.1.*8771" 2>/dev/null || true
-```
-
-```scrut
-$ sleep 1
-```
-
-```scrut
-$ pgrep -f "HTTPServer.*$PWD/selfsigned.pem" >/dev/null && echo "still running" || echo "stopped"
-stopped
+$ for i in $(seq 1 100); do pgrep -f "HTTPServer.*$PWD/selfsigned.pem" >/dev/null || exit 0; sleep 0.05; done; echo "still running"; exit 1
 ```
 
 ## Empty `request` file is rejected

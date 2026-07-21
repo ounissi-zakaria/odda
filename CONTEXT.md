@@ -39,3 +39,15 @@ _Avoid_: shared server, global server
 **Shared boot/teardown**:
 The `_lib/boot.md` (prepended) and `_lib/teardown.md` (appended) files that DRY the odda server start and stop across all test documents. Each document still gets its own per-doc server instance; only the prose is shared.
 _Avoid_: setup file, fixture file
+
+**Fixture server**:
+A `python3 -m http.server` bound to `127.0.0.1` on an auto-picked port, started by a test document to provide a URL for browser navigation or proxy capture. Serves files copied from `tests/e2e/scrut/fixtures/` into `$PWD/site/`. Torn down at the document's end via `pkill`. A self-signed HTTPS variant exists for TLS-specific tests.
+_Avoid_: mock server, test server, httpd
+
+**Browser fixture**:
+A headless odda browser instance plus an initial navigation to a fixture-server URL, set up at the start of a test document so subsequent `eval` / `screenshot` / `event-listeners` / `wrap` / `logpoint` / `coverage` commands have a live target.
+_Avoid_: browser setup, browser init, session
+
+**Shared setup block**:
+A scrut `_lib/*.md` file prepended (or appended) to every test document that needs it, providing a fixture server, browser fixture, or teardown with prose DRY'd across docs. Each document still gets its own per-doc instance — only the prose is shared, mirroring Shared boot/teardown.
+_Avoid_: shared fixture, shared steps

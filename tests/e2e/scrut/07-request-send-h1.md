@@ -1,6 +1,7 @@
 ---
 prepend:
   - _lib/boot.md
+  - _lib/fixture-server.md
 append:
   - _lib/teardown.md
 ---
