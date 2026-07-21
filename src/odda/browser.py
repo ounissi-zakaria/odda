@@ -185,12 +185,11 @@ class BrowserInstance:
     def _on_frame_navigated(self, tab_id: int, frame) -> None:
         """Clear that tab's script map on main-frame navigation.
 
-        Per ADR-0004, navigation resets the coverage recording window:
-        the per-tab recording flag and accumulator are cleared and the
-        CDP Profiler is best-effort stopped (the session survives
-        navigation, so a later ``coverage start`` must not collide with
-        a leftover recording). The stop is scheduled on the event loop
-        because this callback is synchronous.
+        Per ADR-0005, Coverage is navigation-persistent: the per-tab
+        recording flag, accumulator, and CDP Profiler domain all survive
+        navigation so an agent can ``coverage start`` → ``navigate`` →
+        ``snapshot``/``stop`` to observe code that runs as a consequence
+        of navigating. Nothing coverage-related is torn down here.
 
         Logpoint installations persist across navigation (the CDP
         ``Debugger.setBreakpointByUrl`` re-binds to the re-loaded
@@ -201,31 +200,6 @@ class BrowserInstance:
         """
         if frame.parent_frame is None:
             self._script_maps.get(tab_id, {}).clear()
-            self._coverage_accumulators.pop(tab_id, None)
-            if self._coverage_recording.pop(tab_id, False):
-                with suppress(RuntimeError):
-                    asyncio.get_running_loop().create_task(
-                        self._best_effort_coverage_stop(tab_id)
-                    )
-
-    async def _best_effort_coverage_stop(self, tab_id: int) -> None:
-        """Best-effort stop a leftover CDP Profiler recording.
-
-        Used on navigation: the per-tab recording flag is already
-        cleared by the caller, but the CDP Profiler domain may still be
-        running. We stop it so a later ``coverage start`` does not
-        collide with a stale recording. Errors are logged and
-        swallowed — the tab may have closed or the session detached.
-        """
-        cdp = self._cdp_sessions.get(tab_id)
-        if cdp is None:
-            return
-        try:
-            await coverage_mod.stop(cdp)
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.warning(
-                "Best-effort coverage stop failed for tab %s: %s", tab_id, exc
-            )
 
     def _on_page_close(self, tab_id: int) -> None:
         """Tear down per-tab state when a page closes."""

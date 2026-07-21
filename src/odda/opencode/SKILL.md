@@ -112,9 +112,9 @@ Behavior notes:
 
 Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 
-- `odda coverage start --browser-id <id> --tab-id <n>` — Enable the CDP Profiler domain with precise block-level coverage (`callCount` + `detailed`) and mark the tab as recording. Returns `{"status": "recording"}`. Starting on one tab does not affect another tab's recording.
-- `odda coverage snapshot --browser-id <id> --tab-id <n>` — Read per-script, per-block hit counts without stopping. Returns the coverage object. Zero-hit blocks are included (the negative space is as informative as the positive). The recording flag stays set.
-- `odda coverage stop --browser-id <id> --tab-id <n>` — Take a final coverage snapshot, stop the Profiler, clear the recording flag, and return the same per-script, per-block output as `snapshot`.
+- `odda coverage start --browser-id <id> --tab-id <n>` — Enable block-level coverage with per-block call counts and mark the tab as recording. Returns `{"status": "recording"}`. Starting on one tab does not affect another tab's recording.
+- `odda coverage snapshot --browser-id <id> --tab-id <n>` — Read per-script, per-block hit counts without stopping. Returns the coverage object. Zero-hit blocks are included (the negative space is as informative as the positive). The tab stays recording.
+- `odda coverage stop --browser-id <id> --tab-id <n>` — Take a final coverage snapshot, stop recording, and return the same per-script, per-block output as `snapshot`.
 
 ### Coverage output shape
 
@@ -134,11 +134,11 @@ Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 }
 ```
 
-`url` is resolved from the server's scriptId-to-url map (populated by `Debugger.scriptParsed`); `null` for inline scripts or scripts odda could not resolve. Each `range` is a block; `count` is the number of times that block executed within the take window. Zero-hit blocks appear with `count: 0`.
+`url` is the script's URL, or `null` for inline scripts or scripts odda could not resolve. Each `range` is a block; `count` is the number of times that block executed within the take window. Zero-hit blocks appear with `count: 0`.
 
 ### Delta and cumulative semantics (important)
 
-CDP `Profiler.takePreciseCoverage` **resets its counters on each read**, so each take returns the delta since the previous take. odda accumulates these deltas server-side so:
+Each `snapshot` read resets V8's block counters, so a take returns the delta since the previous take (not a running total). odda accumulates these deltas server-side so:
 
 - `snapshot` returns the **delta** since the previous take (or since `start` for the first take). Use it to read mid-window progress or to slice a sub-window (subtract two `snapshot` deltas).
 - `stop` returns the **cumulative counts for the whole recording window** (the sum of every take since `start`, including any intermediate `snapshot` reads). You always get the full-window picture at `stop`, regardless of whether you snapshotted mid-way.
@@ -148,15 +148,17 @@ So the workflow is: `start` → trigger → (optional `snapshot` to peek) → tr
 ### Lifecycle and scope
 
 - **Per-tab.** Coverage state is per-tab: starting on one tab does not affect another. Multiple agents sharing one odda server do not disturb each other's recordings.
-- **Navigation resets the window.** A navigate clears the recording flag (and best-effort stops the Profiler), so a `snapshot`/`stop` after navigation errors as "not recording". Start again after navigating.
-- **Scope.** Main frame and same-origin iframes only (CDP `Profiler` domain is attached to the page session). Cross-origin iframes and worker contexts are out of scope.
+- **Navigation-persistent.** The recording survives main-frame navigation. The recording window is `[start, stop]` regardless of how many navigations happen inside it. This enables the primary workflow: `start` → `navigate` (to trigger the behavior under investigation) → `snapshot`/`stop`.
+- **Counts merge across loads.** Counts for the same script URL sum across navigations; different URLs get separate entries. To slice per-load, `snapshot` before the navigate and `snapshot` after, and subtract.
+- **Does not survive tab close.** Closing a tab clears its coverage state.
+- **Scope.** Main frame and same-origin iframes only. Cross-origin iframes and worker contexts are out of scope.
 - **Errors.** Commands on a missing or closed tab, a missing browser, or a tab that is not recording return `{"error": ...}` with a non-zero exit code. Calling `start` on a tab that is already recording errors so you know the previous recording is still live.
 
 ## Wrap
 
-`odda wrap` installs a transparent wrapper at a named function or property accessor. The wrapper is generated as a named userscript and installed via the existing userscript mechanism, so it runs at `document_start` on every navigation. Each call or access is recorded with its receiver, arguments, return value, and call stack. Use it when you know the function or property and want to see what flows through it.
+`odda wrap` installs a transparent wrapper at a named function or property accessor. The wrapper runs before the page's own scripts on every navigation. Each call or access is recorded with its receiver, arguments, return value, and call stack. Use it when you know the function or property and want to see what flows through it.
 
-Per ADR-0003, wraps are **leaf-only**: a wrap records the call it was placed on and does not follow callbacks passed as arguments. To see what a registered callback does, use Coverage to find the handler's code path and a Logpoint to read locals at the interesting line.
+Wraps are **leaf-only**: a wrap records the call it was placed on and does not follow callbacks passed as arguments. To see what a registered callback does, use Coverage to find the handler's code path and a Logpoint to read locals at the interesting line.
 
 Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 
@@ -191,15 +193,15 @@ Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 
 ### Lifecycle and scope
 
-- **Takes effect on next navigation.** `wrap calls add`/`access add` install a userscript and reload the extension, but already-loaded tabs are not re-injected. Re-navigate an existing tab (or open a new one) for the wrap to run. This matches the existing userscript model.
-- **Records wipe on navigation.** The userscript re-initializes `window.__oddaWrap = []` on each `document_start`, so records from the previous page load are gone. **Dump before navigating again** or the records are lost. Per ADR-0004.
-- **Installations persist across navigation.** The wrap's userscript re-runs on every `document_start`, so the wrap is re-installed on every page load until you `wrap remove` it.
-- **Scope: all frames.** Wraps reach all frames in the tab including cross-origin iframes (inherited from the userscript extension's `all_frames: true`). Same-origin iframes aggregate records to the top frame's `__oddaWrap` (so `wrap dump` on the main tab sees them); cross-origin iframes keep their own records (the wrap still runs there, but the records stay in the iframe's context — read them by evaluating in the iframe). Wraps do not reach worker contexts.
+- **Takes effect on next navigation.** `wrap calls add`/`access add` install the wrapper, but already-loaded tabs are not re-injected. Re-navigate an existing tab (or open a new one) for the wrap to run.
+- **Records wipe on navigation.** Records from the previous page load are gone after a navigate. **Dump before navigating again** or the records are lost.
+- **Installations persist across navigation.** The wrap re-installs on every page load until you `wrap remove` it.
+- **Scope: all frames.** Wraps reach all frames in the tab including cross-origin iframes. Same-origin iframes aggregate records to the top frame (so `wrap dump` on the main tab sees them); cross-origin iframes keep their own records (the wrap still runs there, but the records stay in the iframe's context — read them by evaluating in the iframe). Wraps do not reach worker contexts.
 - **Errors.** Commands on a missing or closed tab or a missing browser return `{"error": ...}` with a non-zero exit code. `wrap remove` on a non-existent wrap name errors.
 
 ## Logpoint
 
-`odda logpoint` plants a non-pausing observation at a source location (script URL, line, column). odda plants a CDP `Debugger.setBreakpointByUrl` whose condition evaluates the agent-supplied expression in the paused-then-immediately-resumed frame's scope, records the result, and returns `false` so the page never pauses. Use it when you know the line.
+`odda logpoint` plants a non-pausing observation at a source location (script URL, line, column). The page never pauses — odda evaluates the agent-supplied expression in the paused-then-immediately-resumed frame's scope, records the result, and resumes. Use it when you know the line.
 
 The agent supplies `--url` (script URL), `--line` (0-based), `--col` (0-based), and `--expr` (JS expression). The expression is evaluated in the paused frame's scope, so it can read locals by name. Minified code packs many statements per line, so **the column is required** to hit the right statement.
 
@@ -209,7 +211,7 @@ Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 - `odda logpoint list --browser-id <id> --tab-id <n>` — List planted logpoints as `[{id, url, line, col, expr}]`.
 - `odda logpoint dump --browser-id <id> --tab-id <n>` — Read the per-tab logpoint record array. Returns `[{logpoint, url, line, col, value, error}]`.
 - `odda logpoint clear --browser-id <id> --tab-id <n>` — Zero the per-tab logpoint record array without navigating. Returns `{status: "cleared", count: <records dropped>}`. Logpoint installations are unaffected.
-- `odda logpoint remove --browser-id <id> --tab-id <n> --id <lp-id>` — Remove a logpoint's CDP breakpoint and registry entry. The logpoint stops recording on future hits. If other logpoints share the same location, their combined breakpoint is rebuilt with the remaining expressions.
+- `odda logpoint remove --browser-id <id> --tab-id <n> --id <lp-id>` — Remove a logpoint. The logpoint stops recording on future hits. If other logpoints share the same location, their combined breakpoint is rebuilt with the remaining expressions.
 
 ### Logpoint record shape
 
@@ -228,12 +230,12 @@ Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 
 ### Lifecycle and scope
 
-- **Persist until removed (not fire-once).** Logpoints keep recording across triggers within one page load. The CDP breakpoint re-binds to the re-loaded script on navigation, so the installation persists across navigation too.
-- **Records wipe on navigation.** `window.__oddaLogpoint` is re-initialized to `[]` by the default logpoint userscript on each `document_start`. **Dump before navigating again** or the records are lost. Per ADR-0004. Installations are unaffected by navigation.
-- **Per-tab-session (not durable).** Logpoints do not survive tab close. Closing a tab clears its logpoint registry and CDP breakpoints; re-plant after reopening a tab.
-- **Column is required.** `--col` is not optional. Minified code packs many statements per line; without the column, CDP binds to the first breakable location at or after the line, which may be a different statement than the one you want.
-- **Stale-URL warning.** If no loaded script matches `--url` at install time, the command succeeds but includes a `warning` field. The breakpoint will not record until a script at that URL is loaded (e.g. after navigating to a page that loads it).
-- **Scope: main frame and same-origin iframes only.** The CDP `Debugger` domain is attached to the page session. Cross-origin iframes and worker contexts are out of scope. (Wraps reach cross-origin iframes via the userscript extension; Logpoints do not.)
+- **Persist until removed (not fire-once).** Logpoints keep recording across triggers within one page load. The installation persists across navigation too (it re-binds to the re-loaded script).
+- **Records wipe on navigation.** Records from the previous page load are gone after a navigate. **Dump before navigating again** or the records are lost. Installations are unaffected by navigation.
+- **Per-tab-session (not durable).** Logpoints do not survive tab close. Re-plant after reopening a tab.
+- **Column is required.** `--col` is not optional. Minified code packs many statements per line; without the column, the logpoint binds to the first breakable location at or after the line, which may be a different statement than the one you want.
+- **Stale-URL warning.** If no loaded script matches `--url` at install time, the command succeeds but includes a `warning` field. The logpoint will not record until a script at that URL is loaded (e.g. after navigating to a page that loads it).
+- **Scope: main frame and same-origin iframes only.** Cross-origin iframes and worker contexts are out of scope. (Wraps reach cross-origin iframes; Logpoints do not.)
 - **Errors.** Commands on a missing or closed tab or a missing browser return `{"error": ...}` with a non-zero exit code. `logpoint remove` on an unknown logpoint id errors.
 
 ## Recipe: postMessage origin-validation investigation

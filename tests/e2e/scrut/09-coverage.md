@@ -10,8 +10,11 @@ append:
 `odda coverage` exposes three commands — `start`, `snapshot`, `stop` —
 that record which code blocks execute during a window of interest.
 Coverage is per-tab; starting on one tab does not affect another. The
-recording window resets on navigation. Zero-hit blocks are included
-(the negative space is as informative as the positive).
+recording window spans navigations (per ADR-0005): the flag,
+accumulator, and Profiler all survive a navigate, so an agent can
+`start` → `navigate` → `snapshot`/`stop` to observe code that runs as
+a consequence of navigating. Zero-hit blocks are included (the negative
+space is as informative as the positive).
 
 ## Helper: spin up a tiny local HTTP server
 
@@ -175,15 +178,22 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 True True
 ```
 
-## Navigation resets the recording window
+## Navigation persists the recording window (ADR-0005)
 
-After navigation, the recording flag must be cleared — `snapshot` on a
-tab that navigated away must error as "not recording".
+The recording flag, accumulator, and CDP Profiler domain all survive
+main-frame navigation. The canonical workflow is `start` → `navigate`
+(to trigger the behavior under investigation) → `snapshot`/`stop` to
+read which code paths ran across the load. After navigating, the tab
+is still recording and `snapshot` returns counts that include the
+freshly-navigated page's script.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   coverage start --browser-id 1 --tab-id 1 > /dev/null
 ```
+
+Navigate to the fixture page (this loads `coverage.html` and runs its
+inline script, which defines `handleBranch`).
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
@@ -196,11 +206,55 @@ Navigated to: http://127.0.0.1:8766/coverage.html
 $ sleep 1
 ```
 
+`snapshot` after the navigate must still work (the recording flag
+survived) and must include the fixture script URL with at least one
+block having count > 0 (the script ran on load). Capture the max
+navigate-time count to a file so the `stop` assertion can prove the
+accumulator retained it across the rest of the window.
+
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   coverage snapshot --browser-id 1 --tab-id 1
-[1]
-{"error": "Server error (-32602): Tab 1 is not recording coverage."}
+>   coverage snapshot --browser-id 1 --tab-id 1 \
+>   | python3 -c '
+> import json, sys
+> d = json.load(sys.stdin)
+> urls = [s["url"] for s in d["scripts"] if s.get("url")]
+> fixture_present = any("coverage.html" in u for u in urls)
+> counts = [r["count"] for s in d["scripts"] if s.get("url") and "coverage.html" in s["url"]
+>            for f in s["functions"] for r in f["ranges"]]
+> print(fixture_present, max(counts) > 0, max(counts))
+> ' > "$PWD/nav_snapshot.txt"
+```
+
+```scrut
+$ cat "$PWD/nav_snapshot.txt"
+True True 1
+```
+
+Triggering the handler and then `stop`ping must return cumulative
+counts that include the navigate-time run — the accumulator did not
+reset on navigate. The `stop` max count for the fixture must be at
+least the navigate-time snapshot max (captured above), proving the
+navigate-time blocks are still in the accumulator at `stop`.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
+"taken-branch"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   coverage stop --browser-id 1 --tab-id 1 \
+>   | python3 -c '
+> import json, sys
+> d = json.load(sys.stdin)
+> counts = [r["count"] for s in d["scripts"] if s.get("url") and "coverage.html" in s["url"]
+>            for f in s["functions"] for r in f["ranges"]]
+> nav_max = int(open(sys.argv[1]).read().split()[-1])
+> print(max(counts) >= nav_max, min(counts) == 0)
+> ' "$PWD/nav_snapshot.txt"
+True True
 ```
 
 ## Errors on a missing tab

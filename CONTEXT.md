@@ -17,7 +17,7 @@ A placed observation at a source location the agent identifies by script URL, li
 _Avoid_: breakpoint, tracepoint, watchpoint, probe
 
 **Coverage**:
-An aggregate query over a browsing context — start it, do the thing, stop it, read back per-block hit counts. Not placed at any target; records counts, not events. Scope: main frame and same-origin iframes in a tab. Cross-origin iframes and worker contexts are out of scope.
+An aggregate query over a browsing context — start it, do the thing, stop it, read back per-block hit counts. Not placed at any target; records counts, not events. The recording window spans navigations: counts accumulate across page loads inside the `[start, stop]` window, so an agent can start, navigate to trigger behavior, and snapshot/stop to read which paths ran. Scope: main frame and same-origin iframes in a tab. Cross-origin iframes and worker contexts are out of scope.
 _Avoid_: probe, profile, execution map, wrap
 
 **Test document**:

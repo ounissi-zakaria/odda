@@ -20,11 +20,13 @@ raw counts for the recording window; the agent slices as needed").
 agent can slice a sub-window by subtracting two snapshots or by
 subtracting a snapshot from the final ``stop``.
 
-Per ADR-0004, coverage is a windowed query with no persistence — start
-it, do the thing, snapshot or stop, read counts. Navigation resets the
-recording window (the caller clears the flag and the accumulator).
-Coverage output always includes zero-hit blocks: the negative space is
-as informative as the positive.
+Per ADR-0005, coverage is a windowed query that spans navigations:
+the recording flag, accumulator, and CDP Profiler domain all survive
+main-frame navigation, so an agent can ``start`` → ``navigate`` →
+``snapshot``/``stop`` to observe code that runs as a consequence of
+navigating. Coverage does not survive tab close. Coverage output
+always includes zero-hit blocks: the negative space is as informative
+as the positive.
 """
 
 from __future__ import annotations
@@ -82,7 +84,8 @@ def new_accumulator() -> dict[str, Any]:
 
     The accumulator is an opaque, mutable dict that ``merge_delta``
     grows and ``format_accumulated`` renders. Callers reset it on
-    ``coverage start`` and on navigation.
+    ``coverage start``; it survives navigation (per ADR-0005) and is
+    cleared on tab close.
 
     Returns:
         An empty accumulator ``{"scripts": {url: {"functions": {
@@ -197,7 +200,8 @@ async def stop(cdp: CDPSession) -> None:
     ``Profiler.stop`` ends the recording window, and ``Profiler.disable``
     tears down the domain so the session is left clean. Errors from
     ``stopPreciseCoverage``/``disable`` are tolerated — the domain may
-    already be torn down on navigation — but ``stop`` errors propagate.
+    already be torn down (e.g. the tab closed mid-stop) — but ``stop``
+    errors propagate.
 
     Args:
         cdp: The tab's CDP session.

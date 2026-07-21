@@ -387,7 +387,9 @@ def coverage_start(
     """Enable precise block-level coverage on the target tab.
 
     Marks the tab as recording. Per-tab: starting on one tab does not
-    affect another. The recording window resets on navigation.
+    affect another. The recording window spans navigations (per
+    ADR-0005): start, navigate to trigger behavior, then snapshot or
+    stop to read which code paths ran.
     """
     _run_coro(
         _client(ctx).call(
