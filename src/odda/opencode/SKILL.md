@@ -37,6 +37,11 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Remove a wrap               | `odda wrap remove --browser-id <id> --tab-id <n> <name>`           |
 | Dump wrap records           | `odda wrap dump --browser-id <id> --tab-id <n>`                    |
 | Clear wrap records          | `odda wrap clear --browser-id <id> --tab-id <n>`                   |
+| Plant a logpoint            | `odda logpoint add --browser-id <id> --tab-id <n> --url <url> --line <n> --col <n> --expr "<js>"` |
+| List planted logpoints      | `odda logpoint list --browser-id <id> --tab-id <n>`                 |
+| Dump logpoint records       | `odda logpoint dump --browser-id <id> --tab-id <n>`                 |
+| Clear logpoint records      | `odda logpoint clear --browser-id <id> --tab-id <n>`                |
+| Remove a logpoint           | `odda logpoint remove --browser-id <id> --tab-id <n> --id <lp-id>` |
 | Read server logs            | `odda logs [--follow] [--n N]`                                     |
 | Clone a flow to edit        | `odda request clone <flow-id> --name <name> [--force]`             |
 | Create an empty request     | `odda request new --name <name> [--force]`                         |
@@ -47,7 +52,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 Every browser/tab command takes an explicit target. Agents always specify which browser and which tab they mean.
 
 - **Browser-scoped commands** take `--browser-id`: `browser open`, `browser close`, `tabs list` (optional filter), `tabs open`, `userscript install/remove`.
-- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`, `coverage start`/`snapshot`/`stop`, `wrap calls add`/`access add`/`list`/`remove`/`dump`/`clear`.
+- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`, `coverage start`/`snapshot`/`stop`, `wrap calls add`/`access add`/`list`/`remove`/`dump`/`clear`, `logpoint add`/`list`/`remove`/`dump`/`clear`.
 
 IDs are integers, monotonic, and **never reused**. A closed tab's id is retired forever; a stale `--tab-id` errors cleanly instead of silently hitting a different tab. This makes it safe for multiple agents to share one odda server: each agent owns the IDs it captured and never disturbs another agent's target.
 
@@ -191,6 +196,73 @@ Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 - **Installations persist across navigation.** The wrap's userscript re-runs on every `document_start`, so the wrap is re-installed on every page load until you `wrap remove` it.
 - **Scope: all frames.** Wraps reach all frames in the tab including cross-origin iframes (inherited from the userscript extension's `all_frames: true`). Same-origin iframes aggregate records to the top frame's `__oddaWrap` (so `wrap dump` on the main tab sees them); cross-origin iframes keep their own records (the wrap still runs there, but the records stay in the iframe's context — read them by evaluating in the iframe). Wraps do not reach worker contexts.
 - **Errors.** Commands on a missing or closed tab or a missing browser return `{"error": ...}` with a non-zero exit code. `wrap remove` on a non-existent wrap name errors.
+
+## Logpoint
+
+`odda logpoint` plants a non-pausing observation at a source location (script URL, line, column). odda plants a CDP `Debugger.setBreakpointByUrl` whose condition evaluates the agent-supplied expression in the paused-then-immediately-resumed frame's scope, records the result, and returns `false` so the page never pauses. Use it when you know the line.
+
+The agent supplies `--url` (script URL), `--line` (0-based), `--col` (0-based), and `--expr` (JS expression). The expression is evaluated in the paused frame's scope, so it can read locals by name. Minified code packs many statements per line, so **the column is required** to hit the right statement.
+
+Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
+
+- `odda logpoint add --browser-id <id> --tab-id <n> --url <url> --line <n> --col <n> --expr "<js>"` — Plant a logpoint. Returns `{"status": "planted", "id": "lp-<n>", "url", "line", "col", "expr"}` and optionally `"warning"` if no loaded script matches `--url`.
+- `odda logpoint list --browser-id <id> --tab-id <n>` — List planted logpoints as `[{id, url, line, col, expr}]`.
+- `odda logpoint dump --browser-id <id> --tab-id <n>` — Read the per-tab logpoint record array. Returns `[{logpoint, url, line, col, value, error}]`.
+- `odda logpoint clear --browser-id <id> --tab-id <n>` — Zero the per-tab logpoint record array without navigating. Returns `{status: "cleared", count: <records dropped>}`. Logpoint installations are unaffected.
+- `odda logpoint remove --browser-id <id> --tab-id <n> --id <lp-id>` — Remove a logpoint's CDP breakpoint and registry entry. The logpoint stops recording on future hits. If other logpoints share the same location, their combined breakpoint is rebuilt with the remaining expressions.
+
+### Logpoint record shape
+
+```json
+{
+  "logpoint": "lp-1",
+  "url": "<script url>",
+  "line": 87,
+  "col": 12,
+  "value": "<result of the agent's expression, serialized>",
+  "error": "string|null"
+}
+```
+
+`value` is serialized via the same serializer as Wrap records (opaque function refs, truncation for large/cyclic values — see the Wrap serialization rules). `error` is `null` on success, or the error message (e.g. `"ReferenceError: noSuchLocal is not defined"`) if the expression threw. A wrong local name produces an error record rather than silently recording nothing.
+
+### Lifecycle and scope
+
+- **Persist until removed (not fire-once).** Logpoints keep recording across triggers within one page load. The CDP breakpoint re-binds to the re-loaded script on navigation, so the installation persists across navigation too.
+- **Records wipe on navigation.** `window.__oddaLogpoint` is re-initialized to `[]` by the default logpoint userscript on each `document_start`. **Dump before navigating again** or the records are lost. Per ADR-0004. Installations are unaffected by navigation.
+- **Per-tab-session (not durable).** Logpoints do not survive tab close. Closing a tab clears its logpoint registry and CDP breakpoints; re-plant after reopening a tab.
+- **Column is required.** `--col` is not optional. Minified code packs many statements per line; without the column, CDP binds to the first breakable location at or after the line, which may be a different statement than the one you want.
+- **Stale-URL warning.** If no loaded script matches `--url` at install time, the command succeeds but includes a `warning` field. The breakpoint will not record until a script at that URL is loaded (e.g. after navigating to a page that loads it).
+- **Scope: main frame and same-origin iframes only.** The CDP `Debugger` domain is attached to the page session. Cross-origin iframes and worker contexts are out of scope. (Wraps reach cross-origin iframes via the userscript extension; Logpoints do not.)
+- **Errors.** Commands on a missing or closed tab or a missing browser return `{"error": ...}` with a non-zero exit code. `logpoint remove` on an unknown logpoint id errors.
+
+## Recipe: postMessage origin-validation investigation
+
+The three dynamic-analysis concepts compose. The canonical investigation is confirming a `postMessage` handler validates the origin of incoming messages:
+
+1. **Wrap** `EventTarget.prototype.addEventListener` to confirm a `message` handler is registered and capture the handler reference:
+   ```
+   odda wrap calls add --browser-id 1 --tab-id 1 --expr EventTarget.prototype.addEventListener --name ael
+   odda navigate http://target/ --browser-id 1 --tab-id 1   # re-navigate so the wrap runs
+   odda eval "String(window.__oddaWrapFixture(window, 'message', function onMsg() {}))" --browser-id 1 --tab-id 1
+   odda wrap dump --browser-id 1 --tab-id 1   # confirm 'message' registration, capture handler ref
+   ```
+2. **Coverage** to find which code path the handler runs when a message arrives:
+   ```
+   odda coverage start --browser-id 1 --tab-id 1
+   odda eval "window.postMessage({type: 'probe'}, '*')" --browser-id 1 --tab-id 1
+   odda coverage stop --browser-id 1 --tab-id 1   # find the script URL + block ranges that ran
+   ```
+3. Read the handler source from the captured flow body (the script URL from coverage maps to a flow in `.odda/flows/`) to find the origin-check line.
+4. **Logpoint** at that line to read the locals the check operates on:
+   ```
+   odda logpoint add --browser-id 1 --tab-id 1 --url <script-url> --line <n> --col <n> --expr "event.origin"
+   odda eval "window.postMessage({type: 'probe'}, 'https://evil/')" --browser-id 1 --tab-id 1
+   odda logpoint dump --browser-id 1 --tab-id 1   # read the captured origin value
+   ```
+5. If the logpoint records an attacker-controllable origin, the handler does not validate origin and is vulnerable.
+
+The workflow: Wrap confirms the API touch, Coverage finds the code path, Logpoint reads the locals at the interesting line. Each concept observes without modifying behavior (the page never pauses).
 
 ## Raw request commands
 

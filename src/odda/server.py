@@ -406,6 +406,69 @@ class OddaServer:
         """
         return await self.browser.wrap_clear(params["browser_id"], params["tab_id"])
 
+    # --- Logpoint handlers ---
+
+    async def method_logpoint_add(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Plant a non-pausing logpoint at a source location.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            url: Script URL to bind the logpoint to.
+            line: 0-based line number.
+            col: 0-based column number.
+            expr: JS expression to evaluate at each hit.
+        """
+        return await self.browser.logpoint_add(
+            params["browser_id"],
+            params["tab_id"],
+            params["url"],
+            params["line"],
+            params["col"],
+            params["expr"],
+        )
+
+    async def method_logpoint_list(self, params: dict[str, Any]) -> list[dict]:
+        """List planted logpoints on the target tab.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.logpoint_list(params["browser_id"], params["tab_id"])
+
+    async def method_logpoint_dump(self, params: dict[str, Any]) -> list[dict]:
+        """Read the per-tab logpoint record array.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.logpoint_dump(params["browser_id"], params["tab_id"])
+
+    async def method_logpoint_clear(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Zero the per-tab logpoint record array without navigating.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.logpoint_clear(params["browser_id"], params["tab_id"])
+
+    async def method_logpoint_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Remove a logpoint's CDP logpoint and registry entry.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            id: Logpoint id (``lp-<n>``) returned by ``logpoint/add``.
+        """
+        return await self.browser.logpoint_remove(
+            params["browser_id"],
+            params["tab_id"],
+            params["id"],
+        )
+
     # --- Userscript handlers ---
 
     async def method_userscript_install(self, params: dict[str, Any]) -> dict[str, Any]:

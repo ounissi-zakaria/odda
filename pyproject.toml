@@ -1,6 +1,6 @@
 [project]
 name = "odda"
-version = "0.13.0"
+version = "0.14.0"
 description = "Browser automation and HTTP traffic capture CLI for AI agents"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -106,8 +106,9 @@ combine-as-imports = true
 split-on-trailing-comma = false
 
 [tool.ruff.lint.per-file-ignores]
-"src/odda/cli.py" = ["B008", "FBT001", "FBT003"]
+"src/odda/cli.py" = ["B008", "FBT001", "FBT003", "PLR0913"]
 "src/odda/flowstore.py" = ["PLW0603", "PLR0913"]
 "src/odda/server.py" = ["TRY301"]
 "src/odda/request/*.py" = ["PLR0913", "PLR2004", "C901", "PLR0912", "PLR0915", "TC003"]
 "src/odda/wrap.py" = ["E501"]
+"src/odda/logpoint.py" = ["E501", "PLR0913"]

@@ -21,6 +21,7 @@ from patchright.async_api import (
 
 from odda import (
     coverage as coverage_mod,
+    logpoint as logpoint_mod,
     userscript as userscript_mod,
     wrap as wrap_mod,
 )
@@ -118,6 +119,16 @@ class BrowserInstance:
         self._script_maps: dict[int, dict[str, str]] = {}
         self._coverage_recording: dict[int, bool] = {}
         self._coverage_accumulators: dict[int, dict[str, Any]] = {}
+        # Per-tab logpoint state: ``{tab_id: [{id, cdp_id, url, line,
+        # col, expr}]}``. The ``id`` is server-generated (``lp-<n>`` per
+        # tab) and embedded in the breakpoint condition so records carry
+        # it; ``cdp_id`` is the CDP ``breakpointId`` used for
+        # ``Debugger.removeBreakpoint``. Per ADR-0004, logpoint
+        # installations persist across navigation (the CDP breakpoint
+        # re-binds to the re-loaded script) and do not survive tab close
+        # (cleared in _on_page_close).
+        self._logpoints: dict[int, list[dict[str, Any]]] = {}
+        self._logpoint_counter: int = 0
         self._browser_cdp_session: CDPSession | None = None
         self._extension_id: str | None = None
 
@@ -180,6 +191,13 @@ class BrowserInstance:
         navigation, so a later ``coverage start`` must not collide with
         a leftover recording). The stop is scheduled on the event loop
         because this callback is synchronous.
+
+        Logpoint installations persist across navigation (the CDP
+        ``Debugger.setBreakpointByUrl`` re-binds to the re-loaded
+        script), so the per-tab logpoint registry is NOT cleared here.
+        Only the records (in ``window.__oddaLogpoint``) wipe on
+        navigation — the default logpoint userscript re-initializes the
+        array on each ``document_start``.
         """
         if frame.parent_frame is None:
             self._script_maps.get(tab_id, {}).clear()
@@ -219,6 +237,10 @@ class BrowserInstance:
         self._script_maps.pop(tab_id, None)
         self._coverage_recording.pop(tab_id, None)
         self._coverage_accumulators.pop(tab_id, None)
+        # Per ADR-0004, logpoints do not survive tab close. The CDP
+        # session is detached above so the breakpoints are gone; clear
+        # the registry so `logpoint list` on a reopened tab is empty.
+        self._logpoints.pop(tab_id, None)
 
     async def _setup_cdp_session(self, tab_id: int, page: Page) -> None:
         """Create and configure the per-tab CDP session (best-effort).
@@ -580,6 +602,148 @@ class BrowserInstance:
         await self.eval_js(tab_id, "window.__oddaWrap = []")
         return {"status": "cleared", "count": prev if isinstance(prev, int) else 0}
 
+    # --- logpoint ------------------------------------------------------
+
+    async def logpoint_add(
+        self, tab_id: int, url: str, line: int, col: int, expr: str
+    ) -> dict[str, Any]:
+        """Plant a non-pausing logpoint at ``url:line:col``.
+
+        Generates a per-tab logpoint id (``lp-<n>``), plants a CDP
+        ``Debugger.setBreakpointByUrl`` with a non-pausing condition
+        that evaluates ``expr`` in the paused frame's scope and pushes
+        a record into ``window.__oddaLogpoint``, and registers the
+        logpoint in the per-tab registry. The CDP logpoint persists
+        across navigation (re-binds to the re-loaded script); the
+        per-tab records wipe on navigation (the default logpoint
+        userscript re-initializes the array on ``document_start``).
+
+        Raises:
+            BrowserOperationError: If a logpoint already exists at
+                this ``(url, line, col)`` (CDP allows only one
+                logpoint per location).
+
+        Returns:
+            ``{"status": "planted", "id", "cdp_id", "url",
+            "line", "col", "expr"}`` and optionally ``"warning"`` if
+            no loaded script matches ``url``.
+        """
+        self._require_tab(tab_id)
+        cdp = await self._get_cdp_session(tab_id)
+        script_map = self._script_maps.get(tab_id, {})
+        registry = self._logpoints.setdefault(tab_id, [])
+        existing = next(
+            (
+                lp
+                for lp in registry
+                if lp["url"] == url and lp["line"] == line and lp["col"] == col
+            ),
+            None,
+        )
+        if existing is not None:
+            raise BrowserOperationError(
+                f"A logpoint already exists at {url}:{line}:{col} "
+                f"(id={existing['id']}); remove it first."
+            )
+        self._logpoint_counter += 1
+        lp_id = f"lp-{self._logpoint_counter}"
+        result = await logpoint_mod.add(cdp, lp_id, url, line, col, expr, script_map)
+        registry.append(
+            {
+                "id": lp_id,
+                "cdp_id": result.get("cdp_id", ""),
+                "url": url,
+                "line": line,
+                "col": col,
+                "expr": expr,
+            }
+        )
+        return result
+
+    async def logpoint_list(self, tab_id: int) -> list[dict[str, Any]]:
+        """List planted logpoints for the tab.
+
+        Returns:
+            A list of ``{id, url, line, col, expr}`` dicts.
+        """
+        self._require_tab(tab_id)
+        return [
+            {
+                "id": lp["id"],
+                "url": lp["url"],
+                "line": lp["line"],
+                "col": lp["col"],
+                "expr": lp["expr"],
+            }
+            for lp in self._logpoints.get(tab_id, [])
+        ]
+
+    async def logpoint_dump(self, tab_id: int) -> list[dict[str, Any]]:
+        """Read the per-tab logpoint record array.
+
+        The array is ``window.__oddaLogpoint``, initialized to ``[]``
+        by the default logpoint userscript on each ``document_start``
+        (per ADR-0004, records wipe on navigation). Each record is
+        ``{logpoint, url, line, col, value, error}``.
+
+        Returns:
+            The list of logpoint records.
+        """
+        self._require_tab(tab_id)
+        result = await self.eval_js(
+            tab_id,
+            "typeof window.__oddaLogpoint === 'undefined' ? [] : window.__oddaLogpoint",
+        )
+        if isinstance(result, list):
+            return result
+        return []
+
+    async def logpoint_clear(self, tab_id: int) -> dict[str, Any]:
+        """Zero the per-tab logpoint record array without navigating.
+
+        Sets ``window.__oddaLogpoint = []``. The logpoint installations
+        are unaffected; subsequent hits continue to record.
+
+        Returns:
+            ``{"status": "cleared", "count": <records dropped>}``.
+        """
+        self._require_tab(tab_id)
+        prev = await self.eval_js(
+            tab_id,
+            "typeof window.__oddaLogpoint === 'undefined'"
+            " ? 0 : window.__oddaLogpoint.length",
+        )
+        await self.eval_js(tab_id, "window.__oddaLogpoint = []")
+        return {"status": "cleared", "count": prev if isinstance(prev, int) else 0}
+
+    async def logpoint_remove(self, tab_id: int, lp_id: str) -> dict[str, Any]:
+        """Remove a logpoint's CDP logpoint and registry entry.
+
+        Args:
+            tab_id: Target tab.
+            lp_id: The logpoint id (``lp-<n>``) returned by
+                :meth:`logpoint_add`.
+
+        Raises:
+            BrowserOperationError: If no logpoint with ``lp_id`` is
+                registered on the tab.
+
+        Returns:
+            ``{"status": "removed", "id": lp_id}``.
+        """
+        self._require_tab(tab_id)
+        registry = self._logpoints.get(tab_id, [])
+        entry = next((lp for lp in registry if lp["id"] == lp_id), None)
+        if entry is None:
+            raise BrowserOperationError(f"Logpoint {lp_id} not found in tab {tab_id}.")
+        cdp = await self._get_cdp_session(tab_id)
+        cdp_id = entry.get("cdp_id", "")
+        if cdp_id:
+            with suppress(Exception):
+                await logpoint_mod.remove(cdp, cdp_id)
+        self._logpoints[tab_id] = [lp for lp in registry if lp["id"] != lp_id]
+        return {"status": "removed", "id": lp_id}
+
     # --- teardown ------------------------------------------------------
 
     async def _close(self) -> None:
@@ -929,3 +1093,40 @@ class BrowserManager:
         """Zero the per-tab wrap record array without navigating."""
         inst = self._require_instance(browser_id)
         return await inst.wrap_clear(tab_id)
+
+    # --- logpoint ------------------------------------------------------
+
+    async def logpoint_add(
+        self,
+        browser_id: int,
+        tab_id: int,
+        url: str,
+        line: int,
+        col: int,
+        expr: str,
+    ) -> dict[str, Any]:
+        """Plant a non-pausing logpoint on the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.logpoint_add(tab_id, url, line, col, expr)
+
+    async def logpoint_list(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
+        """List planted logpoints on the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.logpoint_list(tab_id)
+
+    async def logpoint_dump(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
+        """Read the per-tab logpoint record array."""
+        inst = self._require_instance(browser_id)
+        return await inst.logpoint_dump(tab_id)
+
+    async def logpoint_clear(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+        """Zero the per-tab logpoint record array without navigating."""
+        inst = self._require_instance(browser_id)
+        return await inst.logpoint_clear(tab_id)
+
+    async def logpoint_remove(
+        self, browser_id: int, tab_id: int, lp_id: str
+    ) -> dict[str, Any]:
+        """Remove a logpoint's CDP breakpoint and registry entry."""
+        inst = self._require_instance(browser_id)
+        return await inst.logpoint_remove(tab_id, lp_id)

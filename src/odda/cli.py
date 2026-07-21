@@ -32,6 +32,9 @@ coverage_app = typer.Typer(
 wrap_app = typer.Typer(name="wrap", help="Function and property wraps")
 wrap_calls_app = typer.Typer(name="calls", help="Install function (call) wraps")
 wrap_access_app = typer.Typer(name="access", help="Install property accessor wraps")
+logpoint_app = typer.Typer(
+    name="logpoint", help="Non-pausing source-location observations"
+)
 
 app.add_typer(browser_app)
 app.add_typer(tabs_app)
@@ -41,6 +44,7 @@ app.add_typer(coverage_app)
 app.add_typer(wrap_app)
 wrap_app.add_typer(wrap_calls_app)
 wrap_app.add_typer(wrap_access_app)
+app.add_typer(logpoint_app)
 
 
 def _output_json(data: Any) -> None:
@@ -572,6 +576,143 @@ def wrap_clear(
         _client(ctx).call(
             "wrap/clear",
             {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@logpoint_app.command("add")
+def logpoint_add(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    url: str = typer.Option(
+        ...,
+        "--url",
+        help="Script URL to bind the logpoint to (the script must be loaded)",
+    ),
+    line: int = typer.Option(
+        ...,
+        "--line",
+        help="0-based line number in the script (minified code packs many "
+        "statements per line, so the column is required to hit the right one)",
+    ),
+    col: int = typer.Option(
+        ...,
+        "--col",
+        help="0-based column number (required; minified code packs many "
+        "statements per line)",
+    ),
+    expr: str = typer.Option(
+        ...,
+        "--expr",
+        help="JS expression to evaluate at each hit. Evaluated in the "
+        "paused frame's scope, so it can read locals by name.",
+    ),
+) -> None:
+    """Plant a non-pausing observation at a source location.
+
+    odda plants a CDP ``Debugger.setBreakpointByUrl`` whose condition
+    evaluates ``--expr`` in the paused-then-immediately-resumed
+    frame's scope, records the result, and returns ``false`` so the
+    page never pauses. The logpoint persists until explicitly removed
+    (not fire-once); records wipe on navigation; the CDP logpoint
+    re-binds to the re-loaded script. Logpoints do not survive tab
+    close (per-tab-session).
+
+    If no loaded script matches ``--url``, the command succeeds but
+    the output includes a ``warning`` field. Line and column are
+    0-based offsets in the script source (use the column; minified code
+    packs many statements per line).
+    """
+    _run_coro(
+        _client(ctx).call(
+            "logpoint/add",
+            {
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "url": url,
+                "line": line,
+                "col": col,
+                "expr": expr,
+            },
+        )
+    )
+
+
+@logpoint_app.command("list")
+def logpoint_list(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """List planted logpoints for the target tab.
+
+    Returns ``[{id, url, line, col, expr}]``.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "logpoint/list",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@logpoint_app.command("dump")
+def logpoint_dump(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Read the per-tab logpoint record array.
+
+    Each record is ``{logpoint, url, line, col, value, error}`` where
+    ``error`` is ``null`` on success or the error message if the
+    expression threw. Records are wiped on navigation, so dump before
+    navigating again.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "logpoint/dump",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@logpoint_app.command("clear")
+def logpoint_clear(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Zero the per-tab logpoint record array without navigating.
+
+    Logpoint installations are unaffected; subsequent hits continue to
+    record. Returns ``{status: "cleared", count: <records dropped>}``.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "logpoint/clear",
+            {"browser_id": browser_id, "tab_id": tab_id},
+        )
+    )
+
+
+@logpoint_app.command("remove")
+def logpoint_remove(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    id: str = typer.Option(..., "--id", help="Logpoint id (lp-<n>) to remove"),
+) -> None:
+    """Remove a logpoint's CDP logpoint and registry entry.
+
+    The logpoint stops recording on future hits. Records already
+    captured in the current page are not affected.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "logpoint/remove",
+            {"browser_id": browser_id, "tab_id": tab_id, "id": id},
         )
     )
 
