@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head><title>Page Interaction Test</title></head>
+<body>
+  <button id="click-btn">Click me</button>
+  <div id="click-result">not clicked</div>
+
+  <input id="text-input" type="text" placeholder="Type here">
+  <div id="text-result">empty</div>
+
+  <div id="hover-target" style="width:100px;height:50px;border:1px solid black">Hover me</div>
+  <div id="hover-result">not hovered</div>
+
+  <form id="upload-form">
+    <input id="file-input" type="file" multiple>
+  </form>
+  <div id="upload-result">no files</div>
+
+  <iframe id="inner-frame" src="page-interaction-inner.html" style="width:400px;height:200px;border:1px solid black"></iframe>
+
+  <script>
+    document.getElementById('click-btn').addEventListener('click', () => {
+      document.getElementById('click-result').textContent = 'clicked';
+    });
+
+    document.getElementById('text-input').addEventListener('input', (e) => {
+      const v = e.target.value;
+      document.getElementById('text-result').textContent = v === '' ? 'empty' : v;
+    });
+
+    document.getElementById('hover-target').addEventListener('mouseenter', () => {
+      document.getElementById('hover-result').textContent = 'hovered';
+    });
+
+    document.getElementById('file-input').addEventListener('change', (e) => {
+      const n = e.target.files.length;
+      const names = Array.from(e.target.files).map(f => f.name);
+      document.getElementById('upload-result').textContent =
+        n === 0 ? 'no files' : names.join(', ');
+    });
+  </script>
+</body>
+</html>

@@ -35,6 +35,10 @@ wrap_access_app = typer.Typer(name="access", help="Install property accessor wra
 logpoint_app = typer.Typer(
     name="logpoint", help="Non-pausing source-location observations"
 )
+page_app = typer.Typer(
+    name="page",
+    help="Page interaction: snapshot, click, fill, hover, upload (ref-driven)",
+)
 
 app.add_typer(browser_app)
 app.add_typer(tabs_app)
@@ -45,6 +49,7 @@ app.add_typer(wrap_app)
 wrap_app.add_typer(wrap_calls_app)
 wrap_app.add_typer(wrap_access_app)
 app.add_typer(logpoint_app)
+app.add_typer(page_app)
 
 
 def _output_json(data: Any) -> None:
@@ -316,6 +321,148 @@ def screenshot(
     """Capture a screenshot of the target tab's viewport."""
     _run_coro(
         _client(ctx).call("screenshot", {"browser_id": browser_id, "tab_id": tab_id})
+    )
+
+
+# --- page interaction (snapshot + ref-driven actions) ----------------------
+
+
+@page_app.command("snapshot")
+def page_snapshot(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+) -> None:
+    """Take an agent-readable snapshot of the page's accessibility tree.
+
+    Returns the a11y tree as YAML-ish text with ``[ref=eN]`` tags (or
+    ``[ref=f<frameSeq>eN]`` inside iframes). Pass the ref to ``page click``,
+    ``page fill``, ``page hover``, or ``page upload`` to identify the
+    target. Re-snapshot to discover refs for new elements; existing refs
+    continue to work until their element leaves the DOM.
+    """
+    _run_coro(
+        _client(ctx).call("page/snapshot", {"browser_id": browser_id, "tab_id": tab_id})
+    )
+
+
+@page_app.command("click")
+def page_click(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    ref: str = typer.Argument(..., help="Element ref from a snapshot (e.g. e2)"),
+    timeout: float = typer.Option(
+        5.0, "--timeout", help="Timeout in seconds (default 5)"
+    ),
+) -> None:
+    """Click the element identified by ``ref`` (plain left-click).
+
+    If the ref no longer resolves (element removed, navigated away),
+    errors cleanly with a stale-ref message instead of hanging.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "page/click",
+            {
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "ref": ref,
+                "timeout": timeout,
+            },
+        )
+    )
+
+
+@page_app.command("fill")
+def page_fill(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    ref: str = typer.Argument(..., help="Element ref from a snapshot"),
+    value: str = typer.Argument(..., help="Value to fill (clears first)"),
+    timeout: float = typer.Option(
+        5.0, "--timeout", help="Timeout in seconds (default 5)"
+    ),
+) -> None:
+    """Fill the element identified by ``ref`` with ``value``.
+
+    Clears the field first, then types the value. Works on text inputs,
+    textareas, contenteditable elements, checkboxes (``"true"``/``"false"``),
+    radios, and selects.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "page/fill",
+            {
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "ref": ref,
+                "value": value,
+                "timeout": timeout,
+            },
+        )
+    )
+
+
+@page_app.command("hover")
+def page_hover(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    ref: str = typer.Argument(..., help="Element ref from a snapshot"),
+    timeout: float = typer.Option(
+        5.0, "--timeout", help="Timeout in seconds (default 5)"
+    ),
+) -> None:
+    """Hover the element identified by ``ref``.
+
+    Auto-scrolls the element into view before hovering.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "page/hover",
+            {
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "ref": ref,
+                "timeout": timeout,
+            },
+        )
+    )
+
+
+@page_app.command("upload")
+def page_upload(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
+    tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    ref: str = typer.Argument(..., help="Element ref of the file input"),
+    files: list[str] = typer.Option(
+        ...,
+        "--file",
+        help="Path to a file to upload (repeatable for multiple files)",
+    ),
+    timeout: float = typer.Option(
+        5.0, "--timeout", help="Timeout in seconds (default 5)"
+    ),
+) -> None:
+    """Upload files to a file input identified by ``ref``.
+
+    Pass ``--file <path>`` for each file; use multiple ``--file`` flags
+    for ``<input type="file" multiple>``.
+    """
+    _run_coro(
+        _client(ctx).call(
+            "page/upload",
+            {
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "ref": ref,
+                "files": files,
+                "timeout": timeout,
+            },
+        )
     )
 
 

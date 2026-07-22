@@ -2,6 +2,20 @@
 
 ## Language
 
+## Page interaction
+
+**Page interaction**:
+Driving the browser to trigger behavior — clicking, filling, hovering, uploading, and snapshotting the page to find targets. The agent uses Page interaction standalone for browser automation, or as the trigger step before Dynamic analysis (snapshot to find the target, click/fill/upload to trigger, then Wrap/Coverage/Logpoint to observe what happened).
+_Avoid_: browser action, actuation, page automation, interaction layer
+
+**Snapshot**:
+A text serialization of the page's accessibility tree returned by `odda page snapshot` (Playwright's `page.aria_snapshot(mode="ai")`). Lists page elements with their roles, names, and a per-element **Ref** in `[ref=eN]` tags. Reaches into iframes transparently (iframe elements get refs of the form `f<frameSeq>e<elemNum>`). The agent greps the snapshot for elements it wants; odda does not filter.
+_Avoid_: aria snapshot, accessibility tree, page snapshot, DOM dump
+
+**Ref**:
+A short-lived name (`eN`, or `f<frameSeq>eN` inside an iframe) for one element in a snapshot. The agent passes `eN` as a positional argument to `click`, `fill`, `hover`, and `upload` to identify the target; odda resolves it to the element via Playwright's `aria-ref` selector engine. A ref is valid as long as its element remains in the DOM; if the element is removed (SPA content swap, navigation), the action errors cleanly. Re-snapshot to discover refs for new elements; existing refs continue to work without re-snapshotting.
+_Avoid_: element reference, aria-ref, handle, snapshot ref, locator
+
 ## Dynamic analysis
 
 **Dynamic analysis**:
@@ -45,7 +59,7 @@ A `python3 -m http.server` bound to `127.0.0.1` on an auto-picked port, started 
 _Avoid_: mock server, test server, httpd
 
 **Browser fixture**:
-A headless odda browser instance plus an initial navigation to a fixture-server URL, set up at the start of a test document so subsequent `eval` / `screenshot` / `event-listeners` / `wrap` / `logpoint` / `coverage` commands have a live target.
+A headless odda browser instance plus an initial navigation to a fixture-server URL, set up at the start of a test document so subsequent `eval` / `screenshot` / `event-listeners` / `wrap` / `logpoint` / `coverage` / `page snapshot` / `page click` / `page fill` / `page hover` / `page upload` commands have a live target.
 _Avoid_: browser setup, browser init, session
 
 **Shared setup block**:

@@ -259,6 +259,90 @@ class OddaServer:
         """
         return await self.browser.screenshot(params["browser_id"], params["tab_id"])
 
+    # --- Page interaction handlers ---
+
+    async def method_page_snapshot(self, params: dict[str, Any]) -> str:
+        """Return the page's accessibility tree as agent-readable text.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+        """
+        return await self.browser.page_snapshot(params["browser_id"], params["tab_id"])
+
+    async def method_page_click(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Click the element identified by ``ref`` in the target tab.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            ref: Element ref from a snapshot (e.g. ``e2`` or ``f1e2``).
+            timeout: Timeout in seconds (default 5).
+        """
+        timeout_s = float(params.get("timeout", 5.0))
+        return await self.browser.page_click(
+            params["browser_id"],
+            params["tab_id"],
+            params["ref"],
+            timeout_ms=timeout_s * 1000,
+        )
+
+    async def method_page_fill(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Fill the element identified by ``ref`` with ``value``.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            ref: Element ref from a snapshot.
+            value: Value to fill (string for text inputs, ``"true"``/
+                ``"false"`` for checkboxes/radios).
+            timeout: Timeout in seconds (default 5).
+        """
+        timeout_s = float(params.get("timeout", 5.0))
+        return await self.browser.page_fill(
+            params["browser_id"],
+            params["tab_id"],
+            params["ref"],
+            params["value"],
+            timeout_ms=timeout_s * 1000,
+        )
+
+    async def method_page_hover(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Hover the element identified by ``ref`` in the target tab.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            ref: Element ref from a snapshot.
+            timeout: Timeout in seconds (default 5).
+        """
+        timeout_s = float(params.get("timeout", 5.0))
+        return await self.browser.page_hover(
+            params["browser_id"],
+            params["tab_id"],
+            params["ref"],
+            timeout_ms=timeout_s * 1000,
+        )
+
+    async def method_page_upload(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Set files on a file input identified by ``ref``.
+
+        Params:
+            browser_id: Target browser ID.
+            tab_id: Target tab ID.
+            ref: Element ref from a snapshot (the file input element).
+            files: List of local file paths to upload.
+            timeout: Timeout in seconds (default 5).
+        """
+        timeout_s = float(params.get("timeout", 5.0))
+        return await self.browser.page_upload(
+            params["browser_id"],
+            params["tab_id"],
+            params["ref"],
+            params["files"],
+            timeout_ms=timeout_s * 1000,
+        )
+
     async def method_tabs_list(self, params: dict[str, Any]) -> list[dict]:
         """List tabs grouped by browser.
 

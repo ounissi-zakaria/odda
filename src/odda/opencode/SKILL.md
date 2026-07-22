@@ -25,6 +25,11 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Wait for a JS condition     | `odda wait-for "<expr>" --browser-id <id> --tab-id <n> [--timeout N]` |
 | Screenshot                  | `odda screenshot --browser-id <id> --tab-id <n>`                   |
 | List event listeners        | `odda event-listeners --browser-id <id> --tab-id <n>`              |
+| Snapshot (find refs)        | `odda page snapshot --browser-id <id> --tab-id <n>`                 |
+| Click by ref                | `odda page click --browser-id <id> --tab-id <n> <ref> [--timeout N]` |
+| Fill by ref                 | `odda page fill --browser-id <id> --tab-id <n> <ref> "<value>" [--timeout N]` |
+| Hover by ref                | `odda page hover --browser-id <id> --tab-id <n> <ref> [--timeout N]` |
+| Upload files by ref         | `odda page upload --browser-id <id> --tab-id <n> <ref> --file <path> [--file <path>...]` |
 | Install a userscript        | `odda userscript install --name <name> --browser-id <id> --file <path>` |
 | List userscripts            | `odda userscript list`                                             |
 | Remove a userscript         | `odda userscript remove <name> --browser-id <id>`                  |
@@ -52,7 +57,7 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 Every browser/tab command takes an explicit target. Agents always specify which browser and which tab they mean.
 
 - **Browser-scoped commands** take `--browser-id`: `browser open`, `browser close`, `tabs list` (optional filter), `tabs open`, `userscript install/remove`.
-- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`, `coverage start`/`snapshot`/`stop`, `wrap calls add`/`access add`/`list`/`remove`/`dump`/`clear`, `logpoint add`/`list`/`remove`/`dump`/`clear`.
+- **Tab-scoped commands** take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`, `coverage start`/`snapshot`/`stop`, `wrap calls add`/`access add`/`list`/`remove`/`dump`/`clear`, `logpoint add`/`list`/`remove`/`dump`/`clear`, `page snapshot`/`click`/`fill`/`hover`/`upload`.
 
 IDs are integers, monotonic, and **never reused**. A closed tab's id is retired forever; a stale `--tab-id` errors cleanly instead of silently hitting a different tab. This makes it safe for multiple agents to share one odda server: each agent owns the IDs it captured and never disturbs another agent's target.
 
@@ -83,6 +88,30 @@ Tab ids are per-browser, monotonic, and never reused. After a tab closes, its id
 - `odda wait-for "<expr>" --browser-id <id> --tab-id <n> [--timeout N]` — Poll a JS expression until it's truthy or the timeout (default 30s) is reached. Uses Playwright's `wait_for_function`, which polls in-browser with no round-trips. Runs in the main world, so it sees page globals and userscript-injected helpers. Returns the truthy value on success; errors with non-zero exit code on timeout. Example: `odda wait-for "document.querySelector('.sdk-ready')" --browser-id 1 --tab-id 1 --timeout 10`.
 - `odda screenshot --browser-id <id> --tab-id <n>` — Capture a JPEG screenshot of the target tab's viewport. Returns the path to the temp file (a bare string). Screenshot failures raise a JSON error with non-zero exit.
 - `odda event-listeners --browser-id <id> --tab-id <n>` — List JavaScript event listeners attached to `window` and `document` in the target tab.
+
+## Page interaction
+
+`odda page` drives the browser to trigger behavior — clicking, filling, hovering, uploading, and snapshotting the page to find targets. The workflow is: snapshot to discover element refs, then pass the ref to the action command. This is the ref-driven alternative to `odda eval` with hand-written CSS selectors, which is brittle on minified SPAs.
+
+Page interaction is both standalone (browser automation) and composes with Dynamic analysis: snapshot to find the target, click/fill/upload to trigger behavior, then Wrap/Coverage/Logpoint to observe what happened.
+
+### Refs
+
+A **ref** (`eN`, or `f<frameSeq>eN` inside an iframe) is a short-lived name for one element in a snapshot. The agent passes `eN` as a positional argument to `click`, `fill`, `hover`, and `upload`; odda resolves it to the element via Playwright's `aria-ref` selector engine.
+
+- **Valid as long as the element stays in the DOM.** If the element is removed (SPA content swap, navigation), the action errors cleanly. Re-snapshot to discover refs for new elements; existing refs continue to work without re-snapshotting.
+- **Cross-iframe is transparent.** Refs inside iframes have the form `f<frameSeq>eN`; odda resolves them automatically, no special handling.
+- **File inputs without an accessible name do not appear in the snapshot.** Playwright omits nameless `<input type="file">` from the a11y tree. Give the input an `aria-label` via `eval`, re-snapshot, then upload by ref.
+
+Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
+
+- `odda page snapshot --browser-id <id> --tab-id <n>` — Return the page's accessibility tree as YAML-ish text with `[ref=eN]` tags. The agent greps the text for the element it wants. No filter options; the full tree is returned. Prefer `page snapshot` over `odda screenshot` for finding elements and understanding page structure: the snapshot is text (cheaper on context, grep-able, carries refs for action commands), while the screenshot is pixels (useful only for visual layout, icons, or canvas the a11y tree can't see). Use screenshots when you need to see what the page looks like; use snapshots when you need to find an element to act on.
+- `odda page click --browser-id <id> --tab-id <n> <ref> [--timeout N]` — Click the element identified by `ref` (plain left-click). Returns `{status: "clicked", ref: "<ref>"}`. If the ref no longer resolves, errors cleanly with a stale-ref message.
+- `odda page fill --browser-id <id> --tab-id <n> <ref> "<value>" [--timeout N]` — Fill the element identified by `ref` with `value`. Clears the field first, then types. Works on text inputs, textareas, contenteditable elements, checkboxes (`"true"`/`"false"`), radios, and selects. Returns `{status: "filled", ref: "<ref>"}`.
+- `odda page hover --browser-id <id> --tab-id <n> <ref> [--timeout N]` — Hover the element identified by `ref`. Auto-scrolls the element into view first. Returns `{status: "hovered", ref: "<ref>"}`.
+- `odda page upload --browser-id <id> --tab-id <n> <ref> --file <path> [--file <path>...] [--timeout N]` — Set files on a file input identified by `ref`. Repeat `--file` for multiple files (`<input type="file" multiple>`). Returns `{status: "uploaded", ref: "<ref>", files: ["<path>", ...]}`.
+
+All action commands accept `--timeout` (default 5 seconds) for ref resolution and the action itself. This is shorter than `wait-for`'s 30s default because actions are interactive — the agent wants to know quickly when something didn't work. A stale ref errors within the timeout, not after a 30-second Playwright hang.
 
 ## Userscripts
 
@@ -265,6 +294,22 @@ The three dynamic-analysis concepts compose. The canonical investigation is conf
 5. If the logpoint records an attacker-controllable origin, the handler does not validate origin and is vulnerable.
 
 The workflow: Wrap confirms the API touch, Coverage finds the code path, Logpoint reads the locals at the interesting line. Each concept observes without modifying behavior (the page never pauses).
+
+### With page interaction
+
+The same recipe composes with `odda page` when the behavior is triggered by user input rather than a `postMessage` call. Snapshot to find the form/button, click or fill to trigger the behavior, then observe with Wrap/Coverage/Logpoint:
+
+1. **Snapshot** to find the target:
+   ```
+   odda page snapshot --browser-id 1 --tab-id 1   # find the ref for the submit button
+   ```
+2. **Wrap** `EventTarget.prototype.addEventListener` (as above), then **click** the button to trigger the handler:
+   ```
+   odda page click --browser-id 1 --tab-id 1 e2   # click the submit button by ref
+   ```
+3. **Coverage** to find which code path ran as a result of the click, **Logpoint** to read locals at the interesting line — same as above.
+
+The page-interaction step replaces `odda eval "window.postMessage(...)"` when the trigger is a user action (form submit, button click, file upload) rather than a programmatic call.
 
 ## Raw request commands
 

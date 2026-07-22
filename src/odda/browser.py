@@ -9,7 +9,7 @@ import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from patchright.async_api import (
     BrowserContext,
@@ -25,6 +25,9 @@ from odda import (
     userscript as userscript_mod,
     wrap as wrap_mod,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +414,142 @@ class BrowserInstance:
                     f"Tab {tab_id} closed during screenshot."
                 ) from exc
             raise BrowserOperationError(f"Screenshot error: {exc!s}") from exc
+
+    # --- page interaction --------------------------------------------
+
+    async def page_snapshot(self, tab_id: int) -> str:
+        """Return the page's accessibility tree as agent-readable text.
+
+        Calls Playwright's ``page.aria_snapshot(mode="ai")`` which returns
+        a YAML-ish serialization of the a11y tree with ``[ref=eN]`` tags
+        (or ``[ref=f<frameSeq>eN]`` inside iframes). The agent greps the
+        text for the element it wants and passes the ref to ``click``,
+        ``fill``, ``hover``, or ``upload``.
+        """
+        page = self._require_tab(tab_id)
+        try:
+            return await page.aria_snapshot(mode="ai")
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during snapshot."
+                ) from exc
+            raise BrowserOperationError(f"Snapshot error: {exc!s}") from exc
+
+    async def _ref_action(
+        self,
+        tab_id: int,
+        ref: str,
+        verb: str,
+        action: Callable[[], Awaitable[Any]],
+        timeout_ms: float,
+    ) -> None:
+        """Run a ref-driven Playwright action with unified error handling.
+
+        Runs ``action`` (which should call the Playwright Locator method
+        with the desired timeout) and converts Playwright timeouts and
+        target-closed errors into clean ``BrowserOperationError`` messages.
+        A timeout may mean the ref is stale (element removed) or the
+        element is present but not actionable (disabled, covered by an
+        overlay); the error message reflects both possibilities.
+        """
+        try:
+            await action()
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during {verb}."
+                ) from exc
+            if "timeout" in str(exc).lower() or "Timeout" in type(exc).__name__:
+                raise BrowserOperationError(
+                    f"ref {ref} did not resolve or become actionable "
+                    f"within {timeout_ms}ms (the element may have been "
+                    f"removed, or it may be disabled or covered by an "
+                    f"overlay; take a new snapshot if stale)"
+                ) from exc
+            raise BrowserOperationError(f"{verb.capitalize()} error: {exc!s}") from exc
+
+    async def page_click(
+        self, tab_id: int, ref: str, *, timeout_ms: float
+    ) -> dict[str, Any]:
+        """Click the element identified by ``ref`` (plain left-click).
+
+        Uses Playwright's ``aria-ref`` selector engine to resolve the ref
+        to a Locator, then clicks it. If the ref no longer resolves
+        (element removed, navigated away), the Playwright timeout is
+        converted to a clean ``BrowserOperationError``.
+        """
+        page = self._require_tab(tab_id)
+        locator = page.locator(f"aria-ref={ref}")
+        await self._ref_action(
+            tab_id,
+            ref,
+            "click",
+            lambda: locator.click(timeout=timeout_ms),
+            timeout_ms,
+        )
+        return {"status": "clicked", "ref": ref}
+
+    async def page_fill(
+        self, tab_id: int, ref: str, value: str, *, timeout_ms: float
+    ) -> dict[str, Any]:
+        """Fill the element identified by ``ref`` with ``value``.
+
+        Clears the field first, then types the value (Playwright's
+        ``locator.fill()``). Works on text inputs, textareas, contenteditable
+        elements, checkboxes (``"true"``/``"false"``), radios, and selects.
+        """
+        page = self._require_tab(tab_id)
+        locator = page.locator(f"aria-ref={ref}")
+        await self._ref_action(
+            tab_id,
+            ref,
+            "fill",
+            lambda: locator.fill(value, timeout=timeout_ms),
+            timeout_ms,
+        )
+        return {"status": "filled", "ref": ref}
+
+    async def page_hover(
+        self, tab_id: int, ref: str, *, timeout_ms: float
+    ) -> dict[str, Any]:
+        """Hover the element identified by ``ref``.
+
+        Auto-scrolls the element into view (Playwright's actionability
+        check) before dispatching the hover.
+        """
+        page = self._require_tab(tab_id)
+        locator = page.locator(f"aria-ref={ref}")
+        await self._ref_action(
+            tab_id,
+            ref,
+            "hover",
+            lambda: locator.hover(timeout=timeout_ms),
+            timeout_ms,
+        )
+        return {"status": "hovered", "ref": ref}
+
+    async def page_upload(
+        self, tab_id: int, ref: str, files: list[str], *, timeout_ms: float
+    ) -> dict[str, Any]:
+        """Set files on a file input identified by ``ref``.
+
+        Wraps Playwright's ``locator.set_input_files(files)``. Pass one
+        path for a single file input, or multiple paths for
+        ``<input type="file" multiple>``.
+        """
+        page = self._require_tab(tab_id)
+        locator = page.locator(f"aria-ref={ref}")
+        await self._ref_action(
+            tab_id,
+            ref,
+            "upload",
+            lambda: locator.set_input_files(files, timeout=timeout_ms),
+            timeout_ms,
+        )
+        return {"status": "uploaded", "ref": ref, "files": files}
 
     async def list_event_listeners(self, tab_id: int) -> list[dict]:
         """List JavaScript event listeners on window and document.
@@ -929,6 +1068,51 @@ class BrowserManager:
         """Capture a screenshot of the target tab's viewport."""
         inst = self._require_instance(browser_id)
         return await inst.screenshot(tab_id)
+
+    async def page_snapshot(self, browser_id: int, tab_id: int) -> str:
+        """Return the page's accessibility tree as agent-readable text."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_snapshot(tab_id)
+
+    async def page_click(
+        self, browser_id: int, tab_id: int, ref: str, *, timeout_ms: float
+    ) -> dict[str, Any]:
+        """Click the element identified by ``ref`` in the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_click(tab_id, ref, timeout_ms=timeout_ms)
+
+    async def page_fill(
+        self,
+        browser_id: int,
+        tab_id: int,
+        ref: str,
+        value: str,
+        *,
+        timeout_ms: float,
+    ) -> dict[str, Any]:
+        """Fill the element identified by ``ref`` with ``value``."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_fill(tab_id, ref, value, timeout_ms=timeout_ms)
+
+    async def page_hover(
+        self, browser_id: int, tab_id: int, ref: str, *, timeout_ms: float
+    ) -> dict[str, Any]:
+        """Hover the element identified by ``ref`` in the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_hover(tab_id, ref, timeout_ms=timeout_ms)
+
+    async def page_upload(
+        self,
+        browser_id: int,
+        tab_id: int,
+        ref: str,
+        files: list[str],
+        *,
+        timeout_ms: float,
+    ) -> dict[str, Any]:
+        """Set files on a file input identified by ``ref``."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_upload(tab_id, ref, files, timeout_ms=timeout_ms)
 
     async def list_event_listeners(self, browser_id: int, tab_id: int) -> list[dict]:
         """List JS event listeners in the target tab."""

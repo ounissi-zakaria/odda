@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head><title>Page Interaction Iframe</title></head>
+<body>
+  <button id="iframe-btn">Iframe button</button>
+  <div id="iframe-result">not clicked</div>
+  <script>
+    document.getElementById('iframe-btn').addEventListener('click', () => {
+      document.getElementById('iframe-result').textContent = 'clicked in iframe';
+    });
+    window.__oddaPageIframeLoaded = true;
+  </script>
+</body>
+</html>
