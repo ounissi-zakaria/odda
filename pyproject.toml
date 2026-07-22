@@ -1,6 +1,6 @@
 [project]
 name = "odda"
-version = "0.17.0"
+version = "0.18.0"
 description = "Browser automation and HTTP traffic capture CLI for AI agents"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -17,6 +17,7 @@ odda = "odda.cli:main"
 [project.optional-dependencies]
 dev = [
     "ruff>=0.15.11",
+    "hypercorn>=0.18.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -112,3 +113,4 @@ split-on-trailing-comma = false
 "src/odda/request/*.py" = ["PLR0913", "PLR2004", "C901", "PLR0912", "PLR0915", "TC003"]
 "src/odda/wrap.py" = ["E501"]
 "src/odda/logpoint.py" = ["E501", "PLR0913"]
+"tests/e2e/scrut/fixtures/dyn_asgi.py" = ["INP001", "ARG001"]

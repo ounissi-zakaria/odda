@@ -2,6 +2,7 @@
 prepend:
   - _lib/boot.md
   - _lib/fixture-server.md
+  - _lib/dyn-server.md
 append:
   - _lib/teardown.md
 ---
@@ -12,19 +13,37 @@ Clones a captured flow into an editable request. The captured flow
 must come from a previous `curl` (or browser navigation) through
 the proxy, which is set up at the start of this document.
 
+## Set up the dyn server
+
+The dyn server is a local HTTPS server speaking HTTP/1.1 and HTTP/2
+that serves dynamic `?body=&status=&header=` responses, replacing the
+remote `xs2.top` server so the test is deterministic.
+
+```scrut
+$ setup_dyn_server
+```
+
+```scrut {detached: true, detached_kill_signal: term}
+$ port=$(cat "$PWD/dyn_port"); ( hypercorn --bind "127.0.0.1:$port" --keyfile "$PWD/dyn.key" --certfile "$PWD/dyn.pem" "$PWD/dyn_asgi.py:app" >"$PWD/dyn_server.log" 2>&1 < /dev/null & )
+```
+
+```scrut
+$ wait_for_dyn_server
+```
+
 ## Capture a flow through the proxy
 
-Use `curl` through `proxy-url` against the local `xs2.top` testing
-server. The body, status, and a header are all controlled by the
-query string so we can verify them later.
+Use `curl` through `proxy-url` against the local dyn server. The body,
+status, and a header are all controlled by the query string so we can
+verify them later.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url > "$PWD/proxy_url"
 ```
 
 ```scrut
-$ curl -s -x "$(cat "$PWD/proxy_url")" -k --proxy-insecure \
->   'https://xs2.top/a?body=clone-test&status=200&header=Content-Type:application/json' \
+$ port=$(cat "$PWD/dyn_port"); curl -s -x "$(cat "$PWD/proxy_url")" -k --proxy-insecure \
+>   "https://127.0.0.1:$port/a?body=clone-test&status=200&header=Content-Type:application/json" \
 >   -o /dev/null -w "curl_status=%{http_code}\n"
 curl_status=200
 ```
@@ -36,10 +55,10 @@ body marker.
 $ wait_for_flow "clone-test"
 ```
 
-## Find the flow id for `xs2.top`
+## Find the flow id for the dyn server
 
 ```scrut
-$ grep '"host": "xs2.top"' "$PWD/data/flows/flows.jsonl" | head -n 1 \
+$ grep '"host": "127.0.0.1"' "$PWD/data/flows/flows.jsonl" | grep 'clone-test' | head -n 1 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/flow_id"
 ```
 
@@ -59,7 +78,7 @@ $ cat "$PWD/flow_id"
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request clone "$flow_id" --name clone-test \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"], d["port"])'
-clone-test https xs2.top 443
+clone-test https 127.0.0.1 * (glob)
 ```
 
 The cloned request files exist and are non-empty.
@@ -91,5 +110,11 @@ refused
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request clone "$flow_id" --name clone-test --force \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"], d["port"])'
-clone-test https xs2.top 443
+clone-test https 127.0.0.1 * (glob)
+```
+
+## Teardown: stop the dyn server
+
+```scrut
+$ stop_dyn_server
 ```

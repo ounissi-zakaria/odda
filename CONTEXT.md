@@ -55,13 +55,17 @@ The `_lib/boot.md` (prepended) and `_lib/teardown.md` (appended) files that DRY 
 _Avoid_: setup file, fixture file
 
 **Fixture server**:
-A `python3 -m http.server` bound to `127.0.0.1` on an auto-picked port, started by a test document to provide a URL for browser navigation or proxy capture. Serves files copied from `tests/e2e/scrut/fixtures/` into `$PWD/site/`. Torn down at the document's end via `pkill`. A self-signed HTTPS variant exists for TLS-specific tests.
+A `python3 -m http.server` bound to `127.0.0.1` on an auto-picked port, started by a test document to provide a URL for browser navigation or proxy capture. Serves files copied from `tests/e2e/scrut/fixtures/` into `$PWD/site/`. Torn down at the document's end via `pkill`.
 _Avoid_: mock server, test server, httpd
+
+**Dyn server**:
+A local HTTPS server bound to `127.0.0.1` on an auto-picked port, started by a test document to provide an HTTP/1.1 and HTTP/2 target with TLS and dynamic responses (`?body=&status=&header=&gzip=1`). Run under hypercorn (a dev dependency) serving a small ASGI app (`tests/e2e/scrut/fixtures/dyn_asgi.py`) with a self-signed cert generated at launch. Serves the same dynamic-response contract as the remote `xs2.top` testing server, but with no external network dependency. Used by the `request clone` and `request send` test documents. Torn down at the document's end via `pkill`.
+_Avoid_: mock server, H2 server, xs2 server, dynamic fixture
 
 **Browser fixture**:
 A headless odda browser instance plus an initial navigation to a fixture-server URL, set up at the start of a test document so subsequent `eval` / `screenshot` / `event-listeners` / `wrap` / `logpoint` / `coverage` / `page snapshot` / `page click` / `page fill` / `page hover` / `page upload` commands have a live target.
 _Avoid_: browser setup, browser init, session
 
 **Shared setup block**:
-A scrut `_lib/*.md` file prepended (or appended) to every test document that needs it, providing a fixture server, browser fixture, or teardown with prose DRY'd across docs. Each document still gets its own per-doc instance — only the prose is shared, mirroring Shared boot/teardown.
+A scrut `_lib/*.md` file prepended (or appended) to every test document that needs it, providing a fixture server, browser fixture, dyn server, or teardown with prose DRY'd across docs. Each document still gets its own per-doc instance — only the prose is shared, mirroring Shared boot/teardown.
 _Avoid_: shared fixture, shared steps

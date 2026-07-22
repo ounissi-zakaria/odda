@@ -2,6 +2,7 @@
 prepend:
   - _lib/boot.md
   - _lib/fixture-server.md
+  - _lib/dyn-server.md
 append:
   - _lib/teardown.md
 ---
@@ -10,63 +11,42 @@ append:
 
 Miscellaneous `odda request send` behavior.
 
+## Set up the dyn server
+
+The dyn server speaks HTTP/1.1 and HTTP/2 over TLS with a self-signed
+cert, serving dynamic `?body=&status=&header=&gzip=1` responses. It
+replaces the remote `xs2.top` server so the test is deterministic and
+runs offline.
+
+```scrut
+$ setup_dyn_server
+```
+
+```scrut {detached: true, detached_kill_signal: term}
+$ port=$(cat "$PWD/dyn_port"); ( hypercorn --bind "127.0.0.1:$port" --keyfile "$PWD/dyn.key" --certfile "$PWD/dyn.pem" "$PWD/dyn_asgi.py:app" >"$PWD/dyn_server.log" 2>&1 < /dev/null & )
+```
+
+```scrut
+$ wait_for_dyn_server
+```
+
 ## `request send` negotiates HTTP/2 when the request line says `HTTP/2`
 
-First, capture an HTTP/2 request via the proxy to get a real
-H2-shaped request to clone.
+Create an editable request pointed at the dyn server and write a raw
+HTTP/2 GET request. The dyn server negotiates `h2` via ALPN.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url > "$PWD/proxy_url"
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name h2-test --host 127.0.0.1 --port $port --force > /dev/null
 ```
 
 ```scrut
-$ curl -s -x "$(cat "$PWD/proxy_url")" -k --proxy-insecure \
->   'https://xs2.top/a?body=h2-capture&status=200&header=Content-Type:application/json' \
->   -o /dev/null -w "curl_status=%{http_code}\n"
-curl_status=200
-```
-
-Wait for mitmproxy to flush the flow to disk, matching the unique
-body marker.
-
-```scrut
-$ wait_for_flow "h2-capture"
-```
-
-```scrut
-$ grep '"host": "xs2.top"' "$PWD/data/flows/flows.jsonl" | head -n 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/flow_id"
-```
-
-```scrut
-$ flow_id=$(cat "$PWD/flow_id")
-```
-
-```scrut
-$ cat "$PWD/flow_id"
-* (glob)
-```
-
-Now clone the captured H2 request and rewrite it for the H2 send test.
-
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request clone "$flow_id" --name h2-test --force > /dev/null
-```
-
-```scrut
-$ sed 's/$/\r/' > "$PWD/data/requests/h2-test/request" <<'REQEOF'
-> GET /a?body=h2-send-test&status=200&header=Content-Type:application/json HTTP/2
-> user-agent: odda-test
-> accept: */*
-> 
-> REQEOF
+$ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=h2-send-test&status=200&header=Content-Type:application/json HTTP/2\r\nuser-agent: odda-test\r\naccept: */*\r\n\r\n' > "$PWD/data/requests/h2-test/request"
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send h2-test --timeout 10 \
+>   request send h2-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status_code"])'
 200
 ```
@@ -75,7 +55,7 @@ The response body matches.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send h2-test --timeout 10 \
+>   request send h2-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/h2_flow_id"
 ```
 
@@ -112,32 +92,24 @@ server would hang; with the flag the send succeeds and the stored
 request shows the corrected `Content-Length: 17`.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request new --name cl-test --host xs2.top --force > /dev/null
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name cl-test --host 127.0.0.1 --port $port --force > /dev/null
 ```
 
 ```scrut
-$ sed 's/$/\r/' > "$PWD/data/requests/cl-test/request" <<'REQEOF'
-> POST /a?body=cl-ok&status=200&header=Content-Type:application/json HTTP/1.1
-> Host: xs2.top
-> Content-Type: application/json
-> Content-Length: 999
-> Connection: close
-> 
-> {"key":"value"}
-> REQEOF
+$ port=$(cat "$PWD/dyn_port"); printf 'POST /a?body=cl-ok&status=200&header=Content-Type:application/json HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nContent-Type: application/json\r\nContent-Length: 999\r\nConnection: close\r\n\r\n{"key":"value"}\r\n' "$port" > "$PWD/data/requests/cl-test/request"
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send cl-test --fix-content-length --timeout 10 \
+>   request send cl-test --fix-content-length --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
 200
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send cl-test --fix-content-length --timeout 10 \
+>   request send cl-test --fix-content-length --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/cl_flow_id"
 ```
 
@@ -161,86 +133,62 @@ editable unchanged
 
 ## gzip response: empty body is handled gracefully
 
-`xs2.top` returns no body when `Content-Encoding:gzip` is requested
-as a response header. The send must not crash; the recorded
-`response_body.*` file is empty (or absent).
+The dyn server compresses the body and sets `Content-Encoding: gzip`
+when `gzip=1` is in the query string. The send decodes it and records
+the decoded body.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request new --name gzip-test --host xs2.top --force > /dev/null
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name gzip-test --host 127.0.0.1 --port $port --force > /dev/null
 ```
 
 ```scrut
-$ sed 's/$/\r/' > "$PWD/data/requests/gzip-test/request" <<'REQEOF'
-> GET /a?body=gzip-decoded-ok&status=200&header=Content-Type:application/json&header=Content-Encoding:gzip HTTP/1.1
-> Host: xs2.top
-> Connection: close
-> 
-> REQEOF
+$ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=gzip-decoded-ok&status=200&header=Content-Type:application/json&gzip=1 HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: close\r\n\r\n' "$port" > "$PWD/data/requests/gzip-test/request"
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send gzip-test --timeout 10 \
+>   request send gzip-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
 200
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send gzip-test --timeout 10 \
+>   request send gzip-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["body_file"])'
 * flows/*/response_body.json (glob)
 ```
 
-## `--insecure` skips TLS verification against a self-signed server
-
-Spin up a local HTTPS server with a self-signed cert. Pick a free
-port for it.
-
-```scrut
-$ https_port=$(pick_port)
-```
-
-```scrut {detached: true, detached_kill_signal: term}
-$ ( openssl req -x509 -newkey rsa:2048 \
->     -keyout "$PWD/selfsigned.key" -out "$PWD/selfsigned.pem" \
->     -days 1 -nodes -subj "/CN=127.0.0.1" 2>/dev/null && \
->   nohup python3 -c "
-> import http.server, ssl
-> ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-> ctx.load_cert_chain(certfile='$PWD/selfsigned.pem', keyfile='$PWD/selfsigned.key')
-> server = http.server.HTTPServer(('127.0.0.1', ${https_port}), http.server.SimpleHTTPRequestHandler)
-> server.socket = ctx.wrap_socket(server.socket, server_side=True)
-> server.serve_forever()
-> " > "$PWD/https_server.log" 2>&1 & )
-```
-
-```scrut
-$ for i in $(seq 1 100); do curl -s -k -o /dev/null "https://127.0.0.1:$https_port/" && exit 0; sleep 0.05; done; exit 1
-```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request new --name insecure-test --host xs2.top --force > /dev/null
+>   request send gzip-test --insecure --timeout 10 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/gzip_flow_id"
 ```
 
 ```scrut
-$ sed 's/$/\r/' > "$PWD/data/requests/insecure-test/request" <<REQEOF
-> GET / HTTP/1.1
-> Host: 127.0.0.1:$https_port
-> Connection: close
-> 
-> REQEOF
+$ gzip_flow_id=$(cat "$PWD/gzip_flow_id")
 ```
 
 ```scrut
-$ cat > "$PWD/data/requests/insecure-test/meta.json" <<METAEOF
-> {"scheme": "https", "host": "127.0.0.1", "port": $https_port}
-> METAEOF
+$ cat "$PWD/data/flows/$gzip_flow_id/response_body.json"
+gzip-decoded-ok (no-eol)
 ```
 
+## `--insecure` skips TLS verification against a self-signed server
+
+The dyn server uses a self-signed cert (generated at setup time).
 Without `--insecure`, the send errors with a TLS error.
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name insecure-test --host 127.0.0.1 --port $port --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: close\r\n\r\n' "$port" > "$PWD/data/requests/insecure-test/request"
+```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
@@ -258,24 +206,14 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 200
 ```
 
-## Teardown: stop the local HTTPS server
-
-```scrut
-$ pkill -f "HTTPServer.*$PWD/selfsigned.pem" 2>/dev/null || true
-```
-
-```scrut
-$ for i in $(seq 1 100); do pgrep -f "HTTPServer.*$PWD/selfsigned.pem" >/dev/null || exit 0; sleep 0.05; done; echo "still running"; exit 1
-```
-
 ## Empty `request` file is rejected
 
 `request new` makes an empty file; `request send` against an empty
 file must error.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request new --name empty-test --host xs2.top --force > /dev/null
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name empty-test --host 127.0.0.1 --port $port --force > /dev/null
 ```
 
 ```scrut
@@ -283,4 +221,10 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send empty-test --timeout 5 2>&1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("error" in d, "error" in d and d["error"] != "")'
 True True
+```
+
+## Teardown: stop the dyn server
+
+```scrut
+$ stop_dyn_server
 ```

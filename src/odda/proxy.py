@@ -30,10 +30,12 @@ class ProxyServer:
             listen_port=port,
             listen_host=host,
         )
-        self.loop = asyncio.new_event_loop()
-        self.m = DumpMaster(
-            self.options, loop=self.loop, with_termlog=False, with_dumper=False
-        )
+        # odda's audience tests against staging boxes, internal hosts, and
+        # appliances with self-signed/expired certs. Skipping upstream TLS
+        # validation lets the proxy forward to those hosts without 502s.
+        # See docs/adr/0007-proxy-ssl-insecure.md.
+        self.options.ssl_insecure = True
+        self.m = DumpMaster(self.options, with_termlog=False, with_dumper=False)
         # Set client replay concurrency to -1 (no limit) so queue.join()
         # returns after request is dispatched, not after response received.
         self.m.options.client_replay_concurrency = -1
