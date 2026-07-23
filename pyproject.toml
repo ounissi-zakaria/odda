@@ -114,3 +114,4 @@ split-on-trailing-comma = false
 "src/odda/wrap.py" = ["E501"]
 "src/odda/logpoint.py" = ["E501", "PLR0913"]
 "tests/e2e/scrut/fixtures/dyn_asgi.py" = ["INP001", "ARG001"]
+"tests/e2e/scrut/fixtures/ws_header_h2server.py" = ["INP001", "S110"]

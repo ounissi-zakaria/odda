@@ -36,6 +36,13 @@ class ProxyServer:
         # See docs/adr/0007-proxy-ssl-insecure.md.
         self.options.ssl_insecure = True
         self.m = DumpMaster(self.options, with_termlog=False, with_dumper=False)
+        # Real-world servers send non-conformant HTTP/2 header values (e.g.
+        # ` IE=Edge`); the h2 library rejects those and mitmproxy 502s. Skip
+        # inbound header validation to accept them. Set after DumpMaster
+        # construction: the option is registered by the proxyserver addon
+        # during init, so it is unknown before then.
+        # See docs/adr/0012-proxy-skip-inbound-header-validation.md.
+        self.options.validate_inbound_headers = False
         # Set client replay concurrency to -1 (no limit) so queue.join()
         # returns after request is dispatched, not after response received.
         self.m.options.client_replay_concurrency = -1
