@@ -197,6 +197,141 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 "[[\"print\",null,null],[\"alert\",\"alert-msg\",null],[\"confirm\",\"confirm-msg\",null],[\"prompt\",\"prompt-msg\",\"prompt-default\"]]"
 ```
 
+### `confirm` and `prompt` proceed by default (ADR-0011)
+
+When no response is pre-registered, `confirm` returns `true` and
+`prompt` returns `"odda"` so the page proceeds instead of being
+silently denied. Re-navigate to reset `__oddaDialogs` first.
+
+```scrut
+$ navigate_fixture /dialogs.html "window.__oddaDialogInterceptorInstalled"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "String(window.confirm('are-you-sure'))" --browser-id 1 --tab-id 1
+"true"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "String(window.prompt('answer-please'))" --browser-id 1 --tab-id 1
+"odda"
+```
+
+The recorded `result` for those two entries should match the defaults.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js 'JSON.stringify(window.__oddaDialogs.slice(-2).map(e => [e.type, e.message, e.result]))' \
+>   --browser-id 1 --tab-id 1
+"[[\"confirm\",\"are-you-sure\",true],[\"prompt\",\"answer-please\",\"odda\"]]"
+```
+
+### Pre-registered responses override the defaults via `__oddaDialogResponses`
+
+The agent sets `window.__oddaDialogResponses` (a per-type map) before
+the triggering call; the interceptor returns the registered value
+instead of the default, and records it as `result`. Re-navigate to
+reset `__oddaDialogs` and the map (fresh `window`) first.
+
+```scrut
+$ navigate_fixture /dialogs.html "window.__oddaDialogInterceptorInstalled"
+```
+
+Register a prompt response and a confirm denial, then call both.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "window.__oddaDialogResponses = {prompt: 's3cr3t', confirm: false}; 'set'" \
+>   --browser-id 1 --tab-id 1
+"set"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "String(window.prompt('answer-please'))" --browser-id 1 --tab-id 1
+"s3cr3t"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "String(window.confirm('are-you-sure'))" --browser-id 1 --tab-id 1
+"false"
+```
+
+The recorded `result` entries reflect the registered values, not the
+defaults.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js 'JSON.stringify(window.__oddaDialogs.slice(-2).map(e => [e.type, e.message, e.result]))' \
+>   --browser-id 1 --tab-id 1
+"[[\"prompt\",\"answer-please\",\"s3cr3t\"],[\"confirm\",\"are-you-sure\",false]]"
+```
+
+### Registered values pass through verbatim (no type coercion)
+
+A string registered for `confirm` is returned as that string, not
+coerced to a boolean — the agent owns the type. Re-navigate to reset
+state, register a non-boolean, and confirm the verbatim return.
+
+```scrut
+$ navigate_fixture /dialogs.html "window.__oddaDialogInterceptorInstalled"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "window.__oddaDialogResponses = {confirm: 'yes'}; 'set'" \
+>   --browser-id 1 --tab-id 1
+"set"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "String(window.confirm('are-you-sure'))" --browser-id 1 --tab-id 1
+"yes"
+```
+
+The recorded `result` is the string `"yes"`, not `true`.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js 'JSON.stringify(window.__oddaDialogs.slice(-1).map(e => [e.type, e.message, e.result]))' \
+>   --browser-id 1 --tab-id 1
+"[[\"confirm\",\"are-you-sure\",\"yes\"]]"
+```
+
+### `alert`/`print` keys in the response map are ignored
+
+`alert` and `print` have no return value to influence, so the
+interceptor ignores keys for those types — they neither throw nor
+change behavior. Re-navigate, register both keys, and confirm
+`alert`/`print` still behave as before.
+
+```scrut
+$ navigate_fixture /dialogs.html "window.__oddaDialogInterceptorInstalled"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "window.__oddaDialogResponses = {alert: 'foo', print: 'bar'}; 'set'" \
+>   --browser-id 1 --tab-id 1
+"set"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "window.alert('alert-msg'); 'alert-ok'" --browser-id 1 --tab-id 1
+"alert-ok"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "window.print(); 'print-ok'" --browser-id 1 --tab-id 1
+"print-ok"
+```
+
 ## `userscript remove` deletes the script and reloads the extension
 
 ```scrut

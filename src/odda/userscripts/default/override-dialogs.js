@@ -41,25 +41,30 @@
     }
   };
 
-  const nativeConfirm = window.confirm;
+  // confirm/prompt proceed by default (ADR-0011): confirm returns true,
+  // prompt returns "odda", so the page proceeds instead of being silently
+  // denied by headless Chrome's native handlers. The agent overrides
+  // per-type via window.__oddaDialogResponses (agent-owned; the interceptor
+  // reads it only and never resets it, so a userscript setting it at
+  // document_start is visible to on-load prompts). Registered values pass
+  // through verbatim — no type coercion.
+  function registeredResponse(type, fallback) {
+    const map = window.__oddaDialogResponses;
+    if (map && Object.prototype.hasOwnProperty.call(map, type)) {
+      return map[type];
+    }
+    return fallback;
+  }
+
   window.confirm = function confirm(message) {
     const entry = record("confirm", message);
-    if (typeof nativeConfirm === "function") {
-      entry.result = nativeConfirm.call(this, message);
-      return entry.result;
-    }
-    entry.result = false;
-    return false;
+    entry.result = registeredResponse("confirm", true);
+    return entry.result;
   };
 
-  const nativePrompt = window.prompt;
   window.prompt = function prompt(message, defaultValue) {
     const entry = record("prompt", message, defaultValue);
-    if (typeof nativePrompt === "function") {
-      entry.result = nativePrompt.call(this, message, defaultValue);
-      return entry.result;
-    }
-    entry.result = null;
-    return null;
+    entry.result = registeredResponse("prompt", "odda");
+    return entry.result;
   };
 })();
