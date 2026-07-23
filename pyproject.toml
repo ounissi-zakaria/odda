@@ -1,6 +1,6 @@
 [project]
 name = "odda"
-version = "0.19.0"
+version = "0.20.0"
 description = "Browser automation and HTTP traffic capture CLI for AI agents"
 readme = "README.md"
 requires-python = ">=3.14"
