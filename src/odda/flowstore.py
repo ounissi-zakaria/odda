@@ -142,11 +142,24 @@ def _build_request_bytes(flow) -> bytes:
         line, then body. Uses CRLF line endings. Body is the decoded content
         from mitmproxy (``flow.request.content``). The HTTP version is taken
         from ``flow.request.http_version``.
+
+    Iterates ``headers.items(multi=True)`` so each duplicate header is emitted
+    on its own line, rather than the folding ``headers.items()`` which joins
+    same-name headers with ``", "`` (RFC 7230 §3.2.2). The captured file
+    faithfully records what the client sent: two ``cookie`` fragments (from a
+    non-conformant H1 UA, a hand-built request, or an HTTP/2 client splitting
+    cookie pairs per RFC 7540 §8.1.2.5) appear as two ``cookie:`` lines, not a
+    joined or ``, "``-folded form. Splitting duplicates is always legal in
+    HTTP/1.1 and is the safer default than folding, which is wrong for headers
+    whose values contain commas (see :func:`_build_response_headers_bytes` for
+    ``Set-Cookie``). See ADR-0013 and REQUEST.md ("the ``request`` file is
+    origin-form and goes on the wire verbatim").
     """
     request = flow.request
     lines = [f"{request.method} {request.path} {request.http_version}".encode("ascii")]
-    for name, value in request.headers.items():
+    for name, value in request.headers.items(multi=True):
         lines.append(f"{name}: {value}".encode("ascii", errors="replace"))
+
     lines.append(b"")
     lines.append(b"")
     head = b"\r\n".join(lines)
@@ -164,6 +177,16 @@ def _build_response_headers_bytes(flow) -> bytes:
         Bytes forming the status line, headers, and a trailing blank line,
         using CRLF line endings. No body is included. The HTTP version is
         taken from ``flow.response.http_version``.
+
+    Iterates ``headers.items(multi=True)`` so each duplicate header is emitted
+    on its own line, rather than the folding ``headers.items()`` which joins
+    same-name headers with ``", "`` (RFC 7230 §3.2.2). This is required for
+    ``Set-Cookie``: RFC 6265 §5.3 forbids folding because attribute values
+    (e.g. ``Expires=Wed, 09 Jun 2021 ...``) contain commas, so a folded
+    ``set-cookie: a=1, b=2`` is unparseable. Splitting duplicates is also the
+    safer default for any other duplicated response header whose values may
+    contain commas. See :func:`_build_request_bytes` — both sides now use
+    ``items(multi=True)`` uniformly (ADR-0013).
     """
     response = flow.response
     lines = [
@@ -171,7 +194,7 @@ def _build_response_headers_bytes(flow) -> bytes:
             "ascii", errors="replace"
         )
     ]
-    for name, value in response.headers.items():
+    for name, value in response.headers.items(multi=True):
         lines.append(f"{name}: {value}".encode("ascii", errors="replace"))
     lines.append(b"")
     lines.append(b"")

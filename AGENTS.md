@@ -34,6 +34,8 @@ If you add, remove, or change a dependency in `pyproject.toml`, regenerate the l
 
 E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that carries Chrome, scrut, and all system deps. No host Chrome or scrut installation required. `-j N` controls parallelism across test documents (default 1, use `-j4` for speed, `-j0` for unlimited). Each `scrut test <file>` runs in its own `$PWD` with its own odda server and auto-picked fixture port, so parallel docs never collide.
 
+**When running tests, read the full output.** Do not pipe test commands through `grep`, `head`, `tail`, or any truncation. Grep for a pass/fail marker and you will miss the failure context (the diff block, the stderr traceback, which doc actually failed) and end up re-running the suite to recover what the first run already told you. The Bash tool captures the full output to a file when it exceeds the display window — read that file with the Read tool (offset/limit) instead of truncating on the shell side.
+
 ## Key files
 
 - `src/odda/cli.py` — Typer CLI commands.

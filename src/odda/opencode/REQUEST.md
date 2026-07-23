@@ -25,7 +25,6 @@ Editable requests live in `.odda/requests/<name>/`:
 
 - **Single-shot, no redirects.** A 3xx response is recorded as-is; re-`send` manually if you want to follow.
 - **`send` re-reads the `request` file at call time.** You may overwrite it freely between sends (e.g. `printf > .odda/requests/<name>/request` then `send`, then overwrite and `send` again). Only `clone`/`new` refuse to overwrite without `--force`.
-- **Cloned cookies may need normalization.** Chrome sends multiple cookies separated by `, ` (e.g. `cookie: session=..., _lab=...`). Some frameworks reject this in favor of `; ` separators. If a cloned request gets an unexpected 403, normalize the cookie header to `; ` before resending.
 - **No pre-flight validation.** Malformed requests fail at the socket/TLS/H2 layer; the error is captured in the flow's `error` file.
 - **HTTP/2** — if the request line says `HTTP/2`, `send` negotiates ALPN `h2` and emits real H2 frames (HPACK-encoded pseudo-headers synthesized from the request line + `Host` + `meta.json`). The stored `request` file stays H1-shaped text with `HTTP/2` in the version field (consistent with how mitmproxy stores captured H2 flows). If the server doesn't negotiate `h2`, `send` errors — edit the request line to `HTTP/1.1` and resend.
 - **Missing framing** — if a body exists with no `Content-Length` and no `Transfer-Encoding: chunked`, `send` half-closes the socket (`write_eof`) after the body so the server sees EOF.
