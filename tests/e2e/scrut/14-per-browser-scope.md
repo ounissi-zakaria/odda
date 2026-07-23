@@ -107,6 +107,24 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   > /dev/null
 ```
 
+`userscript list --browser-id 2` must not include `us1`.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   userscript list --browser-id 2 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(any(s["name"] == "us1" for s in d))'
+False
+```
+
+`userscript list --browser-id 1` must include `us1`.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   userscript list --browser-id 1 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(any(s["name"] == "us1" for s in d))'
+True
+```
+
 Navigate browser 2's tab; the userscript must NOT run there.
 
 ```scrut

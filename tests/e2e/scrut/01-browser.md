@@ -65,6 +65,34 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 [('ok', True), ('title', 'Listener Test')]
 ```
 
+### `eval` double-encodes when the JS itself calls `JSON.stringify`
+
+`odda eval` returns `JSON.stringify(result)` so the CLI can print it as
+JSON. When the JS *also* calls `JSON.stringify`, the result is
+double-encoded and needs `json.loads(json.loads(...))` to recover the
+value. Returning a plain object (no `JSON.stringify` in JS) is the
+recommended form.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "JSON.stringify({a: 1})" --browser-id 1 --tab-id 1 \
+>   | python3 -c '
+> import json, sys
+> raw = json.load(sys.stdin)
+> print(type(raw).__name__, raw)
+> print(json.loads(raw))
+> '
+str {"a":1}
+{'a': 1}
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "({a: 1})" --browser-id 1 --tab-id 1 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d, type(d).__name__)'
+{'a': 1} dict
+```
+
 ### `eval` with neither inline JS nor `--file` is rejected
 
 ```scrut

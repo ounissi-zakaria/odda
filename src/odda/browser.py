@@ -1163,28 +1163,25 @@ class BrowserManager:
         self, browser_id: int, name: str, source: str
     ) -> dict[str, Any]:
         """Install a userscript into the given browser's scope and reload."""
+        inst = self._require_instance(browser_id)
         result = userscript_mod.install(browser_id, name, source)
-        inst = self._instances.get(browser_id)
-        if inst is not None:
-            ext_id = await inst._reload_userscript_extension()  # noqa: SLF001
-            result["extension_id"] = ext_id
-        else:
-            raise BrowserOperationError(f"Browser {browser_id} not found.")
+        result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
     async def remove_userscript(self, browser_id: int, name: str) -> dict[str, Any]:
         """Remove a userscript from the given browser's scope and reload."""
+        inst = self._require_instance(browser_id)
         result = userscript_mod.remove(browser_id, name)
-        inst = self._instances.get(browser_id)
-        if inst is not None:
-            ext_id = await inst._reload_userscript_extension()  # noqa: SLF001
-            result["extension_id"] = ext_id
-        else:
-            raise BrowserOperationError(f"Browser {browser_id} not found.")
+        result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
     def list_userscripts(self, browser_id: int) -> list[dict[str, Any]]:
-        """List all installed userscripts for one browser from disk."""
+        """List installed userscripts for one browser from disk.
+
+        Returns ``[]`` for a browser that was never opened (its
+        per-browser dir doesn't exist). Unlike install/remove, this is
+        a read and does not validate the browser is currently open.
+        """
         return userscript_mod.list_scripts(browser_id)
 
     # --- wrap ----------------------------------------------------------

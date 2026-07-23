@@ -46,6 +46,65 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 helper True
 ```
 
+### `userscript install --source` installs inline JS
+
+`--source "<js>"` is the inline alternative to `--file`; the two are
+mutually exclusive.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   userscript install --name inline --browser-id 1 --source "window.__usInline__ = 'inline-ran';" \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["size"] > 0)'
+inline True
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   navigate --url "http://127.0.0.1:$(cat "$PWD/fixture_port")/" --browser-id 1 --tab-id 1 > /dev/null
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   wait-for --expression "window.__usInline__" --browser-id 1 --tab-id 1 --timeout 3
+"inline-ran"
+```
+
+Remove the inline script so it doesn't interfere with later tests.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   userscript remove --name inline --browser-id 1 > /dev/null
+```
+
+### `userscript install` with both `--file` and `--source` is rejected
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   userscript install --name both --browser-id 1 --file "$PWD/us_helper.js" --source "1" 2>&1 \
+>   | python3 -c 'import sys; raw=sys.stdin.read().strip(); assert "not both" in raw; print("rejected")'
+rejected
+```
+
+### `userscript install` on a missing browser errors
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   userscript install --name x --browser-id 9999 --source "1"
+[1]
+{"error": "Server error (-32602): Browser 9999 not found."}
+```
+
+### `userscript list` on a missing browser returns an empty list
+
+The browser doesn't exist, so no userscripts were ever installed into
+its scope; the list is empty (not an error, since `list` is a read).
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   userscript list --browser-id 9999
+[]
+```
+
 ## `userscript list` returns the installed script
 
 ```scrut
