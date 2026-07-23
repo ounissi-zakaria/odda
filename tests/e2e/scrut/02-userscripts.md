@@ -49,7 +49,7 @@ helper True
 ## `userscript list` returns the installed script
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" userscript list \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" userscript list --browser-id 1 \
 >   | python3 -c 'import json,sys; print([s["name"] for s in json.load(sys.stdin)])'
 ['helper']
 ```
@@ -67,7 +67,7 @@ $ navigate_fixture / "window.__usHelperRan__ !== undefined"
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__usHelperRan__)" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__usHelperRan__)" --browser-id 1 --tab-id 1
 "1"
 ```
 
@@ -81,7 +81,7 @@ $ navigate_fixture / "window.__usHelperRan__ !== undefined"
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__usHelperRan__)" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__usHelperRan__)" --browser-id 1 --tab-id 1
 "1"
 ```
 
@@ -96,7 +96,7 @@ $ navigate_fixture /dialogs.html "window.__oddaDialogInterceptorInstalled"
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaDialogInterceptorInstalled)" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaDialogInterceptorInstalled)" --browser-id 1 --tab-id 1
 "true"
 ```
 
@@ -104,7 +104,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "window.print(); 'print-ok'" --browser-id 1 --tab-id 1
+>   eval --js "window.print(); 'print-ok'" --browser-id 1 --tab-id 1
 "print-ok"
 ```
 
@@ -112,19 +112,19 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "window.alert('alert-msg'); 'alert-ok'" --browser-id 1 --tab-id 1
+>   eval --js "window.alert('alert-msg'); 'alert-ok'" --browser-id 1 --tab-id 1
 "alert-ok"
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "window.confirm('confirm-msg'); 'confirm-ok'" --browser-id 1 --tab-id 1
+>   eval --js "window.confirm('confirm-msg'); 'confirm-ok'" --browser-id 1 --tab-id 1
 "confirm-ok"
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "window.prompt('prompt-msg', 'prompt-default'); 'prompt-ok'" --browser-id 1 --tab-id 1
+>   eval --js "window.prompt('prompt-msg', 'prompt-default'); 'prompt-ok'" --browser-id 1 --tab-id 1
 "prompt-ok"
 ```
 
@@ -133,7 +133,7 @@ The last four dialog entries (in order) should be `print`, `alert`,
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval 'JSON.stringify(window.__oddaDialogs.slice(-4).map(e => [e.type, e.message, e.defaultValue]))' \
+>   eval --js 'JSON.stringify(window.__oddaDialogs.slice(-4).map(e => [e.type, e.message, e.defaultValue]))' \
 >   --browser-id 1 --tab-id 1
 "[[\"print\",null,null],[\"alert\",\"alert-msg\",null],[\"confirm\",\"confirm-msg\",null],[\"prompt\",\"prompt-msg\",\"prompt-default\"]]"
 ```
@@ -142,13 +142,13 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   userscript remove helper --browser-id 1 \
+>   userscript remove --name helper --browser-id 1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["removed"])'
 helper True
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" userscript list \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" userscript list --browser-id 1 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin))'
 []
 ```
@@ -161,7 +161,7 @@ $ navigate_fixture /
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(typeof window.__usHelperRan__)" --browser-id 1 --tab-id 1
+>   eval --js "String(typeof window.__usHelperRan__)" --browser-id 1 --tab-id 1
 "undefined"
 ```
 

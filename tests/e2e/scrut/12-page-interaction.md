@@ -50,7 +50,7 @@ Wait for the iframe to load so snapshot can reach into it.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   wait-for "document.getElementById('inner-frame').contentWindow.__oddaPageIframeLoaded === true" \
+>   wait-for --expression "document.getElementById('inner-frame').contentWindow.__oddaPageIframeLoaded === true" \
 >   --browser-id 1 --tab-id 1 --timeout 10 > /dev/null
 ```
 
@@ -102,7 +102,7 @@ $ REF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page click --browser-id 1 --tab-id 1 "$REF" \
+>   page click --browser-id 1 --tab-id 1 --ref "$REF" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$REF"'")'
 clicked True
 ```
@@ -111,7 +111,7 @@ The click handler set the result div to "clicked".
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.getElementById('click-result').textContent" --browser-id 1 --tab-id 1
+>   eval --js "document.getElementById('click-result').textContent" --browser-id 1 --tab-id 1
 "clicked"
 ```
 
@@ -135,7 +135,7 @@ $ IREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page click --browser-id 1 --tab-id 1 "$IREF" \
+>   page click --browser-id 1 --tab-id 1 --ref "$IREF" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$IREF"'")'
 clicked True
 ```
@@ -144,7 +144,7 @@ The iframe's click handler set its result div.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.getElementById('inner-frame').contentWindow.document.getElementById('iframe-result').textContent" --browser-id 1 --tab-id 1
+>   eval --js "document.getElementById('inner-frame').contentWindow.document.getElementById('iframe-result').textContent" --browser-id 1 --tab-id 1
 "clicked in iframe"
 ```
 
@@ -168,7 +168,7 @@ $ TREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page fill --browser-id 1 --tab-id 1 "$TREF" "hello" \
+>   page fill --browser-id 1 --tab-id 1 --ref "$TREF" --value "hello" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$TREF"'")'
 filled True
 ```
@@ -177,7 +177,7 @@ The input handler set the result div to the typed value.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.getElementById('text-result').textContent" --browser-id 1 --tab-id 1
+>   eval --js "document.getElementById('text-result').textContent" --browser-id 1 --tab-id 1
 "hello"
 ```
 
@@ -185,12 +185,12 @@ Fill clears first: filling "world" replaces "hello", not appends.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page fill --browser-id 1 --tab-id 1 "$TREF" "world" > /dev/null
+>   page fill --browser-id 1 --tab-id 1 --ref "$TREF" --value "world" > /dev/null
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.getElementById('text-input').value" --browser-id 1 --tab-id 1
+>   eval --js "document.getElementById('text-input').value" --browser-id 1 --tab-id 1
 "world"
 ```
 
@@ -213,7 +213,7 @@ $ HREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page hover --browser-id 1 --tab-id 1 "$HREF" \
+>   page hover --browser-id 1 --tab-id 1 --ref "$HREF" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$HREF"'")'
 hovered True
 ```
@@ -222,7 +222,7 @@ The hover handler set the result div.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.getElementById('hover-result').textContent" --browser-id 1 --tab-id 1
+>   eval --js "document.getElementById('hover-result').textContent" --browser-id 1 --tab-id 1
 "hovered"
 ```
 
@@ -234,7 +234,7 @@ agent gives it an `aria-label` via `eval`, re-snapshots, then uploads.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.getElementById('file-input').setAttribute('aria-label', 'Upload files'); 'ok'" --browser-id 1 --tab-id 1
+>   eval --js "document.getElementById('file-input').setAttribute('aria-label', 'Upload files'); 'ok'" --browser-id 1 --tab-id 1
 "ok"
 ```
 
@@ -267,7 +267,7 @@ Upload it. The return includes the ref and the file paths.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page upload --browser-id 1 --tab-id 1 "$UFREF" --file "$PWD/upload-test.txt" \
+>   page upload --browser-id 1 --tab-id 1 --ref "$UFREF" --file "$PWD/upload-test.txt" \
 >   | python3 -c '
 > import json, sys
 > d = json.load(sys.stdin)
@@ -284,7 +284,7 @@ The change handler fired and the result div lists the file name.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.getElementById('upload-result').textContent" --browser-id 1 --tab-id 1
+>   eval --js "document.getElementById('upload-result').textContent" --browser-id 1 --tab-id 1
 "upload-test.txt"
 ```
 
@@ -296,12 +296,12 @@ an old ref. odda returns a clean error quickly, not a Playwright
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate "about:blank" --browser-id 1 --tab-id 1 > /dev/null
+>   navigate --url "about:blank" --browser-id 1 --tab-id 1 > /dev/null
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page click --browser-id 1 --tab-id 1 "$HREF" --timeout 2 2>&1 \
+>   page click --browser-id 1 --tab-id 1 --ref "$HREF" --timeout 2 2>&1 \
 >   | python3 -c '
 > import json, sys
 > d = json.load(sys.stdin)
@@ -316,7 +316,7 @@ True
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page click --browser-id 1 --tab-id 9999 e1
+>   page click --browser-id 1 --tab-id 9999 --ref e1
 [1]
 {"error": "Server error (-32602): Tab 9999 not found in browser 1."}
 ```
@@ -325,7 +325,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page fill --browser-id 9999 --tab-id 1 e1 "x"
+>   page fill --browser-id 9999 --tab-id 1 --ref e1 --value "x"
 [1]
 {"error": "Server error (-32602): Browser 9999 not found."}
 ```

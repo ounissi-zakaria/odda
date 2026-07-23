@@ -70,7 +70,7 @@ which hits the logpoint line. The page does not pause.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaLogpointFixture('world'))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaLogpointFixture('world'))" --browser-id 1 --tab-id 1
 "hello world"
 ```
 
@@ -141,7 +141,7 @@ cleared True
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaLogpointFixture('world'))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaLogpointFixture('world'))" --browser-id 1 --tab-id 1
 "hello world"
 ```
 
@@ -177,13 +177,13 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaLogpointFixture('first'))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaLogpointFixture('first'))" --browser-id 1 --tab-id 1
 "hello first"
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaLogpointFixture('second'))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaLogpointFixture('second'))" --browser-id 1 --tab-id 1
 "hello second"
 ```
 
@@ -221,7 +221,7 @@ The installation persisted: triggering again records again.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaLogpointFixture('after-nav'))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaLogpointFixture('after-nav'))" --browser-id 1 --tab-id 1
 "hello after-nav"
 ```
 
@@ -297,7 +297,7 @@ $ navigate_fixture /logpoint.html "typeof window.__oddaLogpointFixture === 'func
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaLogpointFixture('after-remove'))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaLogpointFixture('after-remove'))" --browser-id 1 --tab-id 1
 "hello after-remove"
 ```
 
@@ -430,7 +430,7 @@ $ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$P
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   wait-for "typeof window.__oddaLogpointFixture === 'function'" --browser-id 1 --tab-id 2 --timeout 10 > /dev/null
+>   wait-for --expression "typeof window.__oddaLogpointFixture === 'function'" --browser-id 1 --tab-id 2 --timeout 10 > /dev/null
 ```
 
 ```scrut

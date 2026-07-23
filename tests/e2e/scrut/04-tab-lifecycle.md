@@ -91,7 +91,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "1" --browser-id 1 --tab-id 2
+>   eval --js "1" --browser-id 1 --tab-id 2
 [1]
 {"error": "Server error (-32602): Tab 2 not found in browser 1."}
 ```
@@ -107,7 +107,7 @@ $ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$P
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "1" --browser-id 1 --tab-id 2
+>   eval --js "1" --browser-id 1 --tab-id 2
 [1]
 {"error": "Server error (-32602): Tab 2 not found in browser 1."}
 ```
@@ -154,7 +154,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list --browser-id 1
 Close the first browser, then open two more.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close 1 \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close --browser-id 1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["status"])'
 1 closed
 ```
@@ -167,7 +167,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless 
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate https://example.org --browser-id 2 --tab-id 1 \
+>   navigate --url https://example.org --browser-id 2 --tab-id 1 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
 Navigated to: https://example.org (glob)
 ```
@@ -194,18 +194,18 @@ Operating on browser 2 doesn't affect browser 3.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.title" --browser-id 2 --tab-id 1
+>   eval --js "document.title" --browser-id 2 --tab-id 1
 "Example Domain"
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close 3 \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close --browser-id 3 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["status"])'
 3 closed
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close 2 \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close --browser-id 2 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["status"])'
 2 closed
 ```
@@ -214,7 +214,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close 2 \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://x --browser-id 2 --tab-id 1
+>   navigate --url http://x --browser-id 2 --tab-id 1
 [1]
 {"error": "Server error (-32602): Browser 2 not found."}
 ```

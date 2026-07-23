@@ -64,6 +64,7 @@ class OddaServer:
         server = await asyncio.start_unix_server(
             self._handle_client,
             path=str(self.socket_path),
+            limit=rpc.TRANSPORT_LIMIT,
         )
         logger.info("Listening on %s", self.socket_path)
 
@@ -142,6 +143,7 @@ class OddaServer:
                 break
 
             request_id: Any = None
+            response: dict[str, Any] | None = None
             try:
                 request = rpc.parse_request(line.decode("utf-8"))
                 method_name = request["method"]
@@ -169,8 +171,17 @@ class OddaServer:
             except Exception as exc:  # pragma: no cover
                 response = rpc.build_error(request_id, rpc.INTERNAL_ERROR, str(exc))
 
-            writer.write(rpc.encode(response))
-            await writer.drain()
+            # Encode and write inside a guard so an encoding failure (or a
+            # transport error) never silently drops the connection. If even
+            # this fails, log and bail out of the loop rather than spin.
+            try:
+                writer.write(rpc.encode(response))
+                await writer.drain()
+            except Exception as exc:  # pragma: no cover
+                logging.getLogger(__name__).warning(
+                    "Failed to write response to client: %s", exc
+                )
+                break
 
         writer.close()
         await writer.wait_closed()
@@ -256,8 +267,12 @@ class OddaServer:
         Params:
             browser_id: Target browser ID.
             tab_id: Target tab ID.
+            output: Optional path to write the JPEG to. When omitted,
+                a temp file is generated.
         """
-        return await self.browser.screenshot(params["browser_id"], params["tab_id"])
+        return await self.browser.screenshot(
+            params["browser_id"], params["tab_id"], params.get("output")
+        )
 
     # --- Page interaction handlers ---
 
@@ -478,8 +493,11 @@ class OddaServer:
         Params:
             browser_id: Target browser ID.
             tab_id: Target tab ID.
+            name: Optional wrap name to filter to (server-side, after read).
         """
-        return await self.browser.wrap_dump(params["browser_id"], params["tab_id"])
+        return await self.browser.wrap_dump(
+            params["browser_id"], params["tab_id"], params.get("name")
+        )
 
     async def method_wrap_clear(self, params: dict[str, Any]) -> dict[str, Any]:
         """Zero the per-tab wrap record array without navigating.
@@ -556,10 +574,10 @@ class OddaServer:
     # --- Userscript handlers ---
 
     async def method_userscript_install(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Install a userscript from a file or inline source.
+        """Install a userscript into the given browser's scope.
 
         Params:
-            browser_id: Browser to reload the extension on.
+            browser_id: Browser whose scope to install into (and reload).
             name: Userscript name.
             file: Path to a JS file (read by the server), or
             source: Inline JS source. ``file`` takes precedence.
@@ -575,15 +593,19 @@ class OddaServer:
             raise rpc.JsonRpcError(rpc.INVALID_PARAMS, "source is empty")
         return await self.browser.install_userscript(browser_id, name, source)
 
-    async def method_userscript_list(self, _params: dict[str, Any]) -> list[dict]:
-        """List installed userscripts."""
-        return self.browser.list_userscripts()
-
-    async def method_userscript_remove(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Remove a userscript.
+    async def method_userscript_list(self, params: dict[str, Any]) -> list[dict]:
+        """List installed userscripts for one browser.
 
         Params:
-            browser_id: Browser to reload the extension on.
+            browser_id: Browser whose scope to list.
+        """
+        return self.browser.list_userscripts(params["browser_id"])
+
+    async def method_userscript_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Remove a userscript from the given browser's scope.
+
+        Params:
+            browser_id: Browser whose scope to remove from (and reload).
             name: Userscript name.
         """
         return await self.browser.remove_userscript(

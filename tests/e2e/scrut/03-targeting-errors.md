@@ -22,7 +22,7 @@ $ open_browser_fixture
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://x --browser-id 9999 --tab-id 1
+>   navigate --url http://x --browser-id 9999 --tab-id 1
 [1]
 {"error": "Server error (-32602): Browser 9999 not found."}
 ```
@@ -31,7 +31,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate http://x --browser-id 1 --tab-id 9999
+>   navigate --url http://x --browser-id 1 --tab-id 9999
 [1]
 {"error": "Server error (-32602): Tab 9999 not found in browser 1."}
 ```
@@ -40,7 +40,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "1" --browser-id 1 --tab-id 9999
+>   eval --js "1" --browser-id 1 --tab-id 9999
 [1]
 {"error": "Server error (-32602): Tab 9999 not found in browser 1."}
 ```

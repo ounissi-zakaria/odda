@@ -15,3 +15,12 @@ get wrapped, not just the one the agent cares about).
 
 Leaf-only is reversible: a `--follow` flag or a separate "Follow" concept can be added later
 without breaking existing Wraps.
+
+Leaf-only means a Wrap does not *invoke* callbacks for the agent, but the
+wrap serializer does capture the callback's source code (`.toString()`,
+capped at 1000 chars) in the record's `args`/`ret` slot as
+`{type: "function", name, source}`. Reading the source from the record
+is not a substitute for the Coverage+Logpoint path — it tells the agent
+*what* the callback is, not *what it did when invoked* — but it is
+enough to decide whether to follow it. The cap keeps records bounded
+for fat arrow functions with large bodies.

@@ -55,7 +55,7 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=h1-send-test&status=200&heade
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send h1-test --insecure --timeout 10 \
+>   request send --name h1-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status_code"], "id=" + d["id"], d["body_file"])'
 200 id=* flows/*/response_body.json (glob)
 ```
@@ -64,7 +64,7 @@ The response body is the body we asked for in the query string.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send h1-test --insecure --timeout 10 \
+>   request send --name h1-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/flow_id"
 ```
 

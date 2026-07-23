@@ -81,7 +81,7 @@ helper, then dump the records.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaWrapParseAndReturn('{\"a\": 1}').a)" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaWrapParseAndReturn('{\"a\": 1}').a)" --browser-id 1 --tab-id 1
 "1"
 ```
 
@@ -131,7 +131,7 @@ Trigger `addEventListener` with a named callback via the fixture.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaWrapFixture(document.body, 'click', function myHandler() {}))" \
+>   eval --js "String(window.__oddaWrapFixture(document.body, 'click', function myHandler() {}))" \
 >     --browser-id 1 --tab-id 1
 "registered"
 ```
@@ -147,17 +147,20 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 > print(len(ael) >= 1)
 > r = ael[0]
 > print(r["args"][0])
-> print(json.dumps(r["args"][1]))
+> fn = r["args"][1]
+> # Function args carry a source field (the .toString(), capped 1000 chars) per ADR-0003.
+> print(fn["type"], fn["name"], isinstance(fn.get("source"), str), "myHandler" in fn.get("source", ""))
 > print(json.dumps(r["ret"]))
 > '
 True
 click
-{"type": "function", "name": "myHandler"}
+function myHandler True True
 null
 ```
 
 Per ADR-0003 the wrap is leaf-only: the callback `myHandler` is
-recorded as an opaque ref in the args, but it is not itself wrapped
+recorded as an opaque ref (with its `.toString()` source so the agent
+can decide whether to follow it), but it is not itself wrapped
 (no records will appear from invoking it later).
 
 ## `wrap access add` records a property setter
@@ -183,7 +186,7 @@ Trigger the setter via the fixture's `__oddaWrapSetSink` helper.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaWrapSetSink('<b>hi</b>'))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaWrapSetSink('<b>hi</b>'))" --browser-id 1 --tab-id 1
 "<b>hi</b>"
 ```
 
@@ -231,7 +234,7 @@ and confirm the records are gone (per ADR-0004).
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaWrapParseAndReturn('{\"x\": 1}').x)" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaWrapParseAndReturn('{\"x\": 1}').x)" --browser-id 1 --tab-id 1
 "1"
 ```
 
@@ -266,7 +269,7 @@ The wrap installation persists across navigation: triggering
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaWrapParseAndReturn('{\"y\": 2}').y)" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaWrapParseAndReturn('{\"y\": 2}').y)" --browser-id 1 --tab-id 1
 "2"
 ```
 
@@ -334,7 +337,7 @@ $ navigate_fixture /wrap.html "window.__oddaWrapFixture"
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "Array.of.apply(null, new Array(150).fill(0).map(function(_, i) { return i; })); 'ok'" \
+>   eval --js "Array.of.apply(null, new Array(150).fill(0).map(function(_, i) { return i; })); 'ok'" \
 >     --browser-id 1 --tab-id 1
 "ok"
 ```
@@ -363,7 +366,7 @@ so future `JSON.parse` calls do not record.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   wrap remove --browser-id 1 --tab-id 1 jp \
+>   wrap remove --browser-id 1 --tab-id 1 --name jp \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["removed"])'
 jp True
 ```
@@ -383,7 +386,7 @@ $ navigate_fixture /wrap.html "window.__oddaWrapFixture"
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaWrapParseAndReturn('{\"z\": 3}').z)" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaWrapParseAndReturn('{\"z\": 3}').z)" --browser-id 1 --tab-id 1
 "3"
 ```
 
@@ -399,7 +402,7 @@ this navigation.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaWrapSetSink('<i>bye</i>'))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaWrapSetSink('<i>bye</i>'))" --browser-id 1 --tab-id 1
 "<i>bye</i>"
 ```
 
@@ -435,7 +438,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   wrap remove --browser-id 1 --tab-id 9999 jp2
+>   wrap remove --browser-id 1 --tab-id 9999 --name jp2
 [1]
 {"error": "Server error (-32602): Tab 9999 not found in browser 1."}
 ```
@@ -467,7 +470,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   wrap remove --browser-id 1 --tab-id 1 no-such-wrap
+>   wrap remove --browser-id 1 --tab-id 1 --name no-such-wrap
 [1]
 {"error": "Server error (-32602): Userscript '__odda-wrap__no-such-wrap' not found"}
 ```

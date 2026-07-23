@@ -17,12 +17,12 @@ $ open_browser_fixture() {
 >   if [ -n "$url_path" ]; then
 >     port=$(cat "$PWD/fixture_port")
 >     odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->       navigate "http://127.0.0.1:$port$url_path" \
+>       navigate --url "http://127.0.0.1:$port$url_path" \
 >       --browser-id 1 --tab-id 1 > /dev/null
 >   fi
 >   if [ -n "$marker" ]; then
 >     odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->       wait-for "$marker" --browser-id 1 --tab-id 1 --timeout 10 > /dev/null
+>       wait-for --expression "$marker" --browser-id 1 --tab-id 1 --timeout 10 > /dev/null
 >   fi
 > }
 ```
@@ -39,11 +39,11 @@ $ navigate_fixture() {
 >   url_path="$1"; marker="${2:-}"
 >   port=$(cat "$PWD/fixture_port")
 >   odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->     navigate "http://127.0.0.1:$port$url_path" \
+>     navigate --url "http://127.0.0.1:$port$url_path" \
 >     --browser-id 1 --tab-id 1 > /dev/null
 >   if [ -n "$marker" ]; then
 >     odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->       wait-for "$marker" --browser-id 1 --tab-id 1 --timeout 10 > /dev/null
+>       wait-for --expression "$marker" --browser-id 1 --tab-id 1 --timeout 10 > /dev/null
 >   fi
 >   sleep 0.5
 > }

@@ -46,7 +46,7 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=h2-send-test&status=200&heade
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send h2-test --insecure --timeout 10 \
+>   request send --name h2-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status_code"])'
 200
 ```
@@ -55,7 +55,7 @@ The response body matches.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send h2-test --insecure --timeout 10 \
+>   request send --name h2-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/h2_flow_id"
 ```
 
@@ -102,14 +102,14 @@ $ port=$(cat "$PWD/dyn_port"); printf 'POST /a?body=cl-ok&status=200&header=Cont
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send cl-test --fix-content-length --insecure --timeout 10 \
+>   request send --name cl-test --fix-content-length --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
 200
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send cl-test --fix-content-length --insecure --timeout 10 \
+>   request send --name cl-test --fix-content-length --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/cl_flow_id"
 ```
 
@@ -148,14 +148,14 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=gzip-decoded-ok&status=200&he
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send gzip-test --insecure --timeout 10 \
+>   request send --name gzip-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
 200
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send gzip-test --insecure --timeout 10 \
+>   request send --name gzip-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["body_file"])'
 * flows/*/response_body.json (glob)
 ```
@@ -163,7 +163,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send gzip-test --insecure --timeout 10 \
+>   request send --name gzip-test --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/gzip_flow_id"
 ```
 
@@ -192,7 +192,7 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nC
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send insecure-test --timeout 5 2>&1 \
+>   request send --name insecure-test --timeout 5 2>&1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("error" in d)'
 True
 ```
@@ -201,7 +201,7 @@ With `--insecure`, the send succeeds.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send insecure-test --insecure --timeout 5 \
+>   request send --name insecure-test --insecure --timeout 5 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
 200
 ```
@@ -218,7 +218,7 @@ $ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/d
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send empty-test --timeout 5 2>&1 \
+>   request send --name empty-test --timeout 5 2>&1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("error" in d, "error" in d and d["error"] != "")'
 True True
 ```

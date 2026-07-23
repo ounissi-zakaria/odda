@@ -23,8 +23,12 @@ Observing JavaScript execution in progress — recording what code does as it ru
 _Avoid_: trace, analyze-js, instrumentation
 
 **Wrap**:
-A placed observation at a function or property the agent names. odda replaces the function or property descriptor via a userscript injected at document_start, and records each call or access with its receiver (`this`), arguments, return value, and call stack. Records are wiped on navigation. Scope: all frames in a tab, including cross-origin iframes. Does not reach worker contexts (web workers, service workers).
+A placed observation at a function or property the agent names. odda replaces the function or property descriptor via a userscript injected at document_start, and records each call or access with its receiver (`this`), arguments, return value, and call stack. Functions in args/ret/this are serialized as `{type: "function", name, source}` where `source` is the function's `.toString()`, capped at 1000 chars. Records are wiped on navigation. Scope: all frames in a tab, including cross-origin iframes; per-browser, not shared across browsers. Does not reach worker contexts (web workers, service workers).
 _Avoid_: hook, trap, intercept, monkey-patch, probe, breakpoint
+
+**Userscript**:
+A JS helper that auto-runs at `document_start` on every navigation, before the page's own scripts, in the main world. Installed via `odda userscript install` and re-injected on every page load. odda ships built-in default userscripts (notably the dialog interceptor recording `window.print`/`alert`/`confirm`/`prompt` calls into `window.__oddaDialogs`). Scope: per-browser, not shared across browsers; an agent opening a fresh browser starts with only the default userscripts.
+_Avoid_: content script, extension script, injected helper, hook
 
 **Logpoint**:
 A placed observation at a source location the agent identifies by script URL, line, and column. odda plants a non-pausing `Debugger.setBreakpointByUrl` whose condition evaluates an expression the agent supplies, in the paused-then-immediately-resumed frame's scope. The page never stops. The expression can have side effects if the agent writes them, but the intent is to read, not write. odda warns at install time if no loaded script matches the URL. Logpoints persist until explicitly removed; records are wiped on navigation. Logpoints do not survive tab close — they are per-tab-session, not durable. Scope: same frame as the Debugger domain already enabled on (main frame and same-origin iframes). Cross-origin iframes and worker contexts are out of scope.

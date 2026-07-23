@@ -283,7 +283,7 @@ class BrowserInstance:
             if browser is None:
                 return None
             self._browser_cdp_session = await browser.new_browser_cdp_session()
-        ext_path = str(userscript_mod.sync_extension())
+        ext_path = str(userscript_mod.sync_extension(self.browser_id))
         try:
             resp = await self._browser_cdp_session.send(
                 "Extensions.loadUnpacked", {"path": ext_path}
@@ -362,7 +362,14 @@ class BrowserInstance:
                 raise BrowserOperationError(
                     f"Tab {tab_id} closed during navigation."
                 ) from exc
-            raise BrowserOperationError(f"Failed to navigate: {exc!s}") from exc
+            msg = str(exc)
+            if "timeout" in msg.lower() or "Timeout" in type(exc).__name__:
+                hint = (
+                    " For SPAs that don't fire `load`, use `odda wait-for"
+                    ' "<expr>"` after navigate to poll for a condition.'
+                )
+                raise BrowserOperationError(f"Failed to navigate: {msg}{hint}") from exc
+            raise BrowserOperationError(f"Failed to navigate: {msg}") from exc
 
     async def eval_js(self, tab_id: int, js_code: str) -> Any:
         """Execute JavaScript in the target tab's main world."""
@@ -395,18 +402,30 @@ class BrowserInstance:
         except Exception:
             return str(handle)
 
-    async def screenshot(self, tab_id: int) -> str:
-        """Capture a JPEG screenshot of the target tab's viewport."""
+    async def screenshot(self, tab_id: int, output_path: str | None = None) -> str:
+        """Capture a JPEG screenshot of the target tab's viewport.
+
+        Args:
+            tab_id: Target tab.
+            output_path: Optional path to write the JPEG to. When None,
+                a temp file path under the system temp dir is generated
+                (legacy behavior). When given, the directory must exist.
+        """
         page = self._require_tab(tab_id)
         try:
-            temp_dir = Path(tempfile.gettempdir())
-            temp_path = temp_dir / f"screenshot_{int(time.time())}.jpeg"
+            if output_path is not None:
+                out = Path(output_path)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                target = out
+            else:
+                temp_dir = Path(tempfile.gettempdir())
+                target = temp_dir / f"screenshot_{int(time.time())}.jpeg"
             await page.screenshot(
-                path=str(temp_path),
+                path=str(target),
                 type="jpeg",
                 full_page=False,
             )
-            return str(temp_path)
+            return str(target)
         except Exception as exc:
             if _is_target_closed_error(exc):
                 self._on_page_close(tab_id)
@@ -674,28 +693,32 @@ class BrowserInstance:
 
     # --- wrap ----------------------------------------------------------
 
-    async def wrap_dump(self, tab_id: int) -> list[dict[str, Any]]:
+    async def wrap_dump(
+        self, tab_id: int, name: str | None = None
+    ) -> list[dict[str, Any]]:
         """Read the per-tab wrap record array from ``window.__oddaWrap``.
 
-        The array is initialized to ``[]`` by the wrap userscripts on
-        each ``document_start`` (per ADR-0004, records are wiped on
-        navigation). If no wrap userscript has run on the current
-        page (e.g. the wrap was installed after the page loaded and
-        the page has not been navigated since), ``window.__oddaWrap``
-        is ``undefined`` and we return ``[]``.
+        Args:
+            tab_id: Target tab.
+            name: Optional wrap name to filter to. The filter is applied
+                server-side, after the full array is read from the page,
+                so cross-origin iframe records (which live in their own
+                per-iframe ``__oddaWrap``) are not filtered by this call.
 
         Returns:
             The list of wrap records (see the wrap module for the
-            record shape).
+            record shape), optionally filtered to one wrap's records.
         """
         self._require_tab(tab_id)
         result = await self.eval_js(
             tab_id,
             "typeof window.__oddaWrap === 'undefined' ? [] : window.__oddaWrap",
         )
-        if isinstance(result, list):
-            return result
-        return []
+        if not isinstance(result, list):
+            return []
+        if name is not None:
+            return [r for r in result if isinstance(r, dict) and r.get("wrap") == name]
+        return result
 
     async def wrap_clear(self, tab_id: int) -> dict[str, Any]:
         """Zero the per-tab wrap record array without navigating.
@@ -1064,10 +1087,12 @@ class BrowserManager:
         inst = self._require_instance(browser_id)
         return await inst.wait_for(tab_id, expression, timeout_ms=timeout_ms)
 
-    async def screenshot(self, browser_id: int, tab_id: int) -> str:
+    async def screenshot(
+        self, browser_id: int, tab_id: int, output_path: str | None = None
+    ) -> str:
         """Capture a screenshot of the target tab's viewport."""
         inst = self._require_instance(browser_id)
-        return await inst.screenshot(tab_id)
+        return await inst.screenshot(tab_id, output_path)
 
     async def page_snapshot(self, browser_id: int, tab_id: int) -> str:
         """Return the page's accessibility tree as agent-readable text."""
@@ -1137,8 +1162,8 @@ class BrowserManager:
     async def install_userscript(
         self, browser_id: int, name: str, source: str
     ) -> dict[str, Any]:
-        """Install a userscript and reload the extension on one browser."""
-        result = userscript_mod.install(name, source)
+        """Install a userscript into the given browser's scope and reload."""
+        result = userscript_mod.install(browser_id, name, source)
         inst = self._instances.get(browser_id)
         if inst is not None:
             ext_id = await inst._reload_userscript_extension()  # noqa: SLF001
@@ -1148,8 +1173,8 @@ class BrowserManager:
         return result
 
     async def remove_userscript(self, browser_id: int, name: str) -> dict[str, Any]:
-        """Remove a userscript and reload the extension on one browser."""
-        result = userscript_mod.remove(name)
+        """Remove a userscript from the given browser's scope and reload."""
+        result = userscript_mod.remove(browser_id, name)
         inst = self._instances.get(browser_id)
         if inst is not None:
             ext_id = await inst._reload_userscript_extension()  # noqa: SLF001
@@ -1158,9 +1183,9 @@ class BrowserManager:
             raise BrowserOperationError(f"Browser {browser_id} not found.")
         return result
 
-    def list_userscripts(self) -> list[dict[str, Any]]:
-        """List all installed userscripts from disk."""
-        return userscript_mod.list_scripts()
+    def list_userscripts(self, browser_id: int) -> list[dict[str, Any]]:
+        """List all installed userscripts for one browser from disk."""
+        return userscript_mod.list_scripts(browser_id)
 
     # --- wrap ----------------------------------------------------------
 
@@ -1172,20 +1197,20 @@ class BrowserManager:
         expr: str,
         install_fn,
     ) -> dict[str, Any]:
-        """Install a wrap (call or access) and reload the extension.
+        """Install a wrap (call or access) into the browser's scope and reload.
 
         Validates that the target tab exists (so a stale ``--tab-id``
         errors cleanly), installs the wrap as a named userscript via
-        ``install_fn``, and reloads the extension on the target
-        browser. The wrap takes effect on the next navigation (the
-        userscript re-runs at ``document_start``).
+        ``install_fn`` into the given browser's scope, and reloads that
+        browser's extension. The wrap takes effect on the next
+        navigation (the userscript re-runs at ``document_start``).
 
         Returns:
             The install result from the wrap module.
         """
         inst = self._require_instance(browser_id)
         inst._require_tab(tab_id)  # noqa: SLF001
-        result = install_fn(name, expr)
+        result = install_fn(browser_id, name, expr)
         result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
@@ -1206,25 +1231,24 @@ class BrowserManager:
         )
 
     async def wrap_list(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
-        """List installed wraps.
+        """List installed wraps for the given browser.
 
-        Wraps are stored on disk as named userscripts and apply to all
-        tabs (the userscript extension's ``all_frames: true`` and
-        ``matches: <all_urls>`` mean a wrap reaches every tab). The
-        ``--tab-id`` is validated for targeting consistency with the
-        other wrap commands but does not filter the list.
+        Wraps are stored on disk as named userscripts scoped to the
+        given browser (per ADR-0010). The ``--tab-id`` is validated
+        for targeting consistency with the other wrap commands but
+        does not filter the list.
 
         Returns:
             A list of ``{name, type, expr}`` dicts.
         """
         inst = self._require_instance(browser_id)
         inst._require_tab(tab_id)  # noqa: SLF001
-        return wrap_mod.list_wraps()
+        return wrap_mod.list_wraps(browser_id)
 
     async def wrap_remove(
         self, browser_id: int, tab_id: int, name: str
     ) -> dict[str, Any]:
-        """Remove a wrap's userscript and reload the extension.
+        """Remove a wrap from the given browser's scope and reload its extension.
 
         The wrap stops recording on future navigations. Existing
         records in already-loaded tabs are not affected (the wrapper
@@ -1236,16 +1260,18 @@ class BrowserManager:
         inst = self._require_instance(browser_id)
         inst._require_tab(tab_id)  # noqa: SLF001
         try:
-            result = wrap_mod.remove(name)
+            result = wrap_mod.remove(browser_id, name)
         except ValueError as exc:
             raise BrowserOperationError(str(exc)) from exc
         result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
-    async def wrap_dump(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
-        """Read the per-tab wrap record array."""
+    async def wrap_dump(
+        self, browser_id: int, tab_id: int, name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read the per-tab wrap record array, optionally filtered to one wrap."""
         inst = self._require_instance(browser_id)
-        return await inst.wrap_dump(tab_id)
+        return await inst.wrap_dump(tab_id, name)
 
     async def wrap_clear(self, browser_id: int, tab_id: int) -> dict[str, Any]:
         """Zero the per-tab wrap record array without navigating."""

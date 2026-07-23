@@ -45,7 +45,8 @@ class OddaClient:
         while time.time() < deadline:
             try:
                 self._reader, self._writer = await asyncio.open_unix_connection(
-                    str(self.socket_path)
+                    str(self.socket_path),
+                    limit=rpc.TRANSPORT_LIMIT,
                 )
             except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
                 last_error = exc

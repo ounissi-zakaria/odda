@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from odda import flowstore, userscript
+from odda import userscript
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,6 +41,7 @@ _MAX_DEPTH = 5
 _MAX_ARRAY = 100
 _MAX_OBJECT_KEYS = 50
 _MAX_STRING = 10000
+_MAX_FUNCTION_SOURCE = 1000
 
 
 def _wrap_userscript_name(name: str) -> str:
@@ -48,14 +49,9 @@ def _wrap_userscript_name(name: str) -> str:
     return f"{WRAP_USERSCRIPT_PREFIX}{name}"
 
 
-def _wrap_meta_path(userscript_name: str) -> Path:
+def _wrap_meta_path(browser_id: int, userscript_name: str) -> Path:
     """Return the path to the wrap's ``wrap-meta.json`` sidecar."""
-    return (
-        flowstore.DATA_DIR
-        / userscript.USERSCRIPTS_DIR_NAME
-        / userscript_name
-        / "wrap-meta.json"
-    )
+    return userscript.userscripts_dir(browser_id) / userscript_name / "wrap-meta.json"
 
 
 # --- JS helpers (shared by all wrap userscripts) ---------------------------
@@ -76,7 +72,15 @@ if (!window.__oddaSerialize) {
     if (v === null) return null;
     if (v === undefined) return undefined;
     var t = typeof v;
-    if (t === 'function') return {type: 'function', name: v.name || null};
+    if (t === 'function') {
+      try {
+        var src = String(v);
+        if (src.length > %MAX_FN%) src = src.substring(0, %MAX_FN%) + '...';
+        return {type: 'function', name: v.name || null, source: src};
+      } catch (e) {
+        return {type: 'function', name: v.name || null};
+      }
+    }
     if (t === 'string') {
       if (v.length > %MAX_STRING%) return {type: 'string', truncated: true, length: v.length, preview: v.substring(0, %MAX_STRING%)};
       return v;
@@ -161,6 +165,7 @@ if (!window.__oddaWrap) window.__oddaWrap = [];
     .replace("%MAX_DEPTH%", str(_MAX_DEPTH))
     .replace("%MAX_ARRAY%", str(_MAX_ARRAY))
     .replace("%MAX_OBJECT_KEYS%", str(_MAX_OBJECT_KEYS))
+    .replace("%MAX_FN%", str(_MAX_FUNCTION_SOURCE))
 )
 
 
@@ -345,15 +350,24 @@ def generate_access_wrapper(name: str, expr: str) -> str:
 # --- Install / remove / list (disk state) ----------------------------------
 
 
-def _write_meta(userscript_name: str, meta: dict[str, Any]) -> None:
+def _write_meta(browser_id: int, userscript_name: str, meta: dict[str, Any]) -> None:
     """Write the wrap-meta.json sidecar for a wrap userscript."""
-    _wrap_meta_path(userscript_name).write_text(json.dumps(meta), encoding="utf-8")
+    _wrap_meta_path(browser_id, userscript_name).write_text(
+        json.dumps(meta), encoding="utf-8"
+    )
 
 
-def _install(name: str, wrap_type: str, expr: str, generator) -> dict[str, Any]:
+def _install(
+    browser_id: int,
+    name: str,
+    wrap_type: str,
+    expr: str,
+    generator,
+) -> dict[str, Any]:
     """Install a wrap as a named userscript and write its meta sidecar.
 
     Args:
+        browser_id: Browser whose scope to install into.
         name: The wrap name.
         wrap_type: ``"call"`` or ``"access"``.
         expr: A JS expression/path for the wrap target.
@@ -365,60 +379,69 @@ def _install(name: str, wrap_type: str, expr: str, generator) -> dict[str, Any]:
     """
     us_name = _wrap_userscript_name(name)
     js = generator(name, expr)
-    result = userscript.install(us_name, js)
+    result = userscript.install(browser_id, us_name, js)
     meta = {"name": name, "type": wrap_type, "expr": expr}
-    _write_meta(us_name, meta)
+    _write_meta(browser_id, us_name, meta)
     result.update(meta)
     result["userscript_name"] = us_name
     return result
 
 
-def install_call(name: str, expr: str) -> dict[str, Any]:
+def install_call(browser_id: int, name: str, expr: str) -> dict[str, Any]:
     """Install a call wrap as a named userscript and write its meta sidecar.
 
     Args:
+        browser_id: Browser whose scope to install into.
         name: The wrap name.
         expr: A JS expression resolving to the function to wrap.
 
     Returns:
         ``{name, type, expr, userscript_name, size}``.
     """
-    return _install(name, "call", expr, generate_call_wrapper)
+    return _install(browser_id, name, "call", expr, generate_call_wrapper)
 
 
-def install_access(name: str, expr: str) -> dict[str, Any]:
+def install_access(browser_id: int, name: str, expr: str) -> dict[str, Any]:
     """Install an access wrap as a named userscript and write its meta sidecar.
 
     Args:
+        browser_id: Browser whose scope to install into.
         name: The wrap name.
         expr: A dotted JS path to the property to wrap.
 
     Returns:
         ``{name, type, expr, userscript_name, size}``.
     """
-    return _install(name, "access", expr, generate_access_wrapper)
+    return _install(browser_id, name, "access", expr, generate_access_wrapper)
 
 
-def remove(name: str) -> dict[str, Any]:
+def remove(browser_id: int, name: str) -> dict[str, Any]:
     """Remove a wrap's userscript (and its meta sidecar).
+
+    Args:
+        browser_id: Browser whose scope to remove from.
+        name: The wrap name.
 
     Raises:
         ValueError: If the wrap does not exist.
     """
     us_name = _wrap_userscript_name(name)
-    result = userscript.remove(us_name)
+    result = userscript.remove(browser_id, us_name)
     result["name"] = name
     return result
 
 
-def list_wraps() -> list[dict[str, Any]]:
-    """List installed wraps by scanning for ``__odda-wrap__*`` userscripts.
+def list_wraps(browser_id: int) -> list[dict[str, Any]]:
+    """List installed wraps for one browser by scanning for ``__odda-wrap__*`` userscripts.
+
+    Args:
+        browser_id: Browser whose scope to list from.
 
     Returns:
         A list of ``{name, type, expr}`` dicts, sorted by name.
     """
     wraps: list[dict[str, Any]] = []
-    us_dir = flowstore.DATA_DIR / userscript.USERSCRIPTS_DIR_NAME
+    us_dir = userscript.userscripts_dir(browser_id)
     if not us_dir.exists():
         return wraps
     for entry in sorted(us_dir.iterdir()):

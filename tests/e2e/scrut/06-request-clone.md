@@ -76,7 +76,7 @@ $ cat "$PWD/flow_id"
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request clone "$flow_id" --name clone-test \
+>   request clone --flow-id "$flow_id" --name clone-test \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"], d["port"])'
 clone-test https 127.0.0.1 * (glob)
 ```
@@ -98,7 +98,7 @@ meta.json non-empty
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request clone "$flow_id" --name clone-test 2>&1 \
+>   request clone --flow-id "$flow_id" --name clone-test 2>&1 \
 >   | grep -F "already exists" >/dev/null && echo "refused" || echo "ERROR: did not refuse"
 refused
 ```
@@ -108,7 +108,7 @@ refused
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request clone "$flow_id" --name clone-test --force \
+>   request clone --flow-id "$flow_id" --name clone-test --force \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"], d["port"])'
 clone-test https 127.0.0.1 * (glob)
 ```

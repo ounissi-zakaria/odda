@@ -16,31 +16,31 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Check the server is running | `odda status`                                                      |
 | Get the HTTP proxy URL      | `odda proxy-url`                                                   |
 | Open a Chrome window        | `odda browser open [--headless]`                                  |
-| Close a browser             | `odda browser close <id>`                                          |
+| Close a browser             | `odda browser close --browser-id <id>`                             |
 | List tabs (overview)        | `odda tabs list [--browser-id <id>]`                              |
 | Open a new tab              | `odda tabs open --browser-id <id> [--url <url>]`                   |
 | Close a tab                 | `odda tabs close --browser-id <id> --tab-id <n>`                   |
-| Navigate an existing tab    | `odda navigate <url> --browser-id <id> --tab-id <n>`               |
-| Run JavaScript              | `odda eval "<js>" --browser-id <id> --tab-id <n>` or `--file <path>` |
-| Wait for a JS condition     | `odda wait-for "<expr>" --browser-id <id> --tab-id <n> [--timeout N]` |
-| Screenshot                  | `odda screenshot --browser-id <id> --tab-id <n>`                   |
+| Navigate an existing tab    | `odda navigate --url <url> --browser-id <id> --tab-id <n>`         |
+| Run JavaScript              | `odda eval --js "<js>" --browser-id <id> --tab-id <n>` or `--file <path>` |
+| Wait for a JS condition     | `odda wait-for --expression "<expr>" --browser-id <id> --tab-id <n> [--timeout N]` |
+| Screenshot                  | `odda screenshot --browser-id <id> --tab-id <n> [--output <path>]` |
 | List event listeners        | `odda event-listeners --browser-id <id> --tab-id <n>`              |
 | Snapshot (find refs)        | `odda page snapshot --browser-id <id> --tab-id <n>`                 |
-| Click by ref                | `odda page click --browser-id <id> --tab-id <n> <ref> [--timeout N]` |
-| Fill by ref                 | `odda page fill --browser-id <id> --tab-id <n> <ref> "<value>" [--timeout N]` |
-| Hover by ref                | `odda page hover --browser-id <id> --tab-id <n> <ref> [--timeout N]` |
-| Upload files by ref         | `odda page upload --browser-id <id> --tab-id <n> <ref> --file <path> [--file <path>...]` |
+| Click by ref                | `odda page click --browser-id <id> --tab-id <n> --ref <ref> [--timeout N]` |
+| Fill by ref                 | `odda page fill --browser-id <id> --tab-id <n> --ref <ref> --value "<value>" [--timeout N]` |
+| Hover by ref                | `odda page hover --browser-id <id> --tab-id <n> --ref <ref> [--timeout N]` |
+| Upload files by ref         | `odda page upload --browser-id <id> --tab-id <n> --ref <ref> --file <path> [--file <path>...]` |
 | Install a userscript        | `odda userscript install --name <name> --browser-id <id> --file <path>` |
-| List userscripts            | `odda userscript list`                                             |
-| Remove a userscript         | `odda userscript remove <name> --browser-id <id>`                  |
+| List userscripts            | `odda userscript list --browser-id <id>`                           |
+| Remove a userscript         | `odda userscript remove --name <name> --browser-id <id>`          |
 | Start block coverage        | `odda coverage start --browser-id <id> --tab-id <n>`               |
 | Read coverage mid-recording | `odda coverage snapshot --browser-id <id> --tab-id <n>`             |
 | Stop coverage + final counts| `odda coverage stop --browser-id <id> --tab-id <n>`                |
 | Wrap a function (calls)     | `odda wrap calls add --browser-id <id> --tab-id <n> --expr "<js>" --name <name>` |
 | Wrap a property accessor    | `odda wrap access add --browser-id <id> --tab-id <n> --expr "<js>" --name <name>` |
 | List installed wraps        | `odda wrap list --browser-id <id> --tab-id <n>`                    |
-| Remove a wrap               | `odda wrap remove --browser-id <id> --tab-id <n> <name>`           |
-| Dump wrap records           | `odda wrap dump --browser-id <id> --tab-id <n>`                    |
+| Remove a wrap               | `odda wrap remove --browser-id <id> --tab-id <n> --name <name>`   |
+| Dump wrap records           | `odda wrap dump --browser-id <id> --tab-id <n> [--name <name>]`    |
 | Clear wrap records          | `odda wrap clear --browser-id <id> --tab-id <n>`                   |
 | Plant a logpoint            | `odda logpoint add --browser-id <id> --tab-id <n> --url <url> --line <n> --col <n> --expr "<js>"` |
 | List planted logpoints      | `odda logpoint list --browser-id <id> --tab-id <n>`                 |
@@ -48,9 +48,9 @@ All commands output JSON by default. Errors are returned as JSON with a non-zero
 | Clear logpoint records      | `odda logpoint clear --browser-id <id> --tab-id <n>`                |
 | Remove a logpoint           | `odda logpoint remove --browser-id <id> --tab-id <n> --id <lp-id>` |
 | Read server logs            | `odda logs [--follow] [--n N]`                                     |
-| Clone a flow to edit        | `odda request clone <flow-id> --name <name> [--force]`             |
+| Clone a flow to edit        | `odda request clone --flow-id <flow-id> --name <name> [--force]`   |
 | Create an empty request     | `odda request new --name <name> [--force]`                         |
-| Send an editable request    | `odda request send <name> [flags]`                                 |
+| Send an editable request    | `odda request send --name <name> [flags]`                          |
 
 ## Targeting model
 
@@ -71,7 +71,7 @@ Errors surface as JSON `{error: ...}` with a **non-zero exit code**: unknown `--
 ## Browser commands
 
 - `odda browser open [--headless]` — Open a new Chrome window. Returns `{browser_id, tab_id, status}`. The `tab_id` is the initial tab; you can navigate/eval it immediately. `--headless` runs Chrome without a visible window (useful for CI and automated testing).
-- `odda browser close <id>` — Close a browser instance by ID. Returns `{browser_id, status}`. Tearing down is immediate; any in-flight tab ops on that browser error cleanly with "tab closed during operation". For an overview of all browsers and their tabs use `odda tabs list` (no `--browser-id`); `odda status` reports the open browser count.
+- `odda browser close --browser-id <id>` — Close a browser instance by ID. Returns `{browser_id, status}`. Tearing down is immediate; any in-flight tab ops on that browser error cleanly with "tab closed during operation". For an overview of all browsers and their tabs use `odda tabs list` (no `--browser-id`); `odda status` reports the open browser count.
 
 ## Tab commands
 
@@ -83,10 +83,15 @@ Tab ids are per-browser, monotonic, and never reused. After a tab closes, its id
 
 ## Navigation and page interaction
 
-- `odda navigate <url> --browser-id <id> --tab-id <n>` — Navigate an existing tab to a URL. Returns `{status}`. To open a tab, use `odda tabs open`. Navigation failures (network error, invalid URL) raise a JSON error with non-zero exit.
-- `odda eval "<js>" --browser-id <id> --tab-id <n>` — Execute JavaScript in the target tab and return the result. Returned Promises are awaited automatically: `fetch(url).then(r => r.status)` returns `200`, not a Promise object. Return a serializable value from async expressions — bare `fetch(url)` returns `{}` because the resolved `Response` is not JSON-serializable; chain `.then(r => r.text())` or similar to extract a serializable value. `odda eval --file <path> --browser-id <id> --tab-id <n>` loads JavaScript from a file (mutually exclusive with the inline argument; useful for multi-line scripts and shell-escape avoidance).
-- `odda wait-for "<expr>" --browser-id <id> --tab-id <n> [--timeout N]` — Poll a JS expression until it's truthy or the timeout (default 30s) is reached. Uses Playwright's `wait_for_function`, which polls in-browser with no round-trips. Runs in the main world, so it sees page globals and userscript-injected helpers. Returns the truthy value on success; errors with non-zero exit code on timeout. Example: `odda wait-for "document.querySelector('.sdk-ready')" --browser-id 1 --tab-id 1 --timeout 10`.
-- `odda screenshot --browser-id <id> --tab-id <n>` — Capture a JPEG screenshot of the target tab's viewport. Returns the path to the temp file (a bare string). Screenshot failures raise a JSON error with non-zero exit.
+- `odda navigate --url <url> --browser-id <id> --tab-id <n>` — Navigate an existing tab to a URL. Returns `{status}`. To open a tab, use `odda tabs open`. Navigation failures (network error, invalid URL, or `load`-event timeout) raise a JSON error with non-zero exit; the timeout error message points at `odda wait-for` for SPAs whose `load` event never fires.
+- `odda eval --js "<js>" --browser-id <id> --tab-id <n>` — Execute JavaScript in the target tab and return the result. Returned Promises are awaited automatically: `fetch(url).then(r => r.status)` returns `200`, not a Promise object. Return a serializable value from async expressions — bare `fetch(url)` returns `{}` because the resolved `Response` is not JSON-serializable; chain `.then(r => r.text())` or similar to extract a serializable value. `odda eval --file <path> --browser-id <id> --tab-id <n>` loads JavaScript from a file (mutually exclusive with `--js`; useful for multi-line scripts and shell-escape avoidance).
+
+### `eval` encoding: `JSON.stringify` inside `eval` double-encodes
+
+`odda eval` returns `JSON.stringify(result)` so the CLI can print it as JSON. If your JS *also* calls `JSON.stringify`, the result is double-encoded: `odda eval "JSON.stringify({a: 1})"` returns `"\"{\\\"a\\\":1}\""` and needs `json.loads(json.loads(...))` to recover the object. Prefer `odda eval --js "({a: 1})"` (return a plain object) and let odda do the outer `JSON.stringify`. If you must call `JSON.stringify` in JS, `json.loads` the CLI output once to get the inner string, then again to get the value.
+
+- `odda wait-for --expression "<expr>" --browser-id <id> --tab-id <n> [--timeout N]` — Poll a JS expression until it's truthy or the timeout (default 30s) is reached. Uses Playwright's `wait_for_function`, which polls in-browser with no round-trips. Runs in the main world, so it sees page globals and userscript-injected helpers. Returns the truthy value on success; errors with non-zero exit code on timeout. Example: `odda wait-for --expression "document.querySelector('.sdk-ready')" --browser-id 1 --tab-id 1 --timeout 10`.
+- `odda screenshot --browser-id <id> --tab-id <n> [--output <path>]` — Capture a JPEG screenshot of the target tab's viewport. Returns the path to the screenshot file (a bare string). By default a temp file is generated; pass `--output <path>` to write to a path you choose (the parent directory is created). Screenshot failures raise a JSON error with non-zero exit.
 - `odda event-listeners --browser-id <id> --tab-id <n>` — List JavaScript event listeners attached to `window` and `document` in the target tab.
 
 ## Page interaction
@@ -97,7 +102,7 @@ Page interaction is both standalone (browser automation) and composes with Dynam
 
 ### Refs
 
-A **ref** (`eN`, or `f<frameSeq>eN` inside an iframe) is a short-lived name for one element in a snapshot. The agent passes `eN` as a positional argument to `click`, `fill`, `hover`, and `upload`; odda resolves it to the element via Playwright's `aria-ref` selector engine.
+A **ref** (`eN`, or `f<frameSeq>eN` inside an iframe) is a short-lived name for one element in a snapshot. The agent passes `eN` via the `--ref` flag to `click`, `fill`, `hover`, and `upload`; odda resolves it to the element via Playwright's `aria-ref` selector engine.
 
 - **Valid as long as the element stays in the DOM.** If the element is removed (SPA content swap, navigation), the action errors cleanly. Re-snapshot to discover refs for new elements; existing refs continue to work without re-snapshotting.
 - **Cross-iframe is transparent.** Refs inside iframes have the form `f<frameSeq>eN`; odda resolves them automatically, no special handling.
@@ -106,10 +111,10 @@ A **ref** (`eN`, or `f<frameSeq>eN` inside an iframe) is a short-lived name for 
 Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 
 - `odda page snapshot --browser-id <id> --tab-id <n>` — Return the page's accessibility tree as YAML-ish text with `[ref=eN]` tags. The agent greps the text for the element it wants. No filter options; the full tree is returned. Prefer `page snapshot` over `odda screenshot` for finding elements and understanding page structure: the snapshot is text (cheaper on context, grep-able, carries refs for action commands), while the screenshot is pixels (useful only for visual layout, icons, or canvas the a11y tree can't see). Use screenshots when you need to see what the page looks like; use snapshots when you need to find an element to act on.
-- `odda page click --browser-id <id> --tab-id <n> <ref> [--timeout N]` — Click the element identified by `ref` (plain left-click). Returns `{status: "clicked", ref: "<ref>"}`. If the ref no longer resolves, errors cleanly with a stale-ref message.
-- `odda page fill --browser-id <id> --tab-id <n> <ref> "<value>" [--timeout N]` — Fill the element identified by `ref` with `value`. Clears the field first, then types. Works on text inputs, textareas, contenteditable elements, checkboxes (`"true"`/`"false"`), radios, and selects. Returns `{status: "filled", ref: "<ref>"}`.
-- `odda page hover --browser-id <id> --tab-id <n> <ref> [--timeout N]` — Hover the element identified by `ref`. Auto-scrolls the element into view first. Returns `{status: "hovered", ref: "<ref>"}`.
-- `odda page upload --browser-id <id> --tab-id <n> <ref> --file <path> [--file <path>...] [--timeout N]` — Set files on a file input identified by `ref`. Repeat `--file` for multiple files (`<input type="file" multiple>`). Returns `{status: "uploaded", ref: "<ref>", files: ["<path>", ...]}`.
+- `odda page click --browser-id <id> --tab-id <n> --ref <ref> [--timeout N]` — Click the element identified by `ref` (plain left-click). Returns `{status: "clicked", ref: "<ref>"}`. If the ref no longer resolves, errors cleanly with a stale-ref message.
+- `odda page fill --browser-id <id> --tab-id <n> --ref <ref> --value "<value>" [--timeout N]` — Fill the element identified by `ref` with `value`. Clears the field first, then types. Works on text inputs, textareas, contenteditable elements, checkboxes (`"true"`/`"false"`), radios, and selects. Returns `{status: "filled", ref: "<ref>"}`.
+- `odda page hover --browser-id <id> --tab-id <n> --ref <ref> [--timeout N]` — Hover the element identified by `ref`. Auto-scrolls the element into view first. Returns `{status: "hovered", ref: "<ref>"}`.
+- `odda page upload --browser-id <id> --tab-id <n> --ref <ref> --file <path> [--file <path>...] [--timeout N]` — Set files on a file input identified by `ref`. Repeat `--file` for multiple files (`<input type="file" multiple>`). Returns `{status: "uploaded", ref: "<ref>", files: ["<path>", ...]}`.
 
 All action commands accept `--timeout` (default 5 seconds) for ref resolution and the action itself. This is shorter than `wait-for`'s 30s default because actions are interactive — the agent wants to know quickly when something didn't work. A stale ref errors within the timeout, not after a 30-second Playwright hang.
 
@@ -117,23 +122,24 @@ All action commands accept `--timeout` (default 5 seconds) for ref resolution an
 
 `odda userscript` manages JavaScript helpers that auto-run at `document_start` on every navigation. Install a helper once and it runs before the page's own scripts on every `odda navigate` and `odda tabs open`.
 
-Userscripts are stored on disk under `.odda/userscripts/<name>/script.js`. A Chrome extension is generated at `.odda/userscripts-extension/` with a `content.js` that inlines all installed userscripts (each wrapped in try/catch). The extension is loaded via CDP `Extensions.loadUnpacked` when a browser is opened.
+Userscripts are stored **per-browser** on disk under `.odda/browsers/<browser_id>/userscripts/<name>/script.js`. Each browser gets its own Chrome extension at `.odda/browsers/<browser_id>/userscripts-extension/` with a `content.js` that inlines that browser's installed userscripts (each wrapped in try/catch). The extension is loaded via CDP `Extensions.loadUnpacked` when that browser is opened. Per ADR-0010, a userscript installed on browser 1 does not reach browser 2 — `--browser-id` is the scope key.
 
-odda also ships built-in default userscripts that are always injected before any installed userscripts. Currently this includes a dialog interceptor that records calls to `window.print`, `window.alert`, `window.confirm`, and `window.prompt` in `window.__oddaDialogs`.
+odda also ships built-in default userscripts that are always injected before any installed userscripts in every browser. Currently this includes a dialog interceptor that records calls to `window.print`, `window.alert`, `window.confirm`, and `window.prompt` in `window.__oddaDialogs`.
 
 Commands:
 
-- `odda userscript install --name <name> --browser-id <id> --file <path>` — Install a JS file as a userscript. Overwrites any existing userscript of the same name and reloads the extension on the given browser. Alternatively, use `--source "<js>"` for inline source (mutually exclusive with `--file`).
-- `odda userscript list` — List installed userscripts with their names and sizes. (Global — lists files on disk, not per-browser state.)
-- `odda userscript remove <name> --browser-id <id>` — Remove a userscript from disk and reload the extension on the given browser. The script's effects on the current page are not undone; it won't run on future navigations.
+- `odda userscript install --name <name> --browser-id <id> --file <path>` — Install a JS file as a userscript into the given browser's scope. Overwrites any existing userscript of the same name and reloads that browser's extension. Alternatively, use `--source "<js>"` for inline source (mutually exclusive with `--file`).
+- `odda userscript list --browser-id <id>` — List installed userscripts for the given browser with their names and sizes.
+- `odda userscript remove --name <name> --browser-id <id>` — Remove a userscript from the given browser's scope and reload that browser's extension. The script's effects on the current page are not undone; it won't run on future navigations.
 
 Behavior notes:
 
 - **Before page scripts.** Userscripts run at `document_start`, so `window` modifications are visible to the page before any of its own scripts execute. This is the key advantage over `odda eval` (which runs after navigation).
-- **All tabs and frames.** The extension's content script matches `<all_urls>` and runs in all frames (`all_frames: true`), applying to every tab in every browser.
+- **Per-browser scope.** A userscript installed on browser 1 does not run in browser 2. Each browser owns its own userscripts dir and extension. Default userscripts ship in every browser's scope.
+- **All tabs and frames of one browser.** The extension's content script matches `<all_urls>` and runs in all frames (`all_frames: true`), applying to every tab in the browser whose scope it was installed into.
 - **Idempotent re-injection.** Scripts run on every navigation. Write them to be idempotent (e.g., guard with `if (window.__myHelper__) return;`).
-- **Reload applies on next navigation.** `install`/`remove` reload the extension for the given browser, but already-loaded tabs are not re-injected. Re-navigate an existing tab (or open a new one) for the change to take effect there.
-- **Dialog interceptor.** `odda eval "window.__oddaDialogs" --browser-id <id> --tab-id <n>` returns an array of captured dialog/print events. Each entry has `{type, url, timestamp, stack, result?}` plus `message` and `defaultValue` when applicable. `type` is one of `print`, `alert`, `confirm`, `prompt`. `message` is present for `alert`/`confirm`/`prompt`. `defaultValue` is present for `prompt`. `result` is recorded for `confirm`/`prompt`. Use this to inspect what modal dialogs or print calls a page triggered during automation.
+- **Reload applies on next navigation.** `install`/`remove` reload the given browser's extension, but already-loaded tabs are not re-injected. Re-navigate an existing tab (or open a new one) for the change to take effect there.
+- **Dialog interceptor.** `odda eval --js "window.__oddaDialogs" --browser-id <id> --tab-id <n>` returns an array of captured dialog/print events. Each entry has `{type, url, timestamp, stack, result?}` plus `message` and `defaultValue` when applicable. `type` is one of `print`, `alert`, `confirm`, `prompt`. `message` is present for `alert`/`confirm`/`prompt`. `defaultValue` is present for `prompt`. `result` is recorded for `confirm`/`prompt`. Use this to inspect what modal dialogs or print calls a page triggered during automation.
 
 ## Coverage
 
@@ -193,9 +199,9 @@ Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 
 - `odda wrap calls add --browser-id <id> --tab-id <n> --expr "<js>" --name <name>` — Install a wrap on a function (e.g. `JSON.parse`, `EventTarget.prototype.addEventListener`). The wrapper calls through to the original and pushes a record with `{wrap, type: "call", this, args, ret, stack}`. The wrap takes effect on the next navigation (re-navigate the tab or open a new one).
 - `odda wrap access add --browser-id <id> --tab-id <n> --expr "<js>" --name <name>` — Install a wrap on a property accessor (e.g. `HTMLElement.prototype.innerHTML`, `document.cookie`). Both getter and setter are wrapped if present. A get records `ret` as the value read; a set records `args[0]` as the value written with `ret: null`.
-- `odda wrap list --browser-id <id> --tab-id <n>` — List installed wraps as `[{name, type, expr}]`. Wraps are stored on disk as named userscripts and apply to all tabs; the `--tab-id` is validated for targeting consistency but does not filter the list.
-- `odda wrap remove --browser-id <id> --tab-id <n> <name>` — Remove a wrap's userscript and reload the extension. The wrap stops recording on future navigations. Records already captured in the current page are not affected.
-- `odda wrap dump --browser-id <id> --tab-id <n>` — Read the per-tab wrap record array. Returns `[{wrap, type, this, args, ret, stack, error?}]`. The agent does not need to know the internal array name.
+- `odda wrap list --browser-id <id> --tab-id <n>` — List installed wraps (for the given browser) as `[{name, type, expr}]`. Wraps are stored on disk as named userscripts scoped to the browser (per ADR-0010); the `--tab-id` is validated for targeting consistency but does not filter the list.
+- `odda wrap remove --browser-id <id> --tab-id <n> --name <name>` — Remove a wrap's userscript from the browser's scope and reload its extension. The wrap stops recording on future navigations. Records already captured in the current page are not affected.
+- `odda wrap dump --browser-id <id> --tab-id <n> [--name <name>]` — Read the per-tab wrap record array. Returns `[{wrap, type, this, args, ret, stack, error?}]`. Pass `--name <wrap>` to filter server-side to one wrap's records (useful for narrowing context when several wraps are installed). The agent does not need to know the internal array name.
 - `odda wrap clear --browser-id <id> --tab-id <n>` — Zero the per-tab wrap record array without navigating. Returns `{status: "cleared", count: <records dropped>}`. Wrap installations are unaffected; subsequent calls continue to record.
 
 ### Wrap record shape
@@ -214,7 +220,7 @@ Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 
 ### Serialization rules
 
-- **Functions** (in `args`, `ret`, or `this`): serialized as `{type: "function", name: "<inferred name or null>"}`. The function body is not captured; you cannot invoke captured functions.
+- **Functions** (in `args`, `ret`, or `this`): serialized as `{type: "function", name: "<inferred name or null>", source: "<.toString() capped at 1000 chars>"}`. The `source` field is enough to read what a callback does and decide whether to follow it with Coverage+Logpoint, but you cannot invoke captured functions. Bound/anonymous functions may have a `source` of `function () { [native code] }` or `bound ` — that is the function's own `toString()`, not odda's.
 - **Large or cyclic values**: truncated and marked. Objects with more than 50 keys become `{type: "object", truncated: true, keys: [...]}`. Arrays longer than 100 become `{type: "array", truncated: true, length: N}`. Strings longer than 10000 characters become `{type: "string", truncated: true, length: N, preview: "..."}`. Cycles become `{type: "object", truncated: true, cycle: true}`. Depth beyond 5 levels is truncated.
 - **Call stack frames**: one shape `{fn, url, line, col}`; native or eval frames leave `url`/`line`/`col` null. Extension frames (from `chrome-extension://`) are filtered out.
 - **DOM nodes**: serialized as `{type: "node", name: "<nodeName>", tag: "<tagName>"}`.
@@ -225,7 +231,8 @@ Commands (all tab-scoped — take `--browser-id` and `--tab-id`):
 - **Takes effect on next navigation.** `wrap calls add`/`access add` install the wrapper, but already-loaded tabs are not re-injected. Re-navigate an existing tab (or open a new one) for the wrap to run.
 - **Records wipe on navigation.** Records from the previous page load are gone after a navigate. **Dump before navigating again** or the records are lost.
 - **Installations persist across navigation.** The wrap re-installs on every page load until you `wrap remove` it.
-- **Scope: all frames.** Wraps reach all frames in the tab including cross-origin iframes. Same-origin iframes aggregate records to the top frame (so `wrap dump` on the main tab sees them); cross-origin iframes keep their own records (the wrap still runs there, but the records stay in the iframe's context — read them by evaluating in the iframe). Wraps do not reach worker contexts.
+- **Per-browser scope.** Wraps are scoped to the browser whose `--browser-id` they were installed on (per ADR-0010); a wrap on browser 1 does not reach browser 2.
+- **Scope: all frames of one browser.** Wraps reach all frames in the tab including cross-origin iframes. Same-origin iframes aggregate records to the top frame (so `wrap dump` on the main tab sees them); cross-origin iframes keep their own records (the wrap still runs there, but the records stay in the iframe's context — read them by evaluating in the iframe). Wraps do not reach worker contexts.
 - **Errors.** Commands on a missing or closed tab or a missing browser return `{"error": ...}` with a non-zero exit code. `wrap remove` on a non-existent wrap name errors.
 
 ## Logpoint
@@ -274,21 +281,21 @@ The three dynamic-analysis concepts compose. The canonical investigation is conf
 1. **Wrap** `EventTarget.prototype.addEventListener` to confirm a `message` handler is registered and capture the handler reference:
    ```
    odda wrap calls add --browser-id 1 --tab-id 1 --expr EventTarget.prototype.addEventListener --name ael
-   odda navigate http://target/ --browser-id 1 --tab-id 1   # re-navigate so the wrap runs
-   odda eval "String(window.__oddaWrapFixture(window, 'message', function onMsg() {}))" --browser-id 1 --tab-id 1
+   odda navigate --url http://target/ --browser-id 1 --tab-id 1   # re-navigate so the wrap runs
+   odda eval --js "String(window.__oddaWrapFixture(window, 'message', function onMsg() {}))" --browser-id 1 --tab-id 1
    odda wrap dump --browser-id 1 --tab-id 1   # confirm 'message' registration, capture handler ref
    ```
 2. **Coverage** to find which code path the handler runs when a message arrives:
    ```
    odda coverage start --browser-id 1 --tab-id 1
-   odda eval "window.postMessage({type: 'probe'}, '*')" --browser-id 1 --tab-id 1
+   odda eval --js "window.postMessage({type: 'probe'}, '*')" --browser-id 1 --tab-id 1
    odda coverage stop --browser-id 1 --tab-id 1   # find the script URL + block ranges that ran
    ```
 3. Read the handler source from the captured flow body (the script URL from coverage maps to a flow in `.odda/flows/`) to find the origin-check line.
 4. **Logpoint** at that line to read the locals the check operates on:
    ```
    odda logpoint add --browser-id 1 --tab-id 1 --url <script-url> --line <n> --col <n> --expr "event.origin"
-   odda eval "window.postMessage({type: 'probe'}, 'https://evil/')" --browser-id 1 --tab-id 1
+   odda eval --js "window.postMessage({type: 'probe'}, 'https://evil/')" --browser-id 1 --tab-id 1
    odda logpoint dump --browser-id 1 --tab-id 1   # read the captured origin value
    ```
 5. If the logpoint records an attacker-controllable origin, the handler does not validate origin and is vulnerable.
@@ -309,7 +316,7 @@ The same recipe composes with `odda page` when the behavior is triggered by user
    ```
 3. **Coverage** to find which code path ran as a result of the click, **Logpoint** to read locals at the interesting line — same as above.
 
-The page-interaction step replaces `odda eval "window.postMessage(...)"` when the trigger is a user action (form submit, button click, file upload) rather than a programmatic call.
+The page-interaction step replaces `odda eval --js "window.postMessage(...)"` when the trigger is a user action (form submit, button click, file upload) rather than a programmatic call.
 
 ## Raw request commands
 

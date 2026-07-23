@@ -29,6 +29,15 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
+# Maximum size of a single JSON-RPC message line on the Unix socket, in
+# bytes. asyncio's StreamReader.readline() raises LimitOverrunError when a
+# line exceeds its limit (default 64KB), which silently drops any response
+# larger than ~64KB - notably `wrap dump` with a few hundred records. Both
+# the client (open_unix_connection) and server (start_unix_server) pass
+# this as their `limit`. 64MB is large enough for a wrap dump with tens of
+# thousands of records while still bounding unbounded allocation.
+TRANSPORT_LIMIT = 64 * 1024 * 1024
+
 
 def parse_request(line: str) -> dict[str, Any]:
     """Parse a single JSON-RPC request line.
@@ -93,5 +102,17 @@ def build_error(
 
 
 def encode(message: dict[str, Any]) -> bytes:
-    """Encode a JSON-RPC message to bytes with a trailing newline."""
-    return json.dumps(message, ensure_ascii=False).encode("utf-8") + b"\n"
+    """Encode a JSON-RPC message to bytes with a trailing newline.
+
+    ``default=str`` coerces any non-JSON-serializable value (e.g. a
+    circular Window dict returned by ``page.evaluate`` with
+    ``returnByValue``) to its ``str()`` form, so encoding never raises.
+    This is the last line of defense against connection drops: the
+    server's handler try/except only catches handler errors, and
+    ``encode`` runs at ``writer.write`` time, outside that try. Without
+    ``default=str`` a single circular return value from ``odda eval``
+    raises ``ValueError: Circular reference detected`` and drops the
+    connection with zero bytes - "Server closed connection" to the
+    client.
+    """
+    return json.dumps(message, ensure_ascii=False, default=str).encode("utf-8") + b"\n"

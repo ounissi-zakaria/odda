@@ -52,7 +52,7 @@ does not execute and should have count 0.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
 "taken-branch"
 ```
 
@@ -90,7 +90,7 @@ branch has count >= 2; the not-taken `else` branch still has count 0
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
 "taken-branch"
 ```
 
@@ -140,7 +140,7 @@ recording
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 2
+>   eval --js "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 2
 "taken-branch"
 ```
 
@@ -211,7 +211,7 @@ navigate-time blocks are still in the accumulator at `stop`.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
+>   eval --js "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
 "taken-branch"
 ```
 

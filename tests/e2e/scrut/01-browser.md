@@ -43,7 +43,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list \
 
 ```scrut
 $ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate "http://127.0.0.1:$port/" --browser-id 1 --tab-id 1 \
+>   navigate --url "http://127.0.0.1:$port/" --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
 Navigated to: http://127.0.0.1:* (glob)
 ```
@@ -52,7 +52,7 @@ Navigated to: http://127.0.0.1:* (glob)
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "document.title" --browser-id 1 --tab-id 1
+>   eval --js "document.title" --browser-id 1 --tab-id 1
 "Listener Test"
 ```
 
@@ -78,7 +78,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "1" --file "$TESTDIR/fixtures/eval.js" --browser-id 1 --tab-id 1
+>   eval --js "1" --file "$TESTDIR/fixtures/eval.js" --browser-id 1 --tab-id 1
 [1]
 {"error": "Provide either inline JS or --file, not both"}
 ```
@@ -102,6 +102,23 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 "*/screenshot_*.jpeg" (glob)
 ```
 
+### `screenshot --output` writes to a path the agent chooses
+
+With `--output <path>`, the screenshot is written to that path (the
+parent directory is created) and the returned string is that path.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   screenshot --browser-id 1 --tab-id 1 --output "$PWD/shot.jpeg" \
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin))'
+*/shot.jpeg (glob)
+```
+
+```scrut
+$ test -f "$PWD/shot.jpeg" && echo "file exists"
+file exists
+```
+
 ## `event-listeners` lists listeners on `window` and `document`
 
 The fixture page registers a `resize` listener on `window` and a
@@ -119,7 +136,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   wait-for "document.title" --browser-id 1 --tab-id 1 --timeout 5
+>   wait-for --expression "document.title" --browser-id 1 --tab-id 1 --timeout 5
 "Listener Test"
 ```
 
@@ -127,13 +144,13 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval "setTimeout(() => { window.__waitTest__ = 'arrived'; }, 1000)" \
+>   eval --js "setTimeout(() => { window.__waitTest__ = 'arrived'; }, 1000)" \
 >   --browser-id 1 --tab-id 1 > /dev/null
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   wait-for "window.__waitTest__" --browser-id 1 --tab-id 1 --timeout 5
+>   wait-for --expression "window.__waitTest__" --browser-id 1 --tab-id 1 --timeout 5
 "arrived"
 ```
 
@@ -141,7 +158,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   wait-for "window.__never__" --browser-id 1 --tab-id 1 --timeout 2
+>   wait-for --expression "window.__never__" --browser-id 1 --tab-id 1 --timeout 2
 [1]
 {*"error": "*Timeout*"*} (glob)
 ```

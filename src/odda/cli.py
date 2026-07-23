@@ -221,16 +221,16 @@ def browser_open(
 @browser_app.command("close")
 def browser_close(
     ctx: typer.Context,
-    id: int = typer.Argument(..., help="Browser ID to close"),
+    browser_id: int = typer.Option(..., "--browser-id", help="Browser ID to close"),
 ) -> None:
     """Close a browser instance."""
-    _run_coro(_client(ctx).call("browser/close", {"id": id}))
+    _run_coro(_client(ctx).call("browser/close", {"id": browser_id}))
 
 
 @app.command()
 def navigate(
     ctx: typer.Context,
-    url: str = typer.Argument(..., help="URL to navigate to"),
+    url: str = typer.Option(..., "--url", help="URL to navigate to"),
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
 ) -> None:
@@ -246,7 +246,7 @@ def navigate(
 @app.command("eval")
 def eval_js(
     ctx: typer.Context,
-    js: str | None = typer.Argument(None, help="JavaScript code to execute"),
+    js: str | None = typer.Option(None, "--js", help="JavaScript code to execute"),
     file: Path | None = typer.Option(
         None,
         "--file",
@@ -283,8 +283,8 @@ def eval_js(
 @app.command("wait-for")
 def wait_for(
     ctx: typer.Context,
-    expression: str = typer.Argument(
-        ..., help="JavaScript expression to poll until truthy"
+    expression: str = typer.Option(
+        ..., "--expression", help="JavaScript expression to poll until truthy"
     ),
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
@@ -317,11 +317,18 @@ def screenshot(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    output: str | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Path to write the JPEG to (default: a temp file)",
+    ),
 ) -> None:
     """Capture a screenshot of the target tab's viewport."""
-    _run_coro(
-        _client(ctx).call("screenshot", {"browser_id": browser_id, "tab_id": tab_id})
-    )
+    payload: dict[str, Any] = {"browser_id": browser_id, "tab_id": tab_id}
+    if output is not None:
+        payload["output"] = output
+    _run_coro(_client(ctx).call("screenshot", payload))
 
 
 # --- page interaction (snapshot + ref-driven actions) ----------------------
@@ -351,7 +358,7 @@ def page_click(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
-    ref: str = typer.Argument(..., help="Element ref from a snapshot (e.g. e2)"),
+    ref: str = typer.Option(..., "--ref", help="Element ref from a snapshot (e.g. e2)"),
     timeout: float = typer.Option(
         5.0, "--timeout", help="Timeout in seconds (default 5)"
     ),
@@ -379,8 +386,8 @@ def page_fill(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
-    ref: str = typer.Argument(..., help="Element ref from a snapshot"),
-    value: str = typer.Argument(..., help="Value to fill (clears first)"),
+    ref: str = typer.Option(..., "--ref", help="Element ref from a snapshot"),
+    value: str = typer.Option(..., "--value", help="Value to fill (clears first)"),
     timeout: float = typer.Option(
         5.0, "--timeout", help="Timeout in seconds (default 5)"
     ),
@@ -410,7 +417,7 @@ def page_hover(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
-    ref: str = typer.Argument(..., help="Element ref from a snapshot"),
+    ref: str = typer.Option(..., "--ref", help="Element ref from a snapshot"),
     timeout: float = typer.Option(
         5.0, "--timeout", help="Timeout in seconds (default 5)"
     ),
@@ -437,7 +444,7 @@ def page_upload(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
-    ref: str = typer.Argument(..., help="Element ref of the file input"),
+    ref: str = typer.Option(..., "--ref", help="Element ref of the file input"),
     files: list[str] = typer.Option(
         ...,
         "--file",
@@ -674,7 +681,7 @@ def wrap_remove(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
-    name: str = typer.Argument(..., help="Name of the wrap to remove"),
+    name: str = typer.Option(..., "--name", help="Name of the wrap to remove"),
 ) -> None:
     """Remove a wrap's userscript and reload the extension.
 
@@ -694,20 +701,25 @@ def wrap_dump(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    name: str | None = typer.Option(
+        None,
+        "--name",
+        help="Only return records from the wrap with this name",
+    ),
 ) -> None:
     """Read the per-tab wrap record array.
 
     Each record is ``{wrap, type, this, args, ret, stack, error?}``.
     Functions in args/ret/this are serialized as ``{type: "function",
-    name}``; large or cyclic values are truncated. Records are wiped
-    on navigation, so dump before navigating again.
+    name, source}`` where ``source`` is the function's ``.toString()``
+    capped at 1000 chars; large or cyclic values are truncated. Records
+    are wiped on navigation, so dump before navigating again. Pass
+    ``--name`` to filter server-side to one wrap's records.
     """
-    _run_coro(
-        _client(ctx).call(
-            "wrap/dump",
-            {"browser_id": browser_id, "tab_id": tab_id},
-        )
-    )
+    payload: dict[str, Any] = {"browser_id": browser_id, "tab_id": tab_id}
+    if name is not None:
+        payload["name"] = name
+    _run_coro(_client(ctx).call("wrap/dump", payload))
 
 
 @wrap_app.command("clear")
@@ -869,7 +881,7 @@ def logpoint_remove(
 @request_app.command("clone")
 def request_clone(
     ctx: typer.Context,
-    flow_id: str = typer.Argument(..., help="Flow id to clone (e.g. 00042)"),
+    flow_id: str = typer.Option(..., "--flow-id", help="Flow id to clone (e.g. 00042)"),
     name: str = typer.Option(..., "--name", help="Name for the editable request"),
     force: bool = typer.Option(
         False, "--force", help="Overwrite an existing request of the same name"
@@ -917,7 +929,9 @@ def request_new(
 @request_app.command("send")
 def request_send(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="Name of the editable request to send"),
+    name: str = typer.Option(
+        ..., "--name", help="Name of the editable request to send"
+    ),
     fix_content_length: bool = typer.Option(
         False,
         "--fix-content-length",
@@ -947,7 +961,7 @@ def userscript_install(
     ctx: typer.Context,
     name: str = typer.Option(..., "--name", help="Name for the userscript"),
     browser_id: int = typer.Option(
-        ..., "--browser-id", help="Browser to reload the extension on"
+        ..., "--browser-id", help="Browser whose scope to install into"
     ),
     file: Path | None = typer.Option(
         None, "--file", "-f", help="JavaScript file to install"
@@ -958,13 +972,12 @@ def userscript_install(
         help="Inline JavaScript source (mutually exclusive with --file)",
     ),
 ) -> None:
-    """Install a userscript from a file or inline source.
+    """Install a userscript from a file or inline source into the given browser's scope.
 
     The script runs at document_start in the main world on every page,
     before the page's own scripts. Overwrites any existing userscript
-    of the same name. The extension is reloaded on the given browser;
-    existing already-loaded tabs are not re-injected (re-navigate to
-    apply).
+    of the same name. The browser's extension is reloaded; existing
+    already-loaded tabs are not re-injected (re-navigate to apply).
     """
     if file is not None and source is not None:
         _output_json({"error": "Provide either --file or --source, not both"})
@@ -987,20 +1000,25 @@ def userscript_install(
 
 
 @userscript_app.command("list")
-def userscript_list(ctx: typer.Context) -> None:
-    """List installed userscripts."""
-    _run_coro(_client(ctx).call("userscript/list"))
+def userscript_list(
+    ctx: typer.Context,
+    browser_id: int = typer.Option(
+        ..., "--browser-id", help="Browser whose scope to list"
+    ),
+) -> None:
+    """List installed userscripts for the given browser."""
+    _run_coro(_client(ctx).call("userscript/list", {"browser_id": browser_id}))
 
 
 @userscript_app.command("remove")
 def userscript_remove(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="Name of the userscript to remove"),
+    name: str = typer.Option(..., "--name", help="Name of the userscript to remove"),
     browser_id: int = typer.Option(
-        ..., "--browser-id", help="Browser to reload the extension on"
+        ..., "--browser-id", help="Browser whose scope to remove from"
     ),
 ) -> None:
-    """Remove a userscript and reload the extension on the given browser."""
+    """Remove a userscript from the given browser's scope and reload its extension."""
     _run_coro(
         _client(ctx).call("userscript/remove", {"name": name, "browser_id": browser_id})
     )

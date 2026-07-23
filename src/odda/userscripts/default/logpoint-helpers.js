@@ -17,7 +17,15 @@ if (!window.__oddaSerialize) {
     if (v === null) return null;
     if (v === undefined) return undefined;
     var t = typeof v;
-    if (t === 'function') return {type: 'function', name: v.name || null};
+    if (t === 'function') {
+      try {
+        var src = String(v);
+        if (src.length > 1000) src = src.substring(0, 1000) + '...';
+        return {type: 'function', name: v.name || null, source: src};
+      } catch (e) {
+        return {type: 'function', name: v.name || null};
+      }
+    }
     if (t === 'string') {
       if (v.length > 10000) return {type: 'string', truncated: true, length: v.length, preview: v.substring(0, 10000)};
       return v;
