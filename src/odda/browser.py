@@ -385,9 +385,19 @@ class BrowserInstance:
             return f"JavaScript error: {exc!s}"
 
     async def wait_for(self, tab_id: int, expression: str, *, timeout_ms: float) -> Any:
-        """Poll a JS expression until truthy or timeout in the target tab."""
+        """Poll a JS expression until truthy or timeout in the target tab.
+
+        A thrown error inside the expression is treated as falsy and
+        polling continues — ``wait-for`` exists for "the DOM isn't ready
+        yet", so a null deref (e.g. ``document.querySelector('#root').children``
+        while ``#root`` is still absent) keeps polling until truthy or
+        timeout rather than crashing on the first throw.
+        """
         page = self._require_tab(tab_id)
-        fn = f"() => {{ const v = ({expression}); return v ? v : false; }}"
+        fn = (
+            "() => { try { const v = (" + expression + "); return v ? v : false; }"
+            " catch (e) { return false; } }"
+        )
         try:
             handle = await page.wait_for_function(fn, timeout=timeout_ms)
         except Exception as exc:

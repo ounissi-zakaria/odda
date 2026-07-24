@@ -72,6 +72,8 @@ Add the targeting flags from the Targeting model above to every command below �
 
 Drives Chrome: open/navigate, run JS, take screenshots, and interact with the page by snapshot+ref. All tab-scoped unless noted.
 
+**All browser traffic is routed through odda's HTTP proxy and captured as flows.** Every request/response the page makes — navigations, XHR/fetch, sub-resources, `window.open` popups — is saved under `.odda/flows/<id>/` (request bytes, response body, headers, timing). Read the response body from `.odda/flows/<id>/response_body.*` (see [FLOWS.md](FLOWS.md)) instead of extracting it from the page via `eval`; read `flows.jsonl` for the index. This means driving the browser *is* traffic capture — there's no separate "record" toggle.
+
 - `odda browser open [--headless]` — Open a new Chrome window. Returns `{browser_id, tab_id, status}`; the initial tab is ready immediately. `--headless` runs Chrome without a visible window (CI/automated testing).
 - `odda browser close` — Close a browser instance. Tearing down is immediate; any in-flight tab ops on that browser error cleanly. For an overview of all browsers and their tabs use `odda tabs list` (no `--browser-id`); `odda status` reports the open browser count.
 - `odda tabs list [--browser-id <id>]` — List tabs grouped by browser as `[{browser_id, tabs: [{tab_id, url, title}]}]`. Without `--browser-id`, lists every open browser (a browser with zero tabs appears with `tabs: []`); with it, lists one browser's tabs.
@@ -79,7 +81,7 @@ Drives Chrome: open/navigate, run JS, take screenshots, and interact with the pa
 - `odda tabs close` — Close an individual tab. Closing the **last** tab leaves the browser open with zero tabs (matching Chrome's behavior); the browser can still accept `tabs open` later. To close the whole browser use `odda browser close`.
 - `odda navigate --url <url>` — Navigate an existing tab to a URL. To open a tab, use `odda tabs open`. Navigation failures (network error, invalid URL, or `load`-event timeout) raise a JSON error with non-zero exit; the timeout error message points at `odda wait-for` for SPAs whose `load` event never fires.
 - `odda eval --js "<js>"` — Execute JavaScript in the target tab and return the result. Pass an expression, not a `return` statement (`return` is illegal at the top level — use an IIFE `(()=>{ ... })()` if you need statements). Returned Promises are awaited automatically: `fetch(url).then(r => r.status)` returns `200`, not a Promise object. Return a serializable value from async expressions — bare `fetch(url)` returns `{}` because the resolved `Response` is not JSON-serializable; chain `.then(r => r.text())` or similar. `--file <path>` loads JavaScript from a file (mutually exclusive with `--js`; useful for multi-line scripts and shell-escape avoidance). **`odda eval` JSON.stringify-encodes the result; calling `JSON.stringify` inside your JS double-encodes — return a plain object and let odda do the outer stringify.**
-- `odda wait-for --expression "<expr>" [--timeout N]` — Poll a JS expression until it's truthy or the timeout (default 30s) is reached. Uses Playwright's `wait_for_function`, which polls in-browser with no round-trips. Runs in the main world, so it sees page globals and userscript-injected helpers. Returns the truthy value on success; errors with non-zero exit code on timeout. Example: `odda wait-for --expression "document.querySelector('.sdk-ready')" --timeout 10`.
+- `odda wait-for --expression "<expr>" [--timeout N]` — Poll a JS expression until it's truthy or the timeout (default 30s) is reached. Uses Playwright's `wait_for_function`, which polls in-browser with no round-trips. Runs in the main world, so it sees page globals and userscript-injected helpers. **A thrown error inside the expression is treated as falsy and polling continues** — so `document.querySelector('#root').children.length` keeps polling while `#root` is still absent instead of crashing on the null deref. Returns the truthy value on success; errors with non-zero exit code on timeout. Example: `odda wait-for --expression "document.querySelector('.sdk-ready')" --timeout 10`.
 - `odda screenshot [--output <path>]` — Capture a JPEG screenshot of the target tab's viewport. Returns the path to the screenshot file (a bare string). By default a temp file is generated; pass `--output <path>` to write to a path you choose (the parent directory is created).
 - `odda event-listeners` — List JavaScript event listeners attached to `window` and `document` in the target tab.
 
@@ -104,7 +106,7 @@ Commands (all tab-scoped):
 
 All action commands accept `--timeout` (default 5 seconds) for ref resolution and the action itself. This is shorter than `wait-for`'s 30s default because actions are interactive — the agent wants to know quickly when something didn't work. A stale ref errors within the timeout, not after a 30-second Playwright hang.
 
-Navigations driven by `odda navigate` or `page click` flow through odda's proxy and are captured as flows — you can read the response body from `.odda/flows/<id>/response_body.*` (see [FLOWS.md](FLOWS.md)) instead of extracting it from the page via `eval`.
+Navigations driven by `odda navigate` or `page click` are captured as flows like all browser traffic (see the note at the top of this section and [FLOWS.md](FLOWS.md)) — read the response body from `.odda/flows/<id>/response_body.*` instead of extracting it from the page via `eval`.
 
 ## Userscripts (cross-cutting)
 
@@ -123,6 +125,13 @@ Observing JavaScript execution in progress — recording what code does as it ru
 - **Wrap** — "I know the function/property" → wrap it and record each call/access.
 - **Logpoint** — "I know the line" → plant a non-pausing observation at a source location.
 - **Coverage** — "I know neither" → record which code blocks execute, then find the path.
+
+**Common intents, mapped to the right concept** (reach for these before writing a custom userscript to wrap/observe JS):
+
+- **"I want to intercept/log a DOM event or API call"** (e.g. `postMessage` handlers, `JSON.parse`, `addEventListener`) → **Wrap** (`odda wrap calls add --expr EventTarget.prototype.addEventListener` or the specific function). This replaces hand-writing a userscript to hook a function; the wrap records each call with `this`/`args`/`ret`/`stack` and takes effect on the next navigation.
+- **"I want to trace untrusted data from a DOM source to where it's checked or sinks"** (e.g. a `postMessage` handler → `innerHTML`, `location.hash` → a sink) → the worked recipe at [recipes/dom-data-flow-tracing.md](recipes/dom-data-flow-tracing.md): Wrap the source API to confirm the touch + capture the handler, Coverage to find the code path the handler runs, Logpoint at the check line to read the locals (e.g. `event.origin`).
+- **"A trigger happened and I don't know which code ran"** (click, message, navigation) → **Coverage** (`coverage start` → trigger → `coverage stop`), then read the script URL + block ranges that ran.
+- **"I know the source line and want to read the locals there"** → **Logpoint** (`logpoint add --url <u> --line <n> --col <n> --expr "<local>"`); the expression is evaluated in the paused frame's scope, so it reads locals by name without modifying behavior.
 
 **Records wipe on navigation — dump before navigating again or the records are lost.** This applies to Wrap and Logpoint; Coverage is navigation-persistent (see [DYNAMIC-ANALYSIS.md](DYNAMIC-ANALYSIS.md)). **Logpoint's `--col` is required** — minified code packs many statements per line, and without the column the logpoint binds to the wrong statement.
 

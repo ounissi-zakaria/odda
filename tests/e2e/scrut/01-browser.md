@@ -191,6 +191,24 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 {*"error": "*Timeout*"*} (glob)
 ```
 
+## `wait-for` treats a thrown error as falsy and keeps polling
+
+The fixture page has no `#root` element, so
+`document.querySelector('#root').children.length` throws a `TypeError`
+(null deref) on every poll. `wait-for` catches the throw and keeps
+polling until the timeout, rather than crashing on the first
+evaluation. The whole point of `wait-for` is "the DOM isn't ready
+yet" — a null deref is the common pre-DOM-ready case, not a fatal
+error. This times out cleanly like any never-truthy condition.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   wait-for --expression "document.querySelector('#root').children.length > 0" \
+>   --browser-id 1 --tab-id 1 --timeout 2
+[1]
+{*"error": "*Timeout*"*} (glob)
+```
+
 ## Teardown: stop the fixture server
 
 ```scrut
