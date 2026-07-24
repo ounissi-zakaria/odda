@@ -106,8 +106,6 @@ Commands (all tab-scoped):
 
 All action commands accept `--timeout` (default 5 seconds) for ref resolution and the action itself. This is shorter than `wait-for`'s 30s default because actions are interactive — the agent wants to know quickly when something didn't work. A stale ref errors within the timeout, not after a 30-second Playwright hang.
 
-Navigations driven by `odda navigate` or `page click` are captured as flows like all browser traffic (see the note at the top of this section and [FLOWS.md](FLOWS.md)) — read the response body from `.odda/flows/<id>/response_body.*` instead of extracting it from the page via `eval`.
-
 ## Userscripts (cross-cutting)
 
 `odda userscript` manages JavaScript helpers that auto-run at `document_start` on every navigation, before the page's own scripts. Install a helper once and it runs before the page's own scripts on every `odda navigate` and `odda tabs open`, in the main world. Useful for both browser automation (inject helpers) and dynamic analysis (Wraps are userscripts; see [USERSCRIPTS.md](USERSCRIPTS.md)).
