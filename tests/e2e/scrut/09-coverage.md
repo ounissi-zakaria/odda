@@ -38,34 +38,36 @@ $ open_browser_fixture /coverage.html "typeof window.__oddaCoverageFixture === '
 
 ## `coverage start` enables precise block-level coverage
 
+Text mode prints just the status value (`recording`).
+
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   coverage start --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"])'
+>   coverage start --browser-id 1 --tab-id 1
 recording
 ```
 
 ## Trigger only the taken branch
 
 Calling `handleBranch(true)` runs the `if` branch; the `else` branch
-does not execute and should have count 0.
+does not execute and should have count 0. `eval` renders the returned
+JS string without quotes in text mode.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
-"taken-branch"
+taken-branch
 ```
 
 ## `coverage snapshot` reads counts mid-recording without stopping
 
 `snapshot` returns the delta since the previous take (or since `start`
-if this is the first take). The snapshot must include the fixture
-script URL, with at least one block having count > 0 (the taken
-branch) and at least one block having count 0 (the not-taken `else`
-branch — the negative space).
+if this is the first take). The snapshot is a nested record (scripts →
+functions → ranges), whose structural properties ("a fixture-script
+block has count > 0 and another has count 0") cannot be expressed as
+text matching, so this assertion stays on `--json` + python.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   coverage snapshot --browser-id 1 --tab-id 1 \
 >   | python3 -c '
 > import json, sys
@@ -91,11 +93,11 @@ branch has count >= 2; the not-taken `else` branch still has count 0
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
-"taken-branch"
+taken-branch
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   coverage stop --browser-id 1 --tab-id 1 \
 >   | python3 -c '
 > import json, sys
@@ -110,20 +112,21 @@ True True
 A second `stop` errors: the recording flag was cleared by the first
 `stop`.
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   coverage stop --browser-id 1 --tab-id 1
 [1]
-{"error": "Server error (-32602): Tab 1 is not recording coverage."}
+Error: Tab 1 is not recording coverage.
 ```
 
 ## Coverage is per-tab: starting on one tab does not affect another
 
 Open a second tab and confirm a fresh recording on it is independent
-of the recording on tab 1 (already stopped).
+of the recording on tab 1 (already stopped). `tabs open` returns a
+flat dict; pluck `tab_id` via `--json` + python.
 
 ```scrut
-$ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   tabs open --browser-id 1 --url "http://127.0.0.1:$port/coverage.html" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["tab_id"])'
 2
@@ -133,19 +136,18 @@ Start coverage on tab 2; tab 1 is not recording (already stopped).
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   coverage start --browser-id 1 --tab-id 2 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"])'
+>   coverage start --browser-id 1 --tab-id 2
 recording
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 2
-"taken-branch"
+taken-branch
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   coverage stop --browser-id 1 --tab-id 2 \
 >   | python3 -c '
 > import json, sys
@@ -185,7 +187,7 @@ navigate-time count to a file so the `stop` assertion can prove the
 accumulator retained it across the rest of the window.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   coverage snapshot --browser-id 1 --tab-id 1 \
 >   | python3 -c '
 > import json, sys
@@ -212,11 +214,11 @@ navigate-time blocks are still in the accumulator at `stop`.
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "String(window.__oddaCoverageFixture(true))" --browser-id 1 --tab-id 1
-"taken-branch"
+taken-branch
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   coverage stop --browser-id 1 --tab-id 1 \
 >   | python3 -c '
 > import json, sys
@@ -231,34 +233,34 @@ True True
 
 ## Errors on a missing tab
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   coverage start --browser-id 1 --tab-id 9999
 [1]
-{"error": "Server error (-32602): Tab 9999 not found in browser 1."}
+Error: Tab 9999 not found in browser 1.
 ```
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   coverage snapshot --browser-id 1 --tab-id 9999
 [1]
-{"error": "Server error (-32602): Tab 9999 not found in browser 1."}
+Error: Tab 9999 not found in browser 1.
 ```
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   coverage stop --browser-id 1 --tab-id 9999
 [1]
-{"error": "Server error (-32602): Tab 9999 not found in browser 1."}
+Error: Tab 9999 not found in browser 1.
 ```
 
 ## Errors on a missing browser
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   coverage start --browser-id 9999 --tab-id 1
 [1]
-{"error": "Server error (-32602): Browser 9999 not found."}
+Error: Browser 9999 not found.
 ```
 
 ## Teardown: stop the fixture server

@@ -29,11 +29,17 @@ $ wait_for_dyn_server
 
 ## `request new` creates an empty `request` and a `meta.json`
 
+`request new` text output is `name`/`path`/`scheme`/`host`/`port`
+lines. We grep the three stable lines (`path` is a temp-dir-dependent
+absolute path, so it's not asserted here).
+
 ```scrut
 $ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request new --name h1-test --host 127.0.0.1 --port $port \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"])'
-h1-test https 127.0.0.1
+>   | grep -E '^(name: h1-test|scheme: https|host: 127\.0\.0\.1)$' | sort
+host: 127.0.0.1
+name: h1-test
+scheme: https
 ```
 
 ```scrut
@@ -53,19 +59,29 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=h1-send-test&status=200&heade
 
 ## `request send` records the flow and returns the `flows.jsonl` record
 
+`request send` text output is `id`/`method`/`scheme`/`host`/`port`/
+`path`/`status_code`/`total_duration_ms`/`body_file`/`error` lines. We
+grep out the `status_code` and `body_file` lines to assert them
+directly (the flow id inside `body_file` is run-dependent, so it's
+globbed).
+
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send --name h1-test --insecure --timeout 10 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status_code"], "id=" + d["id"], d["body_file"])'
-200 id=* flows/*/response_body.json (glob)
+>   | grep -E '^(status_code: 200|body_file: flows/.*/response_body\.json)$'
+status_code: 200
+body_file: flows/*/response_body.json (glob)
 ```
 
-The response body is the body we asked for in the query string.
+The response body is the body we asked for in the query string. To
+read it back we need the flow id, so a second `request send` captures
+the id into a shell var via `--json` (the documented way to pull a
+structured value out for scripting).
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   request send --name h1-test --insecure --timeout 10 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/flow_id"
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/flow_id"
 ```
 
 ```scrut

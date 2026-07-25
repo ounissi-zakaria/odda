@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from odda import __version__, client, server
+from odda import __version__, client, render, server
 from odda.opencode.install import install_opencode_assets
 
 app = typer.Typer(
@@ -57,26 +58,92 @@ def _output_json(data: Any) -> None:
     typer.echo(json.dumps(data, ensure_ascii=False))
 
 
-def _run_coro_raw(coro: asyncio.coroutine) -> Any:  # type: ignore[type-arg]
-    """Run an async coroutine and return its result without printing.
+# Strips the ``Server error (-NNNN): `` JSON-RPC prefix from a message
+# so the text-mode error reads as ``Error: Browser 9999 not found.``
+_RPC_PREFIX = re.compile(r"^Server error \(-\d+\): ")
 
-    Errors are printed as JSON and result in a non-zero exit code.
+
+def _emit_error(message: str, *, json_mode: bool) -> None:
+    """Print an error in the requested mode.
+
+    Text mode: ``Error: <message>`` on stderr (stdout stays clean for
+    pipes). JSON mode: ``{"error": <message>}`` on stdout. The JSON-RPC
+    ``Server error (-NNNN): `` prefix is stripped in text mode.
+    """
+    if json_mode:
+        _output_json({"error": message})
+        return
+    clean = _RPC_PREFIX.sub("", message)
+    typer.echo(f"Error: {clean}", err=True)
+
+
+def _fallback_render(value: Any) -> None:
+    """Print a value with no registered renderer (strings raw, else JSON)."""
+    if isinstance(value, str):
+        typer.echo(value)
+    else:
+        _output_json(value)
+
+
+def _run_coro_raw(
+    coro: asyncio.coroutine,  # type: ignore[type-arg]
+    *,
+    json_mode: bool,
+    render_key: str | None = None,
+) -> Any:
+    """Run an async coroutine and emit its result.
+
+    In text mode the result is passed to the renderer named by
+    ``render_key`` (looked up in :data:`odda.render.RENDERERS` and
+    dispatched via :func:`odda.render.render`); if no renderer is
+    registered, :func:`_fallback_render` prints the raw value. In JSON
+    mode the result is printed as JSON. Errors are emitted via
+    :func:`_emit_error` and result in a non-zero exit code.
     """
     try:
-        return asyncio.run(coro)
+        result = asyncio.run(coro)
     except Exception as exc:
-        _output_json({"error": str(exc)})
+        _emit_error(str(exc), json_mode=json_mode)
         raise typer.Exit(code=1) from exc
-
-
-def _run_coro(coro: asyncio.coroutine) -> Any:  # type: ignore[type-arg]
-    """Run an async coroutine and print its result as JSON.
-
-    Errors are printed as JSON with a non-zero exit code.
-    """
-    result = _run_coro_raw(coro)
-    _output_json(result)
+    if json_mode:
+        _output_json(result)
+        return result
+    if render_key is not None and render_key in render.RENDERERS:
+        typer.echo(render.render(result, render.RENDERERS[render_key]))
+        return result
+    _fallback_render(result)
     return result
+
+
+def _run_coro(
+    coro: asyncio.coroutine,  # type: ignore[type-arg]
+    ctx: typer.Context,
+    render_key: str,
+) -> Any:
+    """Run a coroutine and emit its result using the context's json flag."""
+    return _run_coro_raw(coro, json_mode=ctx.obj["json"], render_key=render_key)
+
+
+def _run_value(
+    value: Any,
+    *,
+    json_mode: bool,
+    render_key: str,
+) -> None:
+    """Emit a sync result (no coroutine) in the requested mode.
+
+    The sync sibling of :func:`_run_coro_raw` for the few commands whose
+    result is computed in-process (``version``, ``install-opencode``)
+    rather than fetched from the server. Renders via the same renderer
+    registry; errors go through :func:`_emit_error` by the caller.
+    """
+    if json_mode:
+        _output_json(value)
+        return
+    if render_key in render.RENDERERS:
+        typer.echo(render.render(value, render.RENDERERS[render_key]))
+        return
+    _fallback_render(value)
 
 
 @app.callback()
@@ -94,9 +161,14 @@ def cli_callback(
         envvar="ODDA_DATA_DIR",
         help="Data directory used by the odda server",
     ),
+    json_mode: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit structured JSON output (default is human-readable text)",
+    ),
 ) -> None:
     """Odda CLI."""
-    ctx.obj = {"socket": socket, "data_dir": data_dir}
+    ctx.obj = {"socket": socket, "data_dir": data_dir, "json": json_mode}
 
 
 def _client(ctx: typer.Context) -> client.OddaClient:
@@ -112,35 +184,40 @@ def _resolve_data_dir(ctx: typer.Context) -> Path:
     try:
         status = asyncio.run(_client(ctx).call("status"))
     except client.OddaClientError as exc:
-        msg = f"Could not determine data directory from server: {exc}"
-        raise typer.BadParameter(msg) from exc
+        _emit_error(
+            f"Could not determine data directory from server: {exc}",
+            json_mode=ctx.obj["json"],
+        )
+        raise typer.Exit(code=1) from exc
     data_dir = status.get("data_dir")
     if not data_dir:
-        msg = "Server did not report a data directory"
-        raise typer.BadParameter(msg)
+        _emit_error(
+            "Server did not report a data directory",
+            json_mode=ctx.obj["json"],
+        )
+        raise typer.Exit(code=1)
     return Path(data_dir)
 
 
 @app.command()
-def version() -> None:
+def version(ctx: typer.Context) -> None:
     """Print odda version."""
-    _output_json({"version": __version__})
+    _run_value(
+        {"version": __version__}, json_mode=ctx.obj["json"], render_key="version"
+    )
 
 
 @app.command()
-def install_opencode() -> None:
+def install_opencode(ctx: typer.Context) -> None:
     """Install the OpenCode plugin and skill."""
+    json_mode = ctx.obj["json"]
     try:
         plugin_path, skill_path = install_opencode_assets()
-        _output_json(
-            {
-                "plugin": str(plugin_path),
-                "skill": str(skill_path),
-            }
-        )
+        result = {"plugin": str(plugin_path), "skill": str(skill_path)}
     except Exception as exc:
-        _output_json({"error": str(exc)})
+        _emit_error(str(exc), json_mode=json_mode)
         raise typer.Exit(code=1) from exc
+    _run_value(result, json_mode=json_mode, render_key="install-opencode")
 
 
 @app.command("server")
@@ -167,7 +244,7 @@ def server_cmd(
 @app.command()
 def status(ctx: typer.Context) -> None:
     """Show server status."""
-    _run_coro(_client(ctx).call("status"))
+    _run_coro(_client(ctx).call("status"), ctx, "status")
 
 
 @app.command()
@@ -177,13 +254,14 @@ def logs(
     n: int = typer.Option(50, "--n", help="Number of lines to show"),
 ) -> None:
     """Show server logs."""
+    json_mode = ctx.obj["json"]
     log_file = _resolve_data_dir(ctx) / "server.log"
     if not log_file.exists():
-        _output_json({"error": f"Log file not found: {log_file}"})
+        _emit_error(f"Log file not found: {log_file}", json_mode=json_mode)
         raise typer.Exit(code=1)
 
     if follow:
-        # Simple tail -f implementation, one JSON object per line
+        # Tail -f: stream raw lines (text) or {"line": ...} (json).
         with log_file.open("r") as f:
             f.seek(0, 2)
             try:
@@ -192,19 +270,29 @@ def logs(
                     if not line:
                         time.sleep(0.1)
                         continue
-                    _output_json({"line": line.rstrip()})
+                    line = line.rstrip()
+                    if json_mode:
+                        _output_json({"line": line})
+                    else:
+                        typer.echo(line)
             except KeyboardInterrupt:
                 return
     else:
-        lines = log_file.read_text().splitlines()
-        _output_json({"lines": lines[-n:]})
+        lines = log_file.read_text().splitlines()[-n:]
+        if json_mode:
+            _output_json({"lines": lines})
+        else:
+            typer.echo("\n".join(lines))
 
 
 @app.command()
 def proxy_url(ctx: typer.Context) -> None:
     """Return the HTTP proxy URL."""
-    result = _run_coro_raw(_client(ctx).call("proxy/url"))
-    typer.echo(result)
+    _run_coro_raw(
+        _client(ctx).call("proxy/url"),
+        json_mode=ctx.obj["json"],
+        render_key="proxy/url",
+    )
 
 
 @browser_app.command("open")
@@ -215,7 +303,9 @@ def browser_open(
     ),
 ) -> None:
     """Open a new browser window."""
-    _run_coro(_client(ctx).call("browser/open", {"headless": headless}))
+    _run_coro(
+        _client(ctx).call("browser/open", {"headless": headless}), ctx, "browser/open"
+    )
 
 
 @browser_app.command("close")
@@ -224,7 +314,9 @@ def browser_close(
     browser_id: int = typer.Option(..., "--browser-id", help="Browser ID to close"),
 ) -> None:
     """Close a browser instance."""
-    _run_coro(_client(ctx).call("browser/close", {"id": browser_id}))
+    _run_coro(
+        _client(ctx).call("browser/close", {"id": browser_id}), ctx, "browser/close"
+    )
 
 
 @app.command()
@@ -239,7 +331,9 @@ def navigate(
         _client(ctx).call(
             "navigate",
             {"url": url, "browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "navigate",
     )
 
 
@@ -261,22 +355,25 @@ def eval_js(
     Pass JS inline as an argument, or use --file <path> to load a multi-line
     script from a file. The two are mutually exclusive.
     """
+    json_mode = ctx.obj["json"]
     if file is not None and js is not None:
-        _output_json({"error": "Provide either inline JS or --file, not both"})
+        _emit_error("Provide either inline JS or --file, not both", json_mode=json_mode)
         raise typer.Exit(code=1)
     if file is None and js is None:
-        _output_json({"error": "Provide inline JS or --file <path>"})
+        _emit_error("Provide inline JS or --file <path>", json_mode=json_mode)
         raise typer.Exit(code=1)
     if file is not None:
         if not file.is_file():
-            _output_json({"error": f"File not found: {file}"})
+            _emit_error(f"File not found: {file}", json_mode=json_mode)
             raise typer.Exit(code=1)
         js = file.read_text(encoding="utf-8")
     _run_coro(
         _client(ctx).call(
             "eval",
             {"js": js, "browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "eval",
     )
 
 
@@ -308,7 +405,9 @@ def wait_for(
                 "browser_id": browser_id,
                 "tab_id": tab_id,
             },
-        )
+        ),
+        ctx,
+        "wait-for",
     )
 
 
@@ -328,7 +427,7 @@ def screenshot(
     payload: dict[str, Any] = {"browser_id": browser_id, "tab_id": tab_id}
     if output is not None:
         payload["output"] = output
-    _run_coro(_client(ctx).call("screenshot", payload))
+    _run_coro(_client(ctx).call("screenshot", payload), ctx, "screenshot")
 
 
 # --- page interaction (snapshot + ref-driven actions) ----------------------
@@ -349,7 +448,11 @@ def page_snapshot(
     continue to work until their element leaves the DOM.
     """
     _run_coro(
-        _client(ctx).call("page/snapshot", {"browser_id": browser_id, "tab_id": tab_id})
+        _client(ctx).call(
+            "page/snapshot", {"browser_id": browser_id, "tab_id": tab_id}
+        ),
+        ctx,
+        "page/snapshot",
     )
 
 
@@ -377,7 +480,9 @@ def page_click(
                 "ref": ref,
                 "timeout": timeout,
             },
-        )
+        ),
+        ctx,
+        "page/click",
     )
 
 
@@ -408,7 +513,9 @@ def page_fill(
                 "value": value,
                 "timeout": timeout,
             },
-        )
+        ),
+        ctx,
+        "page/fill",
     )
 
 
@@ -435,7 +542,9 @@ def page_hover(
                 "ref": ref,
                 "timeout": timeout,
             },
-        )
+        ),
+        ctx,
+        "page/hover",
     )
 
 
@@ -469,7 +578,9 @@ def page_upload(
                 "files": files,
                 "timeout": timeout,
             },
-        )
+        ),
+        ctx,
+        "page/upload",
     )
 
 
@@ -484,7 +595,7 @@ def tabs_list(
     payload: dict[str, Any] = {}
     if browser_id is not None:
         payload["browser_id"] = browser_id
-    _run_coro(_client(ctx).call("tabs/list", payload))
+    _run_coro(_client(ctx).call("tabs/list", payload), ctx, "tabs/list")
 
 
 @tabs_app.command("open")
@@ -502,7 +613,7 @@ def tabs_open(
     payload: dict[str, Any] = {"browser_id": browser_id}
     if url is not None:
         payload["url"] = url
-    _run_coro(_client(ctx).call("tabs/open", payload))
+    _run_coro(_client(ctx).call("tabs/open", payload), ctx, "tabs/open")
 
 
 @tabs_app.command("close")
@@ -513,7 +624,9 @@ def tabs_close(
 ) -> None:
     """Close a tab in a browser."""
     _run_coro(
-        _client(ctx).call("tabs/close", {"browser_id": browser_id, "tab_id": tab_id})
+        _client(ctx).call("tabs/close", {"browser_id": browser_id, "tab_id": tab_id}),
+        ctx,
+        "tabs/close",
     )
 
 
@@ -528,7 +641,9 @@ def event_listeners(
         _client(ctx).call(
             "event/listeners",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "event/listeners",
     )
 
 
@@ -549,7 +664,9 @@ def coverage_start(
         _client(ctx).call(
             "coverage/start",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "coverage/start",
     )
 
 
@@ -568,7 +685,9 @@ def coverage_snapshot(
         _client(ctx).call(
             "coverage/snapshot",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "coverage/snapshot",
     )
 
 
@@ -587,7 +706,9 @@ def coverage_stop(
         _client(ctx).call(
             "coverage/stop",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "coverage/stop",
     )
 
 
@@ -620,7 +741,9 @@ def wrap_calls_add(
                 "expr": expr,
                 "name": name,
             },
-        )
+        ),
+        ctx,
+        "wrap/calls/add",
     )
 
 
@@ -652,7 +775,9 @@ def wrap_access_add(
                 "expr": expr,
                 "name": name,
             },
-        )
+        ),
+        ctx,
+        "wrap/access/add",
     )
 
 
@@ -672,7 +797,9 @@ def wrap_list(
         _client(ctx).call(
             "wrap/list",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "wrap/list",
     )
 
 
@@ -692,7 +819,9 @@ def wrap_remove(
         _client(ctx).call(
             "wrap/remove",
             {"browser_id": browser_id, "tab_id": tab_id, "name": name},
-        )
+        ),
+        ctx,
+        "wrap/remove",
     )
 
 
@@ -719,7 +848,7 @@ def wrap_dump(
     payload: dict[str, Any] = {"browser_id": browser_id, "tab_id": tab_id}
     if name is not None:
         payload["name"] = name
-    _run_coro(_client(ctx).call("wrap/dump", payload))
+    _run_coro(_client(ctx).call("wrap/dump", payload), ctx, "wrap/dump")
 
 
 @wrap_app.command("clear")
@@ -737,7 +866,9 @@ def wrap_clear(
         _client(ctx).call(
             "wrap/clear",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "wrap/clear",
     )
 
 
@@ -796,7 +927,9 @@ def logpoint_add(
                 "col": col,
                 "expr": expr,
             },
-        )
+        ),
+        ctx,
+        "logpoint/add",
     )
 
 
@@ -814,7 +947,9 @@ def logpoint_list(
         _client(ctx).call(
             "logpoint/list",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "logpoint/list",
     )
 
 
@@ -835,7 +970,9 @@ def logpoint_dump(
         _client(ctx).call(
             "logpoint/dump",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "logpoint/dump",
     )
 
 
@@ -854,7 +991,9 @@ def logpoint_clear(
         _client(ctx).call(
             "logpoint/clear",
             {"browser_id": browser_id, "tab_id": tab_id},
-        )
+        ),
+        ctx,
+        "logpoint/clear",
     )
 
 
@@ -874,7 +1013,9 @@ def logpoint_remove(
         _client(ctx).call(
             "logpoint/remove",
             {"browser_id": browser_id, "tab_id": tab_id, "id": id},
-        )
+        ),
+        ctx,
+        "logpoint/remove",
     )
 
 
@@ -892,7 +1033,9 @@ def request_clone(
         _client(ctx).call(
             "request/clone",
             {"flow_id": flow_id, "name": name, "force": force},
-        )
+        ),
+        ctx,
+        "request/clone",
     )
 
 
@@ -922,7 +1065,9 @@ def request_new(
                 "port": port,
                 "force": force,
             },
-        )
+        ),
+        ctx,
+        "request/new",
     )
 
 
@@ -952,7 +1097,9 @@ def request_send(
                 "timeout": timeout,
                 "insecure": insecure,
             },
-        )
+        ),
+        ctx,
+        "request/send",
     )
 
 
@@ -980,14 +1127,16 @@ def userscript_install(
     already-loaded tabs are not re-injected (re-navigate to apply).
     """
     if file is not None and source is not None:
-        _output_json({"error": "Provide either --file or --source, not both"})
+        _emit_error(
+            "Provide either --file or --source, not both", json_mode=ctx.obj["json"]
+        )
         raise typer.Exit(code=1)
     if file is None and source is None:
-        _output_json({"error": "Provide --file <path> or --source <js>"})
+        _emit_error("Provide --file <path> or --source <js>", json_mode=ctx.obj["json"])
         raise typer.Exit(code=1)
     if file is not None:
         if not file.is_file():
-            _output_json({"error": f"File not found: {file}"})
+            _emit_error(f"File not found: {file}", json_mode=ctx.obj["json"])
             raise typer.Exit(code=1)
         payload: dict[str, Any] = {
             "name": name,
@@ -996,7 +1145,11 @@ def userscript_install(
         }
     else:
         payload = {"name": name, "browser_id": browser_id, "source": source}
-    _run_coro(_client(ctx).call("userscript/install", payload))
+    _run_coro(
+        _client(ctx).call("userscript/install", payload),
+        ctx,
+        "userscript/install",
+    )
 
 
 @userscript_app.command("list")
@@ -1007,7 +1160,11 @@ def userscript_list(
     ),
 ) -> None:
     """List installed userscripts for the given browser."""
-    _run_coro(_client(ctx).call("userscript/list", {"browser_id": browser_id}))
+    _run_coro(
+        _client(ctx).call("userscript/list", {"browser_id": browser_id}),
+        ctx,
+        "userscript/list",
+    )
 
 
 @userscript_app.command("remove")
@@ -1020,7 +1177,11 @@ def userscript_remove(
 ) -> None:
     """Remove a userscript from the given browser's scope and reload its extension."""
     _run_coro(
-        _client(ctx).call("userscript/remove", {"name": name, "browser_id": browser_id})
+        _client(ctx).call(
+            "userscript/remove", {"name": name, "browser_id": browser_id}
+        ),
+        ctx,
+        "userscript/remove",
     )
 
 

@@ -47,16 +47,18 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=h2-send-test&status=200&heade
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send --name h2-test --insecure --timeout 10 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status_code"])'
-200
+>   | grep -E '^status_code: 200$'
+status_code: 200
 ```
 
-The response body matches.
+The response body matches. A second `request send` captures the flow id
+into a shell var via `--json` (the documented way to pull a structured
+value out for scripting).
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   request send --name h2-test --insecure --timeout 10 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/h2_flow_id"
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/h2_flow_id"
 ```
 
 ```scrut
@@ -103,12 +105,12 @@ $ port=$(cat "$PWD/dyn_port"); printf 'POST /a?body=cl-ok&status=200&header=Cont
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send --name cl-test --fix-content-length --insecure --timeout 10 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
-200
+>   | grep -E '^status_code: 200$'
+status_code: 200
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   request send --name cl-test --fix-content-length --insecure --timeout 10 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/cl_flow_id"
 ```
@@ -149,22 +151,16 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=gzip-decoded-ok&status=200&he
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send --name gzip-test --insecure --timeout 10 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
-200
-```
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send --name gzip-test --insecure --timeout 10 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"], d["body_file"])'
-* flows/*/response_body.json (glob)
+>   | grep -E '^(status_code: 200|body_file: flows/.*/response_body\.json)$'
+status_code: 200
+body_file: flows/*/response_body.json (glob)
 ```
 
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   request send --name gzip-test --insecure --timeout 10 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' > "$PWD/gzip_flow_id"
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/gzip_flow_id"
 ```
 
 ```scrut
@@ -179,7 +175,11 @@ gzip-decoded-ok (no-eol)
 ## `--insecure` skips TLS verification against a self-signed server
 
 The dyn server uses a self-signed cert (generated at setup time).
-Without `--insecure`, the send errors with a TLS error.
+Without `--insecure`, the send fails with a TLS error — but `request
+send` captures transport failures as error flow records (exit 0, the
+failure recorded as a flow), so the text output is the normal
+`request send` block with `status_code: null`, `body_file: null`, and
+`error: <TLS message>`.
 
 ```scrut
 $ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
@@ -192,9 +192,11 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nC
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send --name insecure-test --timeout 5 2>&1 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("error" in d)'
-True
+>   request send --name insecure-test --timeout 5 \
+>   | grep -E '^(status_code: null|body_file: null|error: .+)$'
+status_code: null
+body_file: null
+error: * (glob)
 ```
 
 With `--insecure`, the send succeeds.
@@ -202,8 +204,8 @@ With `--insecure`, the send succeeds.
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   request send --name insecure-test --insecure --timeout 5 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status_code"])'
-200
+>   | grep -E '^status_code: 200$'
+status_code: 200
 ```
 
 ## Empty `request` file is rejected
@@ -216,11 +218,11 @@ $ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/d
 >   request new --name empty-test --host 127.0.0.1 --port $port --force > /dev/null
 ```
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request send --name empty-test --timeout 5 2>&1 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("error" in d, "error" in d and d["error"] != "")'
-True True
+>   request send --name empty-test --timeout 5
+[1]
+Error: * (glob)
 ```
 
 ## Teardown: stop the dyn server

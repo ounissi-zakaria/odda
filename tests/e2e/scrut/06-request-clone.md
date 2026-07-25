@@ -57,6 +57,9 @@ $ wait_for_flow "clone-test"
 
 ## Find the flow id for the dyn server
 
+The flow id is parsed out of `flows.jsonl` (a file, still JSON) with
+`grep` + `python3`, then stashed in `$PWD/flow_id` for later use.
+
 ```scrut
 $ grep '"host": "127.0.0.1"' "$PWD/data/flows/flows.jsonl" | grep 'clone-test' | head -n 1 \
 >   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/flow_id"
@@ -73,12 +76,20 @@ $ cat "$PWD/flow_id"
 
 ## `request clone` writes a `request` and a `meta.json`
 
+In text mode `request clone` prints `name`, `path`, `flow_id`,
+`scheme`, `host`, and `port` as `key: value` lines. Assert the
+relevant fields directly (the port is auto-picked, so match it with a
+glob).
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request clone --flow-id "$flow_id" --name clone-test \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"], d["port"])'
-clone-test https 127.0.0.1 * (glob)
+>   request clone --flow-id "$flow_id" --name clone-test
+name: clone-test
+path: * (glob)
+flow_id: * (glob)
+scheme: https
+host: 127.0.0.1
+port: * (glob)
 ```
 
 The cloned request files exist and are non-empty.
@@ -95,22 +106,27 @@ meta.json non-empty
 
 ## A second `request clone` on the same name refuses without `--force`
 
+In text mode the collision error prints as `Error: <msg>` on stderr
+with the JSON-RPC `Server error (-NNNN): ` prefix stripped.
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request clone --flow-id "$flow_id" --name clone-test 2>&1 \
->   | grep -F "already exists" >/dev/null && echo "refused" || echo "ERROR: did not refuse"
-refused
+>   request clone --flow-id "$flow_id" --name clone-test
+[1]
+Error: *already exists* (glob)
 ```
 
 ## `--force` overwrites the existing request
 
-
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   request clone --flow-id "$flow_id" --name clone-test --force \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["name"], d["scheme"], d["host"], d["port"])'
-clone-test https 127.0.0.1 * (glob)
+>   request clone --flow-id "$flow_id" --name clone-test --force
+name: clone-test
+path: * (glob)
+flow_id: * (glob)
+scheme: https
+host: 127.0.0.1
+port: * (glob)
 ```
 
 ## Teardown: stop the dyn server

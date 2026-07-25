@@ -33,112 +33,108 @@ $ open_browser_fixture /
 
 ## `browser open` returns browser_id and initial tab_id
 
+`tabs list` prints a table; one browser (id 1) with one tab (id 1).
+Column widths depend on content (port, title), so match with regex
+that ignores spacing.
+
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d), d[0]["browser_id"], len(d[0]["tabs"]), d[0]["tabs"][0]["tab_id"])'
-1 1 1 1
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" tabs list
+browser_id.* (regex)
+.* (regex)
+1\s+1\s+http://127\.0\.0\.1:\d+/\s+Listener Test (regex)
 ```
 
-## `navigate` returns `{status: "Navigated to: ..."}`
+## `navigate` prints the status line
 
 ```scrut
 $ port=$(cat "$PWD/fixture_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate --url "http://127.0.0.1:$port/" --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
+>   navigate --url "http://127.0.0.1:$port/" --browser-id 1 --tab-id 1
 Navigated to: http://127.0.0.1:* (glob)
 ```
 
-## `eval` runs JavaScript and returns the result
+## `eval` runs JavaScript and prints the result readably
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.title" --browser-id 1 --tab-id 1
-"Listener Test"
+Listener Test
 ```
 
 ### `eval --file` reads JavaScript from a file
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval --file "$TESTDIR/fixtures/eval.js" --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sorted(d.items()))'
-[('ok', True), ('title', 'Listener Test')]
+>   eval --file "$TESTDIR/fixtures/eval.js" --browser-id 1 --tab-id 1
+{"title": "Listener Test", "ok": true}
 ```
 
-### `eval` double-encodes when the JS itself calls `JSON.stringify`
+### `eval` renders objects as compact JSON (no double-encoding in text mode)
 
-`odda eval` returns `JSON.stringify(result)` so the CLI can print it as
-JSON. When the JS *also* calls `JSON.stringify`, the result is
-double-encoded and needs `json.loads(json.loads(...))` to recover the
-value. Returning a plain object (no `JSON.stringify` in JS) is the
-recommended form.
+In text mode, `eval` renders strings without quotes and objects as
+compact JSON. Calling `JSON.stringify` inside the JS no longer
+double-encodes — `JSON.stringify({a: 1})` returns a JS string, which
+text mode prints raw as `{"a":1}`. Returning a plain object (no
+`JSON.stringify` in JS) prints as `{"a": 1}` (with the space after the
+colon, matching `json.dumps` defaults). Use `--json` when you need the
+value as a JSON-typed value in a pipeline.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval --js "JSON.stringify({a: 1})" --browser-id 1 --tab-id 1 \
->   | python3 -c '
-> import json, sys
-> raw = json.load(sys.stdin)
-> print(type(raw).__name__, raw)
-> print(json.loads(raw))
-> '
-str {"a":1}
-{'a': 1}
+>   eval --js "JSON.stringify({a: 1})" --browser-id 1 --tab-id 1
+{"a":1}
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval --js "({a: 1})" --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d, type(d).__name__)'
-{'a': 1} dict
+>   eval --js "({a: 1})" --browser-id 1 --tab-id 1
+{"a": 1}
 ```
 
 ### `eval` with neither inline JS nor `--file` is rejected
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --browser-id 1 --tab-id 1
 [1]
-{"error": "Provide inline JS or --file <path>"}
+Error: Provide inline JS or --file <path>
 ```
 
 ### `eval` with both inline JS and `--file` is rejected
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "1" --file "$TESTDIR/fixtures/eval.js" --browser-id 1 --tab-id 1
 [1]
-{"error": "Provide either inline JS or --file, not both"}
+Error: Provide either inline JS or --file, not both
 ```
 
 ### `eval --file` with a missing file is rejected
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --file "$PWD/nope.js" --browser-id 1 --tab-id 1
 [1]
-{"error": "File not found: *"} (glob)
+Error: File not found: * (glob)
 ```
 
-## `screenshot` writes a JPEG and returns its path
+## `screenshot` writes a JPEG and prints its path
 
-The return value is a JSON-quoted string containing the screenshot path.
+The text output is the bare path (no JSON quotes).
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   screenshot --browser-id 1 --tab-id 1
-"*/screenshot_*.jpeg" (glob)
+*/screenshot_*.jpeg (glob)
 ```
 
 ### `screenshot --output` writes to a path the agent chooses
 
 With `--output <path>`, the screenshot is written to that path (the
-parent directory is created) and the returned string is that path.
+parent directory is created) and the printed line is that path.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   screenshot --browser-id 1 --tab-id 1 --output "$PWD/shot.jpeg" \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin))'
+>   screenshot --browser-id 1 --tab-id 1 --output "$PWD/shot.jpeg"
 */shot.jpeg (glob)
 ```
 
@@ -150,22 +146,23 @@ file exists
 ## `event-listeners` lists listeners on `window` and `document`
 
 The fixture page registers a `resize` listener on `window` and a
-`scroll` listener on `document`, so the response should contain at
-least those two.
+`scroll` listener on `document`, so the table should contain at least
+those two types. The table is matched with `--json` here so the test
+can sort and assert the types structurally.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   event-listeners --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); ts=sorted({l["type"] for l in d}); print(ts, "resize" in ts and "scroll" in ts)'
 ['resize', 'scroll'] True
 ```
 
-## `wait-for` returns the truthy value when the condition is already true
+## `wait-for` prints the truthy value when the condition is already true
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wait-for --expression "document.title" --browser-id 1 --tab-id 1 --timeout 5
-"Listener Test"
+Listener Test
 ```
 
 ## `wait-for` polls until a delayed value lands
@@ -179,16 +176,16 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wait-for --expression "window.__waitTest__" --browser-id 1 --tab-id 1 --timeout 5
-"arrived"
+arrived
 ```
 
 ## `wait-for` times out when the condition never becomes truthy
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wait-for --expression "window.__never__" --browser-id 1 --tab-id 1 --timeout 2
 [1]
-{*"error": "*Timeout*"*} (glob)
+Error: *Timeout* (glob)
 ```
 
 ## `wait-for` treats a thrown error as falsy and keeps polling
@@ -201,12 +198,12 @@ evaluation. The whole point of `wait-for` is "the DOM isn't ready
 yet" — a null deref is the common pre-DOM-ready case, not a fatal
 error. This times out cleanly like any never-truthy condition.
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wait-for --expression "document.querySelector('#root').children.length > 0" \
 >   --browser-id 1 --tab-id 1 --timeout 2
 [1]
-{*"error": "*Timeout*"*} (glob)
+Error: *Timeout* (glob)
 ```
 
 ## Teardown: stop the fixture server

@@ -76,8 +76,13 @@ mitmproxy re-establishes TLS upstream and negotiates h2), but this
 drives the actual `navigate` command the user ran rather than proving
 the fix by equivalence alone.
 
+Open a browser and capture its ids into a file for the navigate step.
+`browser open` is captured structurally via `--json` so the ids can be
+parsed out reliably.
+
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   browser open --headless \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["tab_id"])' > "$PWD/browser_ids"
 ```
 
@@ -86,11 +91,12 @@ $ browser_id=$(cut -d" " -f1 "$PWD/browser_ids"); tab_id=$(cut -d" " -f2 "$PWD/b
 * * (glob)
 ```
 
+In text mode `navigate` prints `Navigated to: <url>`.
+
 ```scrut
 $ browser_id=$(cut -d" " -f1 "$PWD/browser_ids"); tab_id=$(cut -d" " -f2 "$PWD/browser_ids"); port=$(cat "$PWD/dyn_port"); \
 >   odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   navigate --url "https://127.0.0.1:$port/?marker=ws-header-browser" --browser-id "$browser_id" --tab-id "$tab_id" \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'
+>   navigate --url "https://127.0.0.1:$port/?marker=ws-header-browser" --browser-id "$browser_id" --tab-id "$tab_id"
 Navigated to: https://127.0.0.1:* (glob)
 ```
 

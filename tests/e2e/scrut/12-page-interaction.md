@@ -59,15 +59,16 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 The snapshot is text: a YAML-ish serialization of the page's
 accessibility tree. Each element is tagged with `[ref=eN]` (or
 `[ref=f<frameSeq>eN]` inside an iframe). The agent greps for the
-element it wants.
+element it wants. In text mode `page snapshot` prints the tree
+directly (no JSON wrapping), so the assertions read `sys.stdin` as
+text and check for the expected substrings and ref patterns.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page snapshot --browser-id 1 --tab-id 1 \
 >   | python3 -c '
-> import json, sys, re
-> d = json.load(sys.stdin)
-> print(isinstance(d, str))
+> import sys, re
+> d = sys.stdin.read()
 > print("[ref=e" in d)
 > print("Click me" in d)
 > print("textbox" in d.lower() or "text" in d.lower())
@@ -79,29 +80,33 @@ True
 True
 True
 True
-True
 ```
 
 ## `page click` clicks the element identified by `--ref`
 
 Snapshot, find the "Click me" button's ref, click it, and verify the
 page's click handler fired (the result div changes from "not clicked"
-to "clicked").
+to "clicked"). The snapshot is text, so the ref is plucked by
+regexing `sys.stdin` directly.
 
 ```scrut
 $ REF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page snapshot --browser-id 1 --tab-id 1 \
 >   | python3 -c '
-> import json, sys, re
-> d = json.load(sys.stdin)
+> import sys, re
+> d = sys.stdin.read()
 > line = next(l for l in d.splitlines() if "Click me" in l)
 > m = re.search(r"\[ref=(e\d+)\]", line)
 > print(m.group(1))
 > ')
 ```
 
+`page click` returns `{status, ref}`; pluck both via `--json` +
+python so the test asserts the status and that the returned ref
+matches the one we clicked.
+
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   page click --browser-id 1 --tab-id 1 --ref "$REF" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$REF"'")'
 clicked True
@@ -112,7 +117,7 @@ The click handler set the result div to "clicked".
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.getElementById('click-result').textContent" --browser-id 1 --tab-id 1
-"clicked"
+clicked
 ```
 
 ## `page click` reaches into iframes
@@ -125,8 +130,8 @@ inside the iframe.
 $ IREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page snapshot --browser-id 1 --tab-id 1 \
 >   | python3 -c '
-> import json, sys, re
-> d = json.load(sys.stdin)
+> import sys, re
+> d = sys.stdin.read()
 > line = next(l for l in d.splitlines() if "Iframe button" in l)
 > m = re.search(r"\[ref=(f\d+e\d+)\]", line)
 > print(m.group(1))
@@ -134,7 +139,7 @@ $ IREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   page click --browser-id 1 --tab-id 1 --ref "$IREF" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$IREF"'")'
 clicked True
@@ -145,7 +150,7 @@ The iframe's click handler set its result div.
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.getElementById('inner-frame').contentWindow.document.getElementById('iframe-result').textContent" --browser-id 1 --tab-id 1
-"clicked in iframe"
+clicked in iframe
 ```
 
 ## `page fill` fills the element identified by `--ref`
@@ -158,8 +163,8 @@ second fill replaces, not appends.
 $ TREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page snapshot --browser-id 1 --tab-id 1 \
 >   | python3 -c '
-> import json, sys, re
-> d = json.load(sys.stdin)
+> import sys, re
+> d = sys.stdin.read()
 > line = next(l for l in d.splitlines() if "Type here" in l)
 > m = re.search(r"\[ref=(e\d+)\]", line)
 > print(m.group(1))
@@ -167,7 +172,7 @@ $ TREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   page fill --browser-id 1 --tab-id 1 --ref "$TREF" --value "hello" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$TREF"'")'
 filled True
@@ -178,20 +183,20 @@ The input handler set the result div to the typed value.
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.getElementById('text-result').textContent" --browser-id 1 --tab-id 1
-"hello"
+hello
 ```
 
 Fill clears first: filling "world" replaces "hello", not appends.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   page fill --browser-id 1 --tab-id 1 --ref "$TREF" --value "world" > /dev/null
 ```
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.getElementById('text-input').value" --browser-id 1 --tab-id 1
-"world"
+world
 ```
 
 ## `page hover` hovers the element identified by `--ref`
@@ -203,8 +208,8 @@ handler fired (the result div changes from "not hovered" to "hovered").
 $ HREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page snapshot --browser-id 1 --tab-id 1 \
 >   | python3 -c '
-> import json, sys, re
-> d = json.load(sys.stdin)
+> import sys, re
+> d = sys.stdin.read()
 > line = next(l for l in d.splitlines() if "Hover me" in l)
 > m = re.search(r"\[ref=(e\d+)\]", line)
 > print(m.group(1))
@@ -212,7 +217,7 @@ $ HREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   page hover --browser-id 1 --tab-id 1 --ref "$HREF" \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$HREF"'")'
 hovered True
@@ -223,7 +228,7 @@ The hover handler set the result div.
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.getElementById('hover-result').textContent" --browser-id 1 --tab-id 1
-"hovered"
+hovered
 ```
 
 ## `page upload` sets files on a file input identified by `--ref`
@@ -235,7 +240,7 @@ agent gives it an `aria-label` via `eval`, re-snapshots, then uploads.
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.getElementById('file-input').setAttribute('aria-label', 'Upload files'); 'ok'" --browser-id 1 --tab-id 1
-"ok"
+ok
 ```
 
 Re-snapshot and find the file input's ref.
@@ -244,8 +249,8 @@ Re-snapshot and find the file input's ref.
 $ UFREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page snapshot --browser-id 1 --tab-id 1 \
 >   | python3 -c '
-> import json, sys, re
-> d = json.load(sys.stdin)
+> import sys, re
+> d = sys.stdin.read()
 > line = next(l for l in d.splitlines() if "Upload files" in l)
 > m = re.search(r"\[ref=(e\d+)\]", line)
 > print(m.group(1) if m else "")
@@ -263,10 +268,11 @@ Create a temp file to upload.
 $ echo "test file content" > "$PWD/upload-test.txt"
 ```
 
-Upload it. The return includes the ref and the file paths.
+Upload it. `page upload` returns `{status, ref, files}`; pluck all
+three via `--json` + python.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   page upload --browser-id 1 --tab-id 1 --ref "$UFREF" --file "$PWD/upload-test.txt" \
 >   | python3 -c '
 > import json, sys
@@ -285,67 +291,63 @@ The change handler fired and the result div lists the file name.
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.getElementById('upload-result').textContent" --browser-id 1 --tab-id 1
-"upload-test.txt"
+upload-test.txt
 ```
 
 ## Stale ref errors cleanly (no 30s hang)
 
 Navigate away (the old refs' elements are removed), then try to click
 an old ref. odda returns a clean error quickly, not a Playwright
-30-second timeout. Using `--timeout 2` keeps the test fast.
+30-second timeout. Using `--timeout 2` keeps the test fast. In text
+mode the error prints as `Error: ...` on stderr with a non-zero exit
+code.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   navigate --url "about:blank" --browser-id 1 --tab-id 1 > /dev/null
 ```
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   page click --browser-id 1 --tab-id 1 --ref "$HREF" --timeout 2 2>&1 \
->   | python3 -c '
-> import json, sys
-> d = json.load(sys.stdin)
-> print("error" in d)
-> print("take a new snapshot" in d.get("error", ""))
-> '
-True
-True
+>   page click --browser-id 1 --tab-id 1 --ref "$HREF" --timeout 2
+[1]
+Error: ref * did not resolve or become actionable within *ms (the element may have been removed, or it may be disabled or covered by an overlay; take a new snapshot if stale) (glob)
 ```
 
 ## Errors on a missing tab (click)
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page click --browser-id 1 --tab-id 9999 --ref e1
 [1]
-{"error": "Server error (-32602): Tab 9999 not found in browser 1."}
+Error: Tab 9999 not found in browser 1.
 ```
 
 ## Errors on a missing browser (fill)
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page fill --browser-id 9999 --tab-id 1 --ref e1 --value "x"
 [1]
-{"error": "Server error (-32602): Browser 9999 not found."}
+Error: Browser 9999 not found.
 ```
 
 ## Errors on a missing tab (snapshot)
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page snapshot --browser-id 1 --tab-id 9999
 [1]
-{"error": "Server error (-32602): Tab 9999 not found in browser 1."}
+Error: Tab 9999 not found in browser 1.
 ```
 
 ## Errors on a missing browser (snapshot)
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   page snapshot --browser-id 9999 --tab-id 1
 [1]
-{"error": "Server error (-32602): Browser 9999 not found."}
+Error: Browser 9999 not found.
 ```
 
 ## Teardown: stop the fixture server

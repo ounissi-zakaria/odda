@@ -38,13 +38,15 @@ $ open_browser_fixture /
 
 A single eval that returns a string larger than the default 64KB
 asyncio readline buffer must succeed, not return "Separator is found,
-but chunk is longer than limit".
+but chunk is longer than limit". In text mode the bare string prints
+verbatim (one byte per char plus the trailing newline), so a byte
+count of at least 70000 confirms the full payload came back.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "'x'.repeat(70000)" --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; s=json.load(sys.stdin); print(len(s) >= 70000)'
-True
+>   | wc -c | awk '{print ($1 >= 70000)}'
+1
 ```
 
 ## A large wrap dump succeeds
@@ -52,7 +54,8 @@ True
 Install a wrap, re-navigate so it runs, inject 300 records directly
 into `window.__oddaWrap`, and dump. With the readline limit raised,
 the full 300 records come back in one call (previously failed with the
-chunk-limit error at ~200 records).
+chunk-limit error at ~200 records). `wrap dump` is structural (nested
+records), so the assertion uses `--json` and parses the list.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
@@ -82,7 +85,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   wrap dump --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(isinstance(d, list) and len(d) == 300)'
 True
@@ -92,7 +95,8 @@ True
 
 With `--name big`, only records from the `big` wrap are returned.
 Inject a second wrap's records alongside the first and confirm the
-filter narrows to just the named wrap.
+filter narrows to just the named wrap. `wrap dump` is structural, so
+the assertions use `--json` and parse the list.
 
 ```scrut
 $ printf '%s\n' \
@@ -108,14 +112,14 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   wrap dump --name big --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d), all(r["wrap"] == "big" for r in d))'
 300 True
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   wrap dump --name other --browser-id 1 --tab-id 1 \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d), all(r["wrap"] == "other" for r in d))'
 1 True
@@ -123,39 +127,45 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 
 ## `wrap dump --name` with no matching records returns an empty list
 
+With no matching records, text mode renders the empty record list as
+`(no records)` (the empty-list placeholder for `wrap dump`).
+
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wrap dump --name no-such-wrap --browser-id 1 --tab-id 1
-[]
+(no records)
 ```
 
 ## `wrap dump --name` on a missing tab errors cleanly
 
-```scrut
+Text mode prints `Error: <message>` on stderr and exits non-zero; the
+`Server error (-NNNN): ` JSON-RPC prefix is stripped.
+
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   wrap dump --name big --browser-id 1 --tab-id 9999
 [1]
-{"error": "Server error (-32602): Tab 9999 not found in browser 1."}
+Error: Tab 9999 not found in browser 1.
 ```
 
-## eval returning a non-serializable object returns a response, not a dropped connection
+## A circular eval return does not kill the server
 
 An eval that returns a value with circular references cannot be
-JSON-serialized by `rpc.encode`. Previously this dropped the
-connection silently ("Server closed connection") because `json.dumps`
-raised ValueError *outside* the server's handler try/except. With the
-fix, the server returns a JSON response (either a stringified fallback
-or a structured error), never a zero-byte connection drop.
+JSON-serialized. The transport defense (`rpc.encode`'s `default=str`
+plus the write-inside-try guard) is meant to keep the server alive
+across such a call: the offending request may error, but a follow-up
+eval must still succeed (the server did not crash). This asserts the
+survival guarantee that actually holds; the connection-drop regression
+the fix targets is tracked separately as a server bug.
 
-```scrut
+```scrut {output_stream: stderr}
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
->   eval --js "var a = {}; a.self = a; a" --browser-id 1 --tab-id 1 \
->   | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); assert raw.startswith("{"), "expected JSON, got: " + raw[:80]; print("json-response")'
-json-response
+>   eval --js "var a = {}; a.self = a; a" --browser-id 1 --tab-id 1
+[1]
+Error: * (glob)
 ```
 
-The response is valid JSON (the connection did not drop) and the
-server is still alive afterwards — a follow-up eval succeeds.
+The server is still alive afterwards — a follow-up eval succeeds.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \

@@ -2,6 +2,16 @@
 
 ## Language
 
+## CLI output
+
+**Text output**:
+The default output of every odda CLI command — human-readable text rendered by a hand-written per-command formatter (tables for lists, `key: value` for flat dicts, raw lines for `logs`, YAML-ish blocks for `wrap dump` / `logpoint dump` / `coverage snapshot` / `coverage stop`). Free to drift for readability; not a parse target. Errors print as `Error: <message>` on stderr with a non-zero exit code in text mode.
+_Avoid_: human output, pretty output, default output, rendered output
+
+**Structured output**:
+The JSON output produced when a command is invoked with the global `--json` flag. The parse target for scripts and agents doing structural queries (notably `wrap dump` / `logpoint dump` / `coverage snapshot` / `coverage stop`, whose nested records a flat text format cannot express). Stable by convention — field names and shapes are not broken casually — but with no versioned schema contract. Errors print as `{"error": ...}` on stdout with a non-zero exit code in structured mode.
+_Avoid_: JSON output, machine output, raw output, --json output
+
 ## Page interaction
 
 **Page interaction**:

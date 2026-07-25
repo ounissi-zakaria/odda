@@ -13,40 +13,26 @@ starts empty (no flows captured yet).
 
 ## `odda version` returns the package version
 
+Text output is `odda <version>`.
+
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" version
-{"version": "*"} (glob)
+odda * (glob)
 ```
 
 
 ## `odda status` reports the running server
 
-`status` returns a JSON object with `socket`, `data_dir`, `parent_pid`,
-`proxy_url`, and `browser_count` fields. The exact key order is not
-part of the contract.
+`status` prints `key: value` lines for `socket`, `data_dir`,
+`parent_pid`, `proxy_url`, and `browser_count`.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" status \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sorted(d))'
-['browser_count', 'data_dir', 'parent_pid', 'proxy_url', 'socket']
-```
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" status \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["browser_count"])'
-0
-```
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" status \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["proxy_url"])'
-http://127.0.0.1:* (glob)
-```
-
-```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" status \
->   | python3 -c 'import json,sys; print(json.load(sys.stdin)["data_dir"])'
-*/data (glob)
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" status
+socket: * (glob)
+data_dir: */data (glob)
+parent_pid: * (glob)
+proxy_url: http://127.0.0.1:* (glob)
+browser_count: 0
 ```
 
 ## `odda proxy-url` returns the proxy URL as plain text
@@ -56,22 +42,21 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" proxy-url
 http://127.0.0.1:* (glob)
 ```
 
-## `odda logs` returns the tail of the server log
+## `odda logs` prints the tail of the server log
 
-`logs --n 5` returns `{"lines": [...]}`. On a fresh server the log has
-just been seeded with the start-up entries.
+`logs --n 5` prints the last 5 log lines as raw text (no JSON
+wrapper). On a fresh server the log has just been seeded with the
+start-up entries.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" logs --n 5 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("lines" in d, len(d["lines"]))'
-True * (glob)
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" logs --n 5
+* (glob+)
 ```
 
 The first line of a fresh server's log mentions "Starting odda server".
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" logs --n 5 \
->   | python3 -c 'import json,sys; print("Starting odda server" in json.load(sys.stdin)["lines"][0])'
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" logs --n 5 | head -1 | grep -q "Starting odda server" && echo True
 True
 ```
 

@@ -51,8 +51,8 @@ E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that
 
 - Python 3.14+ with `from __future__ import annotations`.
 - CLI commands stay thin; logic belongs in server/library modules.
-- All CLI output is JSON; errors are JSON with non-zero exit codes.
-- If you add, remove, or change CLI commands/options, update `src/odda/opencode/SKILL.md` and run `odda install-opencode` so agents see the current tool surface.
+- CLI output defaults to human-readable text; the global `--json` flag opts into structured output (stable by convention; the parse target for scripts). Errors print as `Error: <message>` on stderr with a non-zero exit code in text mode (`{"error": ...}` on stdout in `--json` mode).
+- If you add, remove, or change CLI commands/options, update `src/odda/opencode/SKILL.md` and run `odda install-opencode` so agents see the current tool surface. Text renderers live in `src/odda/render.py` — add one for any new command whose result a human or agent will read.
 - When incrementing the version, update **both** `pyproject.toml` and `src/odda/__init__.py` (`__version__`), then run `uv lock` so the lockfile stays in sync. The version lives in three places: `pyproject.toml`, `src/odda/__init__.py`, and `uv.lock`.
 
 ## Agent skills
