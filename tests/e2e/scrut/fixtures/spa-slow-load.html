@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head><title>SPA Slow Load</title></head>
+<body>
+<div id="app"></div>
+<script>
+  // App code runs immediately at DOMContentLoaded. The page is ready
+  // here, but window.onload is blocked 35s by the slow image below.
+  document.getElementById('app').textContent =
+    'SPA ready at ' + Date.now();
+  window.__spaReady = true;
+</script>
+<img src="/slow-image?sleep=35" alt="slow">
+</body>
+</html>

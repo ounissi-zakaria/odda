@@ -13,6 +13,7 @@ from typing import Any
 import typer
 
 from odda import __version__, client, render, server
+from odda.browser import NAVIGATE_WAIT_UNTIL_EVENTS
 from odda.opencode.install import install_opencode_assets
 
 app = typer.Typer(
@@ -325,12 +326,40 @@ def navigate(
     url: str = typer.Option(..., "--url", help="URL to navigate to"),
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
+    timeout: float = typer.Option(
+        30.0, "--timeout", help="page.goto timeout in seconds (default 30)"
+    ),
+    wait_until: str = typer.Option(
+        "load",
+        "--wait-until",
+        help=(
+            "Playwright lifecycle event to wait for: "
+            + ", ".join(NAVIGATE_WAIT_UNTIL_EVENTS)
+            + " (default load)"
+        ),
+    ),
 ) -> None:
-    """Navigate an existing tab to a URL."""
+    """Navigate an existing tab to a URL.
+
+    `--timeout` controls the ``page.goto`` timeout (default 30s,
+    matching Playwright). `--wait-until` selects the lifecycle event
+    navigate waits for (default ``load``). For SPAs that render at
+    ``DOMContentLoaded`` but defer ``load`` (slow sub-resources), pass
+    ``--wait-until domcontentloaded`` to return as soon as the DOM is
+    ready instead of blocking on the 30s ``load`` timeout. On timeout,
+    the error names the ``wait-until`` event that failed and points at
+    ``odda wait-for`` for SPAs whose ``load`` event never fires.
+    """
     _run_coro(
         _client(ctx).call(
             "navigate",
-            {"url": url, "browser_id": browser_id, "tab_id": tab_id},
+            {
+                "url": url,
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "timeout": timeout,
+                "wait_until": wait_until,
+            },
         ),
         ctx,
         "navigate",

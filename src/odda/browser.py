@@ -33,6 +33,16 @@ logger = logging.getLogger(__name__)
 
 _BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
 
+#: Playwright ``page.goto`` lifecycle events accepted by :meth:`navigate`,
+#: in firing order. Shared across the browser module, the JSON-RPC handler,
+#: and the CLI so the vocabulary lives in one place.
+NAVIGATE_WAIT_UNTIL_EVENTS: tuple[str, ...] = (
+    "commit",
+    "domcontentloaded",
+    "load",
+    "networkidle",
+)
+
 
 def _find_chrome_executable() -> str:
     """Find a system Chrome/Chromium executable.
@@ -351,11 +361,28 @@ class BrowserInstance:
             await page.close()
         self._on_page_close(tab_id)
 
-    async def navigate(self, tab_id: int, url: str) -> None:
-        """Navigate an existing tab to ``url``."""
+    async def navigate(
+        self,
+        tab_id: int,
+        url: str,
+        *,
+        timeout_ms: float = 30000.0,
+        wait_until: str = "load",
+    ) -> None:
+        """Navigate an existing tab to ``url``.
+
+        Args:
+            tab_id: Target tab.
+            url: URL to navigate to.
+            timeout_ms: ``page.goto`` timeout in milliseconds (default
+                30000, matching Playwright).
+            wait_until: Playwright lifecycle event to wait for — one of
+                ``commit``, ``domcontentloaded``, ``load``,
+                ``networkidle`` (default ``load``).
+        """
         page = self._require_tab(tab_id)
         try:
-            await page.goto(url)
+            await page.goto(url, timeout=timeout_ms, wait_until=wait_until)
         except Exception as exc:
             if _is_target_closed_error(exc):
                 self._on_page_close(tab_id)
@@ -368,7 +395,9 @@ class BrowserInstance:
                     " For SPAs that don't fire `load`, use `odda wait-for"
                     ' "<expr>"` after navigate to poll for a condition.'
                 )
-                raise BrowserOperationError(f"Failed to navigate: {msg}{hint}") from exc
+                raise BrowserOperationError(
+                    f"Failed to navigate: {msg} (wait-until `{wait_until}`){hint}"
+                ) from exc
             raise BrowserOperationError(f"Failed to navigate: {msg}") from exc
 
     async def eval_js(self, tab_id: int, js_code: str) -> Any:
@@ -1075,14 +1104,22 @@ class BrowserManager:
         await inst.close_tab(tab_id)
         return {"browser_id": browser_id, "tab_id": tab_id, "status": "closed"}
 
-    async def navigate(self, browser_id: int, tab_id: int, url: str) -> dict[str, Any]:
+    async def navigate(
+        self,
+        browser_id: int,
+        tab_id: int,
+        url: str,
+        *,
+        timeout_ms: float = 30000.0,
+        wait_until: str = "load",
+    ) -> dict[str, Any]:
         """Navigate an existing tab to ``url``.
 
         Returns:
             Dict with status.
         """
         inst = self._require_instance(browser_id)
-        await inst.navigate(tab_id, url)
+        await inst.navigate(tab_id, url, timeout_ms=timeout_ms, wait_until=wait_until)
         return {"status": f"Navigated to: {url}"}
 
     async def eval_js(self, browser_id: int, tab_id: int, js_code: str) -> Any:

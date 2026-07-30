@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from odda import flowstore, rpc
-from odda.browser import BrowserManager, BrowserOperationError
+from odda.browser import (
+    NAVIGATE_WAIT_UNTIL_EVENTS,
+    BrowserManager,
+    BrowserOperationError,
+)
 from odda.proxy import ProxyServer
 from odda.request import (
     clone as clone_request,
@@ -227,9 +231,25 @@ class OddaServer:
             browser_id: Target browser ID.
             tab_id: Target tab ID.
             url: URL to navigate to.
+            timeout: Optional ``page.goto`` timeout in seconds (default 30).
+            wait_until: Optional Playwright lifecycle event to wait for —
+                one of ``commit``, ``domcontentloaded``, ``load``,
+                ``networkidle`` (default ``load``).
         """
+        wait_until = params.get("wait_until", "load")
+        if wait_until not in NAVIGATE_WAIT_UNTIL_EVENTS:
+            raise rpc.JsonRpcError(
+                rpc.INVALID_PARAMS,
+                f"wait_until must be one of {', '.join(NAVIGATE_WAIT_UNTIL_EVENTS)}, "
+                f"got {wait_until!r}",
+            )
+        timeout_s = float(params.get("timeout", 30.0))
         return await self.browser.navigate(
-            params["browser_id"], params["tab_id"], params["url"]
+            params["browser_id"],
+            params["tab_id"],
+            params["url"],
+            timeout_ms=timeout_s * 1000,
+            wait_until=wait_until,
         )
 
     async def method_eval(self, params: dict[str, Any]) -> Any:
