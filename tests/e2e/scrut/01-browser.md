@@ -44,6 +44,47 @@ browser_id.* (regex)
 1\s+1\s+http://127\.0\.0\.1:\d+/\s+Listener Test (regex)
 ```
 
+## `browser list` prints one row per tracked browser
+
+`browser list` prints an aligned table (`browser_id  tab_count`) of
+every browser odda is tracking. After the single-browser fixture, it
+shows one row: browser 1, tab count 1. Column widths depend on the
+header, so match with regex that ignores spacing.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser list
+browser_id.* (regex)
+.* (regex)
+1\s+1\s* (regex)
+```
+
+`--json` returns `[{browser_id, tab_count}]`.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json browser list \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d)'
+[{'browser_id': 1, 'tab_count': 1}]
+```
+
+Opening a second browser makes a second row appear; the fixture
+browser (id 1) is untouched, so the rest of this document keeps
+working. Close the extra browser afterward to restore the
+single-browser state.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless > /dev/null
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json browser list \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d)'
+[{'browser_id': 1, 'tab_count': 1}, {'browser_id': 2, 'tab_count': 1}]
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close --browser-id 2 > /dev/null
+```
+
 ## `navigate` prints the status line
 
 ```scrut
@@ -204,6 +245,41 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   --browser-id 1 --tab-id 1 --timeout 2
 [1]
 Error: *Timeout* (glob)
+```
+
+## `browser list` row count stays consistent with `odda status`
+
+`odda status`'s `browser_count` and `browser list`'s row count both
+derive from `BrowserManager._instances`, so they cannot drift. With
+the single fixture browser still open, `browser_count` is 1 and
+`browser list` yields one row. Closing the last browser drops both to
+zero; the text output is then `(no browsers)`.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json browser list \
+>   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'
+1
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json status \
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["browser_count"])'
+1
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close --browser-id 1 > /dev/null
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser list
+(no browsers)
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json status \
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["browser_count"])'
+0
 ```
 
 ## Teardown: stop the fixture server

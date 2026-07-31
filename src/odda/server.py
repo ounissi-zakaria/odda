@@ -224,6 +224,17 @@ class OddaServer:
         """
         return await self.browser.close_instance(params["id"])
 
+    async def method_browser_list(
+        self, _params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """List every tracked browser with its tab count.
+
+        Returns:
+            ``[{browser_id, tab_count}]`` for each browser in
+            ``BrowserManager._instances``.
+        """
+        return self.browser.list_instances()
+
     async def method_navigate(self, params: dict[str, Any]) -> dict[str, Any]:
         """Navigate an existing tab to a URL.
 

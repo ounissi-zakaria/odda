@@ -237,6 +237,7 @@ RENDERERS: dict[str, Renderer] = {
     "proxy/url": PassthroughSpec(),
     "browser/open": KvSpec(["browser_id", "tab_id", "status"]),
     "browser/close": KvSpec(["browser_id", "status"]),
+    "browser/list": TableSpec(["browser_id", "tab_count"], "(no browsers)"),
     "navigate": r_navigate,
     "eval": r_eval,
     "wait-for": r_eval,  # same pass-through as eval

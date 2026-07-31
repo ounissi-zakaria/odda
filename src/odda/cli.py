@@ -320,6 +320,12 @@ def browser_close(
     )
 
 
+@browser_app.command("list")
+def browser_list(ctx: typer.Context) -> None:
+    """List every tracked browser with its tab count."""
+    _run_coro(_client(ctx).call("browser/list", {}), ctx, "browser/list")
+
+
 @app.command()
 def navigate(
     ctx: typer.Context,

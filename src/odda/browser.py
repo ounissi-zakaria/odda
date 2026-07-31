@@ -958,7 +958,13 @@ class BrowserManager:
         return len(self._instances)
 
     def list_instances(self) -> list[dict]:
-        """List open browser instances with tab counts (internal helper)."""
+        """List open browser instances with tab counts.
+
+        Backs the ``browser/list`` JSON-RPC method and the server's
+        shutdown sweep. Returns ``[{browser_id, tab_count}]`` with
+        ``tab_count`` as ``len(_tabs)`` (raw — may include pages whose
+        underlying Chrome has died if no close event fired).
+        """
         return [
             {
                 "browser_id": bid,
