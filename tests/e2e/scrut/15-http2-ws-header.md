@@ -82,7 +82,7 @@ parsed out reliably.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
->   browser open --headless \
+>   browser open \
 >   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["browser_id"], d["tab_id"])' > "$PWD/browser_ids"
 ```
 

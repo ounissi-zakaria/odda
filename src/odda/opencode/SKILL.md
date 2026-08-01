@@ -33,7 +33,7 @@ Add the targeting flags from the Targeting model above to every command below �
 | --------------------------- | ----------------------------------------------------------------- |
 | Check the server is running | `odda status`                                                      |
 | Get the HTTP proxy URL      | `odda proxy-url`                                                   |
-| Open a Chrome window        | `odda browser open [--headless]`                                  |
+| Open a Chrome window        | `odda browser open [--headed]`                                   |
 | Close a browser             | `odda browser close`                                              |
 | List open browsers          | `odda browser list`                                               |
 | List tabs (overview)        | `odda tabs list`                                                  |
@@ -77,7 +77,7 @@ Drives Chrome: open/navigate, run JS, take screenshots, and interact with the pa
 
 **All browser traffic is routed through odda's HTTP proxy and captured as flows.** Every request/response the page makes — navigations, XHR/fetch, sub-resources, `window.open` popups — is saved under `.odda/flows/<id>/` (request bytes, response body, headers, timing). Read the response body from `.odda/flows/<id>/response_body.*` (see [FLOWS.md](FLOWS.md)) instead of extracting it from the page via `eval`; read `flows.jsonl` for the index. This means driving the browser *is* traffic capture — there's no separate "record" toggle.
 
-- `odda browser open [--headless]` — Open a new Chrome window. Prints `browser_id`/`tab_id`/`status` lines (text) or `{browser_id, tab_id, status}` (`--json`); the initial tab is ready immediately. `--headless` runs Chrome without a visible window (CI/automated testing).
+- `odda browser open [--headed]` — Open a new Chrome window (headless by default). Prints `browser_id`/`tab_id`/`status` lines (text) or `{browser_id, tab_id, status}` (`--json`); the initial tab is ready immediately. `--headed` shows the Chrome window (debugging, interactive use); the default runs headless, suiting autonomous agents that don't need a visible window.
 - `odda browser close` — Close a browser instance. Tearing down is immediate; any in-flight tab ops on that browser error cleanly. For an overview of all browsers and their tabs use `odda tabs list` (no `--browser-id`); `odda status` reports the open browser count.
 - `odda browser list` — List every tracked browser with its tab count. Text output is a table (`browser_id  tab_count`); `--json` returns `[{browser_id, tab_count}]`. Closed browsers are removed from odda's tracked set, so this lists only browsers still in memory. `(no browsers)` prints when the set is empty.
 - `odda tabs list [--browser-id <id>]` — List tabs grouped by browser. Text output is a table (`browser_id  tab_id  url  title`); `--json` returns `[{browser_id, tabs: [{tab_id, url, title}]}]`. Without `--browser-id`, lists every open browser (a browser with zero tabs appears with `tabs: []`); with it, lists one browser's tabs.

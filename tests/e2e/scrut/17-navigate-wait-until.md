@@ -43,7 +43,7 @@ $ wait_for_fixture_server
 ## Open a browser
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless > /dev/null
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open > /dev/null
 ```
 
 ## `navigate --help` lists `--timeout` and `--wait-until`

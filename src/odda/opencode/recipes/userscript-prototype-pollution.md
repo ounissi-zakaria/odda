@@ -5,7 +5,7 @@ Install a userscript that runs at `document_start` (before the page's own script
 ## 1. Open a browser and navigate to the target
 
 ```
-odda browser open --headless
+odda browser open
 # returns {browser_id, tab_id, status}
 odda navigate --url <url> --browser-id <B> --tab-id <T>
 ```

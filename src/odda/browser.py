@@ -980,7 +980,7 @@ class BrowserManager:
             raise BrowserOperationError(f"Browser {browser_id} not found.")
         return inst
 
-    async def _create_instance(self, *, headless: bool = False) -> BrowserInstance:
+    async def _create_instance(self, *, headless: bool = True) -> BrowserInstance:
         """Create and register a new BrowserInstance.
 
         Registers the initial page (the one Chrome creates at launch) and
@@ -1033,7 +1033,7 @@ class BrowserManager:
         self._instances[browser_id] = instance
         return instance
 
-    async def open(self, *, headless: bool = False) -> dict[str, Any]:
+    async def open(self, *, headless: bool = True) -> dict[str, Any]:
         """Open a new Chrome browser window.
 
         Returns:

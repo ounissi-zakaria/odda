@@ -176,7 +176,7 @@ status: closed
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open
 browser_id: 2
 tab_id: 1
 status: launched
@@ -195,7 +195,7 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json tabs list \
 ```
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open
 browser_id: 3
 tab_id: 1
 status: launched

@@ -5,7 +5,7 @@ Snapshot the page to discover element **refs** (`eN`), then pass a ref to `page 
 ## 1. Open a browser and navigate
 
 ```
-odda browser open --headless
+odda browser open
 # returns {browser_id, tab_id, status}
 odda navigate --url <url> --browser-id <B> --tab-id <T>
 ```

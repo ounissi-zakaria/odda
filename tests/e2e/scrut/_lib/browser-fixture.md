@@ -13,7 +13,7 @@ through on failure so the cause of a setup failure is visible.
 ```scrut
 $ open_browser_fixture() {
 >   url_path="$1"; marker="${2:-}"
->   odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless > /dev/null
+>   odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open > /dev/null
 >   if [ -n "$url_path" ]; then
 >     port=$(cat "$PWD/fixture_port")
 >     odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \

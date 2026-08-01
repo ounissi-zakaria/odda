@@ -40,7 +40,7 @@ Open a second browser. In text mode `browser open` prints
 id 2.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless \
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open \
 >   | grep -q '^browser_id: 2$' && echo True
 True
 ```

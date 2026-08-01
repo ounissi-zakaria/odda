@@ -214,7 +214,7 @@ class OddaServer:
         Returns:
             Dict with browser_id, the initial tab_id, and status.
         """
-        return await self.browser.open(headless=params.get("headless", False))
+        return await self.browser.open(headless=params.get("headless", True))
 
     async def method_browser_close(self, params: dict[str, Any]) -> dict[str, Any]:
         """Close a browser instance by ID.

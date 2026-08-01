@@ -7,7 +7,7 @@ Clone a captured flow (or craft one from scratch) into an editable request, edit
 Navigate to the target through odda's proxy so the request is captured as a flow, then find its id in `flows.jsonl` (e.g. `grep target.example .odda/flows/flows.jsonl`).
 
 ```
-odda browser open --headless
+odda browser open
 odda navigate --url https://target.example/ --browser-id 1 --tab-id 1
 ```
 

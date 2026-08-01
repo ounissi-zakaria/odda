@@ -72,7 +72,7 @@ working. Close the extra browser afterward to restore the
 single-browser state.
 
 ```scrut
-$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless > /dev/null
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open > /dev/null
 ```
 
 ```scrut
@@ -83,6 +83,24 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json browser list \
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser close --browser-id 2 > /dev/null
+```
+
+## `browser open --help` advertises `--headed`; `--headless` is rejected
+
+`browser open` defaults to headless (ADR-0016). The old `--headless`
+flag is removed — a hard break, not an alias — and `--headed` opts
+into a visible window. The help text and the rejection of the removed
+flag are pinned so a future re-add of `--headless` as an alias trips a
+test.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --help | grep -- '--headed'
+*--headed*Run Chrome with a visible window (default is headless)* (glob)
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" browser open --headless
+[2]
 ```
 
 ## `navigate` prints the status line

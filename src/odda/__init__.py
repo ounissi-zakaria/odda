@@ -1,3 +1,3 @@
 """odda - Browser automation and HTTP traffic capture CLI for AI agents."""
 
-__version__ = "0.28.0"
+__version__ = "0.29.0"

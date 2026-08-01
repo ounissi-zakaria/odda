@@ -299,13 +299,13 @@ def proxy_url(ctx: typer.Context) -> None:
 @browser_app.command("open")
 def browser_open(
     ctx: typer.Context,
-    headless: bool = typer.Option(
-        False, "--headless", help="Run Chrome in headless mode"
+    headed: bool = typer.Option(
+        False, "--headed", help="Run Chrome with a visible window (default is headless)"
     ),
 ) -> None:
-    """Open a new browser window."""
+    """Open a new browser window (headless by default)."""
     _run_coro(
-        _client(ctx).call("browser/open", {"headless": headless}), ctx, "browser/open"
+        _client(ctx).call("browser/open", {"headless": not headed}), ctx, "browser/open"
     )
 
 
