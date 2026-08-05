@@ -85,23 +85,25 @@ _READ_ONLY = 0o444
 def set_data_dir(path: Path | str) -> None:
     """Set the directory used for flow storage.
 
+    The directory is *remembered* but not created; it (and its parents)
+    appear lazily on the first state write (flows, requests, browsers,
+    userscripts), each of which mkdirs its own target path. This keeps
+    the data dir absent until odda is actually used.
+
     Args:
-        path: Directory path. Created if it does not exist.
+        path: Directory path.
     """
     global DATA_DIR
     DATA_DIR = Path(path)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _flows_dir() -> Path:
-    """Get the directory holding flows.jsonl and per-flow directories.
+    """Path to the directory holding flows.jsonl and per-flow directories.
 
-    Returns:
-        Path to ``<DATA_DIR>/flows/``, created if missing.
+    Returns the path without creating it; the directory (and its parents)
+    appears lazily on the first flow write.
     """
-    flows_dir = DATA_DIR / "flows"
-    flows_dir.mkdir(parents=True, exist_ok=True)
-    return flows_dir
+    return DATA_DIR / "flows"
 
 
 def should_store_body(content_type: str | None) -> bool:
@@ -220,9 +222,11 @@ def _scan_max_flow_id(flows_dir: Path) -> int:
         flows_dir: Directory containing per-flow subdirectories.
 
     Returns:
-        The max numeric id found, or 0 if none exist.
+        The max numeric id found, or 0 if the directory is absent or empty.
     """
     max_id = 0
+    if not flows_dir.exists():
+        return max_id
     for entry in flows_dir.iterdir():
         if not entry.is_dir():
             continue
@@ -243,10 +247,22 @@ class FlowRecordWriter:
     """
 
     def __init__(self) -> None:
-        """Initialize the writer and seed the flow id counter from disk."""
+        """Initialize the writer and seed the flow id counter from disk.
+
+        Remembers the flows dir path but does not create it; the directory
+        (and the data dir) appear lazily on the first flow allocation.
+        """
         self._flows_dir = _flows_dir()
         self._counter = itertools.count(_scan_max_flow_id(self._flows_dir) + 1)
         self._jsonl_path = self._flows_dir / "flows.jsonl"
+
+    def _ensure_flows_dir(self) -> None:
+        """Create the flows directory (and parents) if missing.
+
+        Called on the first flow allocation so the data dir appears lazily
+        on first use, not at server boot.
+        """
+        self._flows_dir.mkdir(parents=True, exist_ok=True)
 
     def alloc_flow_id(self) -> str:
         """Allocate a unique zero-padded flow id by atomically creating its dir.
@@ -260,6 +276,7 @@ class FlowRecordWriter:
         Returns:
             A zero-padded flow id string matching the created directory name.
         """
+        self._ensure_flows_dir()
         while True:
             flow_id = f"{next(self._counter):05d}"
             try:

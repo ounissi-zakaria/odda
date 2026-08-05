@@ -85,11 +85,17 @@ cursor.
 
 ## Data storage
 
-Captured traffic is stored under `.odda/` in the project directory:
+The data directory (`.odda/` in the project directory, or `--data-dir` /
+`ODDA_DATA_DIR`) holds persisted project state — `flows/`, `requests/`,
+`browsers/` (including per-browser userscripts). It is created lazily on
+the first state-producing command (e.g. `browser open`, `request clone`),
+not when the server boots, so opening a session without using odda does
+not litter the project dir.
 
-- `flows.db` — SQLite database with request/response metadata
-- `bodies/` — response body files
-- `server.log` — background server logs
+The server's Unix socket and log file are session plumbing: they live in
+`$XDG_RUNTIME_DIR` (`odda-<pid>.sock` and `odda-<pid>.log`), not in the
+data dir. `odda logs` finds the log via `ODDA_LOG` (set by the OpenCode
+plugin) or the server's `status.log_path` field.
 
 ## Chrome profile
 

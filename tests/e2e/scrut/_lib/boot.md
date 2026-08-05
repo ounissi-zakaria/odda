@@ -1,7 +1,7 @@
 ## Boot the odda server
 
 ```scrut
-$ nohup odda server --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+$ nohup odda server --socket "$PWD/odda.sock" --data-dir "$PWD/data" --log "$PWD/server.log" \
 >   >"$PWD/server.log" 2>&1 &
 ```
 

@@ -32,16 +32,22 @@ class OddaServer:
         socket_path: str | Path,
         data_dir: str | Path,
         parent_pid: int | None = None,
+        log_path: str | Path | None = None,
     ) -> None:
         """Initialize server configuration.
 
         Args:
             socket_path: Unix socket path to listen on.
-            data_dir: Directory for flows.db, bodies/, and server.log.
+            data_dir: Directory for flows.jsonl, per-flow dirs, and requests.
+                Created lazily on first state write, not at boot.
             parent_pid: Optional parent PID to watch for auto-shutdown.
+            log_path: File to append server logs to. ``None`` (default) logs
+                to stderr; the caller redirects if a file is desired. Never
+                creates the data directory.
         """
         self.socket_path = Path(socket_path)
         self.data_dir = Path(data_dir)
+        self.log_path = Path(log_path) if log_path is not None else None
         self.parent_pid = parent_pid
         self.proxy: ProxyServer | None = None
         self.browser: BrowserManager | None = None
@@ -92,13 +98,21 @@ class OddaServer:
             logger.info("Shutdown complete")
 
     def _setup_logging(self) -> None:
-        """Configure logging to append to server.log in the data directory."""
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        log_file = self.data_dir / "server.log"
+        """Configure logging to the configured log destination.
+
+        If ``self.log_path`` is set, appends to that file (creating its
+        parent directory if needed — that parent is never the data dir).
+        Otherwise logs to stderr. Never creates the data directory.
+        """
+        if self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            handler: logging.Handler = logging.FileHandler(self.log_path, mode="a")
+        else:
+            handler = logging.StreamHandler()
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-            handlers=[logging.FileHandler(log_file, mode="a")],
+            handlers=[handler],
         )
 
     def _signal_handler(self, sig: int) -> None:
@@ -197,6 +211,7 @@ class OddaServer:
         return {
             "socket": str(self.socket_path),
             "data_dir": str(self.data_dir),
+            "log_path": str(self.log_path) if self.log_path is not None else "",
             "parent_pid": self.parent_pid,
             "proxy_url": self.proxy.proxy_url if self.proxy else None,
             "browser_count": self.browser.browser_count if self.browser else 0,
@@ -699,13 +714,15 @@ def run(
     socket_path: str | Path,
     data_dir: str | Path,
     parent_pid: int | None = None,
+    log_path: str | Path | None = None,
 ) -> None:
     """Run the odda server.
 
     Args:
         socket_path: Unix socket path.
-        data_dir: Data directory.
+        data_dir: Data directory. Created lazily on first state write.
         parent_pid: Optional parent PID to watch.
+        log_path: File to append logs to. ``None`` logs to stderr.
     """
-    server = OddaServer(socket_path, data_dir, parent_pid)
+    server = OddaServer(socket_path, data_dir, parent_pid, log_path=log_path)
     asyncio.run(server.run())

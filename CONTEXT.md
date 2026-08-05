@@ -2,6 +2,16 @@
 
 ## Language
 
+## Storage locations
+
+**Session dir**:
+`$XDG_RUNTIME_DIR` — holds the per-PID Unix socket (`odda-<pid>.sock`) and the per-PID server log (`odda-<pid>.log`). Ephemeral: tied to one odda server process, cleaned on logout/reboot. Created by the OpenCode plugin (or whoever starts the server); the data dir is not. `odda logs` finds the log here via `ODDA_LOG` or `status.log_path`.
+_Avoid_: runtime dir, socket dir, temp dir
+
+**Data dir**:
+`.odda/` in the project directory (or `--data-dir` / `ODDA_DATA_DIR`) — holds persisted project state: `flows/`, `requests/`, `browsers/`. Created lazily on the first state-producing write (browser open, request clone, etc.), not when the server boots. Absent until odda is actually used; read-only commands (`status`, `version`, `logs`, `proxy-url`) never create it.
+_Avoid_: project dir, state dir, .odda dir
+
 ## CLI output
 
 **Text output**:

@@ -177,27 +177,65 @@ def _client(ctx: typer.Context) -> client.OddaClient:
     return client.OddaClient(socket_path=ctx.obj["socket"])
 
 
+def _status_field(ctx: typer.Context, field: str, label: str, missing_msg: str) -> Any:
+    """Fetch a single field from the server's ``status`` RPC.
+
+    Args:
+        ctx: Typer context (used for the client and json mode).
+        field: RPC key to read (e.g. ``"data_dir"``).
+        label: Human-readable name for the connection-error message
+            (e.g. ``"data directory"``).
+        missing_msg: Message emitted when the field is absent/empty.
+
+    Emits an error and exits if the server can't be reached or the field is
+    empty. Shared by resolvers that have no env-var shortcut.
+    """
+    try:
+        status = asyncio.run(_client(ctx).call("status"))
+    except client.OddaClientError as exc:
+        _emit_error(
+            f"Could not determine {label} from server: {exc}",
+            json_mode=ctx.obj["json"],
+        )
+        raise typer.Exit(code=1) from exc
+    value = status.get(field)
+    if not value:
+        _emit_error(missing_msg, json_mode=ctx.obj["json"])
+        raise typer.Exit(code=1)
+    return value
+
+
 def _resolve_data_dir(ctx: typer.Context) -> Path:
     """Resolve the data directory, falling back to the server's status."""
     path = ctx.obj["data_dir"] or os.environ.get("ODDA_DATA_DIR")
     if path:
         return Path(path)
-    try:
-        status = asyncio.run(_client(ctx).call("status"))
-    except client.OddaClientError as exc:
-        _emit_error(
-            f"Could not determine data directory from server: {exc}",
-            json_mode=ctx.obj["json"],
+    return Path(
+        _status_field(
+            ctx, "data_dir", "data directory", "Server did not report a data directory"
         )
-        raise typer.Exit(code=1) from exc
-    data_dir = status.get("data_dir")
-    if not data_dir:
-        _emit_error(
-            "Server did not report a data directory",
-            json_mode=ctx.obj["json"],
+    )
+
+
+def _resolve_log_path(ctx: typer.Context) -> Path:
+    """Resolve the server log file path.
+
+    Resolution order: ``ODDA_LOG`` env var (set by the plugin), then the
+    server's ``status.log_path`` field. Works even when the server process
+    has died, as long as ``ODDA_LOG`` is set — useful for post-mortem.
+    """
+    path = os.environ.get("ODDA_LOG")
+    if path:
+        return Path(path)
+    return Path(
+        _status_field(
+            ctx,
+            "log_path",
+            "log path",
+            "Server logs to stderr (no log file). Pass --log to the server "
+            "or set ODDA_LOG to capture logs to a file.",
         )
-        raise typer.Exit(code=1)
-    return Path(data_dir)
+    )
 
 
 @app.command()
@@ -229,6 +267,14 @@ def server_cmd(
     data_dir: str = typer.Option(
         ..., "--data-dir", envvar="ODDA_DATA_DIR", help="Data directory"
     ),
+    log_path: str | None = typer.Option(
+        None,
+        "--log",
+        help=(
+            "File to append server logs to (default: stderr). "
+            "Never creates the data directory."
+        ),
+    ),
     parent_pid: int | None = typer.Option(
         None,
         "--parent-pid",
@@ -239,7 +285,12 @@ def server_cmd(
 
     This command is normally started automatically by the OpenCode plugin.
     """
-    server.run(socket_path=socket, data_dir=data_dir, parent_pid=parent_pid)
+    server.run(
+        socket_path=socket,
+        data_dir=data_dir,
+        parent_pid=parent_pid,
+        log_path=log_path,
+    )
 
 
 @app.command()
@@ -256,7 +307,7 @@ def logs(
 ) -> None:
     """Show server logs."""
     json_mode = ctx.obj["json"]
-    log_file = _resolve_data_dir(ctx) / "server.log"
+    log_file = _resolve_log_path(ctx)
     if not log_file.exists():
         _emit_error(f"Log file not found: {log_file}", json_mode=json_mode)
         raise typer.Exit(code=1)

@@ -232,7 +232,7 @@ RENDERERS: dict[str, Renderer] = {
     "version": r_version,
     "install-opencode": KvSpec(["plugin", "skill"]),
     "status": KvSpec(
-        ["socket", "data_dir", "parent_pid", "proxy_url", "browser_count"]
+        ["socket", "data_dir", "parent_pid", "proxy_url", "browser_count", "log_path"]
     ),
     "proxy/url": PassthroughSpec(),
     "browser/open": KvSpec(["browser_id", "tab_id", "status"]),

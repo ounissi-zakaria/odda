@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { openSync } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { join } from "node:path";
 
 const RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || "/tmp";
@@ -21,6 +21,7 @@ async function waitForSocket(socketPath, timeoutMs = 5000) {
 export const OddaPlugin = async ({ directory }) => {
   const ppid = process.pid;
   const socketPath = join(RUNTIME_DIR, `odda-${ppid}.sock`);
+  const logPath = join(RUNTIME_DIR, `odda-${ppid}.log`);
   const dataDir = join(directory, ".odda");
   const oddaBin = process.env.ODDA_BIN || "odda";
   let started = false;
@@ -31,9 +32,13 @@ export const OddaPlugin = async ({ directory }) => {
     }
     started = true;
 
-    await mkdir(dataDir, { recursive: true });
-    const logFile = join(dataDir, "server.log");
-    const out = openSync(logFile, "a");
+    // The log file lives in the session dir (next to the socket), not the
+    // data dir. The data dir (.odda) is created lazily by the server on the
+    // first state-producing write, so we must not create it here. Pre-opening
+    // the fd preserves early-crash diagnostics (import errors, bad flags)
+    // before the server's own logging initialises. The session dir already
+    // exists (the socket lives there), so no mkdir is needed.
+    const out = openSync(logPath, "a");
 
     const server = spawn(
       oddaBin,
@@ -41,6 +46,7 @@ export const OddaPlugin = async ({ directory }) => {
         "server",
         "--socket", socketPath,
         "--data-dir", dataDir,
+        "--log", logPath,
         "--parent-pid", String(ppid),
       ],
       {
@@ -68,6 +74,7 @@ export const OddaPlugin = async ({ directory }) => {
       }
       output.env.ODDA_SOCKET = socketPath;
       output.env.ODDA_DATA_DIR = dataDir;
+      output.env.ODDA_LOG = logPath;
     },
   };
 };
