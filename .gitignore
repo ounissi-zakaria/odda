@@ -8,6 +8,9 @@ classroom/
 # issues to implement
 .scratch/
 
+# opencode local state (goals, session data)
+.opencode/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
