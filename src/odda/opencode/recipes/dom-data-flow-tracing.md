@@ -9,8 +9,7 @@ The workflow: Wrap confirms the API touch, Coverage finds the code path, Logpoin
 ```
 odda wrap calls add --browser-id 1 --tab-id 1 --expr EventTarget.prototype.addEventListener --name ael
 odda navigate --url http://target/ --browser-id 1 --tab-id 1   # re-navigate so the wrap runs
-odda eval --js "String(window.__oddaWrapFixture(window, 'message', function onMsg() {}))" --browser-id 1 --tab-id 1
-odda wrap dump --browser-id 1 --tab-id 1   # confirm 'message' registration, capture handler ref
+odda wrap dump --browser-id 1 --tab-id 1   # look for a call with args[0]=="message"; args[1] is the handler (its source is in the record)
 ```
 
 ## 2. Coverage to find which code path the handler runs when a message arrives

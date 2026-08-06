@@ -46,6 +46,6 @@ One JSON object per line, in completion order:
 
 ## Response bodies (decoding note)
 
-`response_body.<ext>` holds the **decoded** body (mitmproxy inflates gzip/br/deflate). The `response_headers` file shows the original on-wire headers, so `Content-Encoding: gzip` and the compressed `Content-Length` may not match the decoded body file. This is expected.
+`response_body.<ext>` holds the **decoded** body (gzip/br/deflate inflated). The `response_headers` file shows the original on-wire headers, so `Content-Encoding: gzip` and the compressed `Content-Length` may not match the decoded body file. This is expected.
 
-Per-flow files (`request`, `response_headers`, `response_body.*`, `error`) are written read-only (mode 0444) so history cannot be edited.
+Per-flow files (`request`, `response_headers`, `response_body.*`, `error`) are written read-only so history cannot be edited.

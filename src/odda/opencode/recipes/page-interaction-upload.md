@@ -38,7 +38,7 @@ Clicking may trigger navigation or an SPA swap — snapshot again to read the ne
 
 ## 5. Handle file inputs (the aria-label gotcha)
 
-Playwright omits a nameless `<input type="file">` from the a11y tree, so it won't appear in the snapshot. Give it an `aria-label` via `eval`, re-snapshot, then upload by the new ref:
+A nameless `<input type="file">` is omitted from the a11y tree, so it won't appear in the snapshot. Give it an `aria-label` via `eval`, re-snapshot, then upload by the new ref:
 
 ```
 odda eval --js "document.querySelector('input[type=file]').setAttribute('aria-label','upload')" --browser-id <B> --tab-id <T>

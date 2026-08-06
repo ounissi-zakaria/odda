@@ -1,6 +1,6 @@
 # Dynamic analysis
 
-Observing JavaScript execution in progress — recording what code does as it runs, with the intent to observe rather than modify. Three peer concepts under the Dynamic analysis umbrella, chosen by what you know (per ADR-0002, there is deliberately no umbrella "Probe" noun — the agent picks directly from its state, never by first choosing an umbrella then a variant):
+Observing JavaScript execution in progress — recording what code does as it runs, with the intent to observe rather than modify. Three peer concepts, chosen by what you know (there is deliberately no umbrella "Probe" noun — pick directly from your state, never by first choosing an umbrella then a variant):
 
 - **Wrap** — "I know the function/property" → wrap it and record each call/access.
 - **Logpoint** — "I know the line" → plant a non-pausing observation at a source location.
@@ -13,7 +13,7 @@ All commands in this file are tab-scoped; see the Targeting model in [SKILL.md](
 Applies to Wrap and Logpoint (Coverage is navigation-persistent — see its section below).
 
 - **Records wipe on navigation.** Records from the previous page load are gone after a navigate. **Dump before navigating again** or the records are lost.
-- **Scope: main frame and same-origin iframes.** Both Wrap and Logpoint reach the main frame and same-origin iframes. Wrap **also** reaches cross-origin iframes (records stay in the iframe's context — read them by evaluating in the iframe); Logpoint **does not** reach cross-origin iframes. Neither reaches worker contexts (web workers, service workers). Installations are per-browser (ADR-0010; see [USERSCRIPTS.md](USERSCRIPTS.md)).
+- **Scope: main frame and same-origin iframes.** Both Wrap and Logpoint reach the main frame and same-origin iframes. Wrap **also** reaches cross-origin iframes (records stay in the iframe's context — read them by evaluating in the iframe); Logpoint **does not** reach cross-origin iframes. Neither reaches worker contexts (web workers, service workers). Installations are per-browser (see [USERSCRIPTS.md](USERSCRIPTS.md)).
 - **`wrap remove` / `logpoint remove`** on an unknown name/id errors.
 
 ## Shared: command shape
@@ -70,7 +70,7 @@ Commands:
 
 ## Logpoint
 
-A placed observation at a source location the agent identifies by script URL, line, and column. odda plants a non-pausing `Debugger.setBreakpointByUrl` whose condition evaluates an expression the agent supplies, in the paused-then-immediately-resumed frame's scope. The page never stops. The expression can have side effects if the agent writes them, but the intent is to read, not write.
+A placed observation at a source location the agent identifies by script URL, line, and column. odda plants a non-pausing breakpoint whose condition evaluates an expression the agent supplies, in the paused-then-immediately-resumed frame's scope. The page never stops. The expression can have side effects if the agent writes them, but the intent is to read, not write.
 
 The agent supplies `--url` (script URL), `--line` (0-based), `--col` (0-based), and `--expr` (JS expression). The expression is evaluated in the paused frame's scope, so it can read locals by name. Minified code packs many statements per line, so **the column is required** to hit the right statement — without it, the logpoint binds to the first breakable location at or after the line, which may be a different statement than the one you want.
 
@@ -135,7 +135,7 @@ Commands:
 
 ### Delta and cumulative semantics (important)
 
-Each `snapshot` read resets V8's block counters, so a take returns the delta since the previous take (not a running total). odda accumulates these deltas server-side so:
+Each `snapshot` read resets the block counters, so a take returns the delta since the previous take (not a running total). odda accumulates these deltas server-side so:
 
 - `snapshot` returns the **delta** since the previous take (or since `start` for the first take). Use it to read mid-window progress or to slice a sub-window (subtract two `snapshot` deltas).
 - `stop` returns the **cumulative counts for the whole recording window** (the sum of every take since `start`, including any intermediate `snapshot` reads). You always get the full-window picture at `stop`, regardless of whether you snapshotted mid-way.
