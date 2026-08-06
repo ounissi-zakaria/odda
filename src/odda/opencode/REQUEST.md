@@ -13,7 +13,7 @@ Editable requests live in `.odda/requests/<name>/`:
 
 - `odda request clone --flow-id <flow-id> --name <name> [--force]` — Copy `.odda/flows/<flow-id>/request` into `.odda/requests/<name>/request` and copy the flow's `meta.json` sidecar (scheme/host/port) into the editable request's `meta.json`. The `Host` header in the request file is left untouched and goes on the wire verbatim (it may intentionally differ from `meta.json`'s `host` for vhost/host-header/SSRF tests). Errors if the flow has no `meta.json` sidecar (older captures — re-capture). Refuses to overwrite an existing request unless `--force`.
 - `odda request new --name <name> --host <host> [--protocol http|https] [--port <port>] [--force]` — Create an empty `request` file (0 bytes) and a `meta.json` with the given host, protocol (default `https`), and port (default 80 for `http`, 443 for `https`). Fill the `request` file with the edit tool.
-- `odda request send --name <name> [--fix-content-length] [--timeout 30] [--insecure]` — Read both files, open a TCP socket (TLS for https, HTTP/2 when the request line says `HTTP/2`), write the exact bytes from the `request` file, read the response, decode it (de-chunk + gzip/br/deflate/zstd), and write a flow record to `.odda/flows/<NNNNN>/`. The sent request is recorded before the network exchange (two-phase durability), so a crash leaves a durable request file. Output is the `flows.jsonl` record that was appended; read `.odda/flows/<id>/response_body.*` for the body.
+- `odda request send --name <name> [--fix-content-length] [--timeout 30] [--insecure]` — Read both files, open a TCP socket (TLS for https, HTTP/2 when the request line says `HTTP/2`), write the exact bytes from the `request` file, read the response, decode it (de-chunk + gzip/br/deflate/zstd), and write a flow record to `.odda/flows/<NNNNN>/`. The sent request is recorded before the network exchange, so a crash leaves a durable request file. Output is the `flows.jsonl` record that was appended; read `.odda/flows/<id>/response_body.*` for the body.
 
 ## Multi-name pipeline (`--name` repeated)
 
@@ -25,7 +25,7 @@ Repeat `--name` to send two or more editable requests on **one HTTP/1.1 connecti
   - `--fix-content-length` + multi-name → error (it would overwrite the intentionally-wrong `Content-Length` that smuggling payloads depend on).
   - Any `--name` whose request line says `HTTP/2` → error (H1-style smuggling is meaningless in pure H2; use single-name `send` for H2).
   - Any `--name` with a body but no `Content-Length` and no `Transfer-Encoding` → error (it would require half-closing the socket, ending the connection). Single-name `send` still allows this via EOF; multi-name does not.
-- **Mid-sequence failure.** If step N fails (timeout, connection drop), step N gets today's error flow; the remaining steps are recorded as `aborted: step N failed (...)` error flows (their request files were pre-written). The connection closes. `flows.jsonl` stays complete — every pre-written request has a line.
+- **Mid-sequence failure.** If step N fails (timeout, connection drop), step N gets today's error flow; the remaining steps are recorded as `aborted: step N failed (...)` error flows. The connection closes. `flows.jsonl` stays complete — every request has a line.
 
 ## `--pipelining` (multi-name only)
 
@@ -44,6 +44,6 @@ Repeat `--name` to send two or more editable requests on **one HTTP/1.1 connecti
 - **`send` re-reads the `request` file at call time.** You may overwrite it freely between sends (e.g. `printf > .odda/requests/<name>/request` then `send`, then overwrite and `send` again). Only `clone`/`new` refuse to overwrite without `--force`.
 - **No pre-flight validation.** Malformed requests fail at the socket/TLS/H2 layer; the error is captured in the flow's `error` file.
 - **HTTP/2** — if the request line says `HTTP/2`, `send` speaks HTTP/2 on the wire (pseudo-headers synthesized from the request line + `Host` + `meta.json`). The stored `request` file stays H1-shaped text with `HTTP/2` in the version field (consistent with how captured H2 flows are stored). If the server doesn't speak HTTP/2, `send` errors — edit the request line to `HTTP/1.1` and resend.
-- **Missing framing** — if a body exists with no `Content-Length` and no `Transfer-Encoding: chunked`, `send` half-closes the socket (`write_eof`) after the body so the server sees EOF.
+- **Missing framing** — if a body exists with no `Content-Length` and no `Transfer-Encoding: chunked`, `send` half-closes the socket after the body so the server sees EOF.
 - **Binary bodies** — the `request` file is bytes; populate it via shell (`cat`, `cp`) if the edit tool can't author the bytes you need.
 - **Captured-sent requests are stored in the same `flows.jsonl`** as proxied captures, with `scheme` and `port` fields populated. `flows.jsonl` records from older captures may lack these fields; treat them as `https`/`443` when absent. See [FLOWS.md](FLOWS.md) for the `flows.jsonl` schema.
