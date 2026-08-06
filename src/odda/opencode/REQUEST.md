@@ -19,8 +19,7 @@ Editable requests live in `.odda/requests/<name>/`:
 
 Repeat `--name` to send two or more editable requests on **one HTTP/1.1 connection** (sequential keep-alive by default). This enables the same-connection attack class — response-queue poisoning, same-connection CL.0 confirmation — that repeated single-name `send` cannot, because each single-name `send` opens a fresh connection and a poisoned response-queue does not survive across connections.
 
-- **Single-name is frozen.** One `--name` keeps today's exact contract: one flow record, one `--json` object, connection closed after the response. Multi-name is additive — a new output mode you opt into by passing a second `--name`.
-- **Multi-name output.** Two or more `--name` → one flow record per request, all on one connection. `--json` returns a **list** of flow records; text renders one `key: value` block per request, blocks separated by a blank line.
+- **Output.** One flow record per request, all on one connection. `--json` returns a **list** of flow records; text renders one `key: value` block per request, blocks separated by a blank line.
 - **Same `--timeout` semantics.** One deadline for connect + all sends + all reads. Pick a generous total for slow smuggling responses.
 - **Pre-emptive rejections** (before the socket opens):
   - `--fix-content-length` + multi-name → error (it would overwrite the intentionally-wrong `Content-Length` that smuggling payloads depend on).
