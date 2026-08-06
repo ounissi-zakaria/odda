@@ -21,7 +21,11 @@ from odda.request import (
     clone as clone_request,
     new as new_request,
     send as send_request,
+    send_pipeline as send_request_pipeline,
 )
+
+# Two or more names selects the multi-name pipeline mode (ADR-0019).
+_PIPELINE_MIN_NAMES = 2
 
 
 class OddaServer:
@@ -742,16 +746,36 @@ class OddaServer:
             force=params.get("force", False),
         )
 
-    async def method_request_send(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def method_request_send(self, params: dict[str, Any]) -> Any:
         """Send an editable request and record the response as a flow.
 
+        Single-name (``name``) is the frozen single-shot contract: one
+        flow record, one ``--json`` object. Multi-name (``names`` as a
+        list of two or more) is the pipeline mode: one HTTP/1.1
+        connection, one flow record per request, a list of records in
+        ``--json``. See ADR-0019.
+
         Params:
-            name: Editable request name.
+            name: Editable request name (single-name mode).
+            names: List of editable request names (multi-name pipeline
+                mode). When present, ``name`` is ignored.
             fix_content_length: Recompute Content-Length from the body
-                before sending (default False).
+                before sending (single-name only; rejected in multi-name).
             timeout: Total timeout in seconds (default 30).
             insecure: Skip TLS certificate verification (default False).
+            pipelining: Send all requests then read all responses (true
+                H1 pipelining) instead of send-then-read per request
+                (sequential keep-alive, the default). Multi-name only.
         """
+        names = params.get("names")
+        if isinstance(names, list) and len(names) >= _PIPELINE_MIN_NAMES:
+            return await send_request_pipeline(
+                names,
+                fix_content_length=params.get("fix_content_length", False),
+                timeout=float(params.get("timeout", 30.0)),
+                insecure=params.get("insecure", False),
+                pipelining=params.get("pipelining", False),
+            )
         return await send_request(
             params["name"],
             fix_content_length=params.get("fix_content_length", False),

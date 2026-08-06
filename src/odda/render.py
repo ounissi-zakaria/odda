@@ -176,6 +176,29 @@ def r_tabs_list(rows: list[dict[str, Any]]) -> str:
     return _table(flat, "browser_id", "tab_id", "url", "title")
 
 
+_REQUEST_SEND_KEYS = [
+    "id",
+    "method",
+    "scheme",
+    "host",
+    "port",
+    "path",
+    "status_code",
+    "total_duration_ms",
+    "body_file",
+    "error",
+]
+
+
+def r_request_send(result: Any) -> str:
+    # Single-name (frozen): one dict -> key: value lines. Multi-name: list
+    # of dicts -> one block per request, blocks separated by a blank line
+    # (ADR-0019). The single-name shape is byte-identical to the old KvSpec.
+    if isinstance(result, list):
+        return "\n\n".join(_kv(rec, *_REQUEST_SEND_KEYS) for rec in result)
+    return _kv(result, *_REQUEST_SEND_KEYS)
+
+
 def r_coverage_start(d: dict[str, Any]) -> str:
     return str(d.get("status", ""))
 
@@ -282,18 +305,5 @@ RENDERERS: dict[str, Renderer] = {
     "proxy-script/remove": KvSpec(["name", "removed"]),
     "request/clone": KvSpec(["name", "path", "flow_id", "scheme", "host", "port"]),
     "request/new": KvSpec(["name", "path", "scheme", "host", "port"]),
-    "request/send": KvSpec(
-        [
-            "id",
-            "method",
-            "scheme",
-            "host",
-            "port",
-            "path",
-            "status_code",
-            "total_duration_ms",
-            "body_file",
-            "error",
-        ]
-    ),
+    "request/send": r_request_send,
 }

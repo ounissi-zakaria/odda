@@ -1162,33 +1162,60 @@ def request_new(
     )
 
 
+# Two or more --name flags selects the multi-name pipeline mode (ADR-0019);
+# one --name keeps the frozen single-shot contract.
+_PIPELINE_MIN_NAMES = 2
+
+
 @request_app.command("send")
 def request_send(
     ctx: typer.Context,
-    name: str = typer.Option(
-        ..., "--name", help="Name of the editable request to send"
+    name: list[str] = typer.Option(
+        ...,
+        "--name",
+        help="Name of the editable request to send (repeat for multi-name pipeline)",
     ),
     fix_content_length: bool = typer.Option(
         False,
         "--fix-content-length",
-        help="Recompute Content-Length from the body before sending",
+        help="Recompute Content-Length from the body before sending (single-name only)",
     ),
     timeout: float = typer.Option(30.0, "--timeout", help="Total timeout in seconds"),
     insecure: bool = typer.Option(
         False, "--insecure", help="Skip TLS certificate verification"
     ),
+    pipelining: bool = typer.Option(
+        False,
+        "--pipelining",
+        help="Multi-name only: send all requests then read all responses (true H1 "
+        "pipelining) instead of send-then-read per request "
+        "(default sequential keep-alive)",
+    ),
 ) -> None:
-    """Send an editable request and record the response as a flow."""
+    """Send an editable request and record the response as a flow.
+
+    One ``--name`` is the single-shot contract (one flow record). Two or
+    more ``--name`` flags is the multi-name pipeline: one HTTP/1.1
+    connection, one flow record per request, a list in ``--json``. See
+    ADR-0019 for the contract and the rejected alternatives.
+    """
+    if len(name) >= _PIPELINE_MIN_NAMES:
+        payload: dict[str, Any] = {
+            "names": name,
+            "fix_content_length": fix_content_length,
+            "timeout": timeout,
+            "insecure": insecure,
+            "pipelining": pipelining,
+        }
+    else:
+        payload = {
+            "name": name[0],
+            "fix_content_length": fix_content_length,
+            "timeout": timeout,
+            "insecure": insecure,
+        }
     _run_coro(
-        _client(ctx).call(
-            "request/send",
-            {
-                "name": name,
-                "fix_content_length": fix_content_length,
-                "timeout": timeout,
-                "insecure": insecure,
-            },
-        ),
+        _client(ctx).call("request/send", payload),
         ctx,
         "request/send",
     )

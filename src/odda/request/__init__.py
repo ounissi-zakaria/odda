@@ -11,6 +11,6 @@ index as captured ones.
 
 from __future__ import annotations
 
-from odda.request.api import clone, new, send
+from odda.request.api import clone, new, send, send_pipeline
 
-__all__ = ["clone", "new", "send"]
+__all__ = ["clone", "new", "send", "send_pipeline"]

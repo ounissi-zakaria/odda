@@ -73,6 +73,7 @@ Add the targeting flags from the Targeting model above to every command below �
 | Clone a flow to edit        | `odda request clone --flow-id <flow-id> --name <name> [--force]`   |
 | Create an empty request     | `odda request new --name <name> [--force]`                         |
 | Send an editable request    | `odda request send --name <name> [flags]`                          |
+| Send N on one connection    | `odda request send --name <a> --name <b> ... [--pipelining]`        |
 
 ## Browser automation
 
@@ -173,9 +174,9 @@ Commands:
 
 - `odda request clone --flow-id <flow-id> --name <name> [--force]` — Copy `.odda/flows/<flow-id>/request` into `.odda/requests/<name>/request` and copy the flow's `meta.json` sidecar (scheme/host/port) into the editable request's `meta.json`. The `Host` header in the request file is left untouched and goes on the wire verbatim. Refuses to overwrite an existing request unless `--force`. Prints `name`/`path`/`flow_id`/`scheme`/`host`/`port` lines (text) or the same as JSON (`--json`).
 - `odda request new --name <name> --host <host> [--protocol http|https] [--port <port>] [--force]` — Create an empty `request` file (0 bytes) and a `meta.json` with the given host, protocol (default `https`), and port (default 80 for `http`, 443 for `https`). Fill the `request` file with the edit tool. Prints `name`/`path`/`scheme`/`host`/`port` lines (text) or the same as JSON (`--json`).
-- `odda request send --name <name> [--fix-content-length] [--timeout 30] [--insecure]` — Read both files, open a TCP socket (TLS for https, HTTP/2 when the request line says `HTTP/2`), write the exact bytes from the `request` file, read the response, decode it (de-chunk + gzip/br/deflate/zstd), and write a flow record to `.odda/flows/<NNNNN>/`. Output is the flow record (`id`/`method`/`scheme`/`host`/`port`/`path`/`status_code`/`total_duration_ms`/`body_file`/`error` as `key: value` lines in text, or the `flows.jsonl` record object with `--json`); read `.odda/flows/<id>/response_body.*` for the body.
+- `odda request send --name <name> [--fix-content-length] [--timeout 30] [--insecure]` — Read both files, open a TCP socket (TLS for https, HTTP/2 when the request line says `HTTP/2`), write the exact bytes from the `request` file, read the response, decode it (de-chunk + gzip/br/deflate/zstd), and write a flow record to `.odda/flows/<NNNNN>/`. Output is the flow record (`id`/`method`/`scheme`/`host`/`port`/`path`/`status_code`/`total_duration_ms`/`body_file`/`error` as `key: value` lines in text, or the `flows.jsonl` record object with `--json`); read `.odda/flows/<id>/response_body.*` for the body. **Repeat `--name`** to send two or more requests on one HTTP/1.1 connection (the multi-name pipeline): `--name <smuggle> --name <victim>` sends both on one connection, enabling same-connection attacks (response-queue poisoning, CL.0 confirmation) that repeated single-name sends cannot. Multi-name `--json` returns a list of flow records; text renders one block per request. `--pipelining` (multi-name only) sends all then reads all instead of send-then-read per request. See [REQUEST.md](REQUEST.md) for the multi-name contract, the `--pipelining` flag, and the pre-emptive rejections.
 
-For the `send` flags (`--fix-content-length`, `--timeout`, `--insecure`), HTTP/2 framing, missing-body framing, and binary-body handling, see [REQUEST.md](REQUEST.md).
+For the `send` flags (`--fix-content-length`, `--timeout`, `--insecure`, `--pipelining`), HTTP/2 framing, missing-body framing, and binary-body handling, see [REQUEST.md](REQUEST.md).
 
 ## Server commands
 
