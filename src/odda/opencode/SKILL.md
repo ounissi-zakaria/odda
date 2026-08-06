@@ -52,6 +52,9 @@ Add the targeting flags from the Targeting model above to every command below �
 | Install a userscript        | `odda userscript install --name <name> --file <path>`             |
 | List userscripts            | `odda userscript list`                                            |
 | Remove a userscript         | `odda userscript remove --name <name>`                            |
+| Install a proxy-script      | `odda proxy-script install --name <name> --file <path> [--force]` |
+| List proxy-scripts          | `odda proxy-script list`                                          |
+| Remove a proxy-script       | `odda proxy-script remove --name <name>`                          |
 | Start block coverage        | `odda coverage start`                                             |
 | Read coverage mid-recording | `odda coverage snapshot`                                          |
 | Stop coverage + final counts| `odda coverage stop`                                              |
@@ -119,6 +122,16 @@ All action commands accept `--timeout` (default 5 seconds) for ref resolution an
 - `odda userscript remove --name <name>` — Remove a userscript from the given browser's scope and reload its extension. The script's effects on the current page are not undone; it won't run on future navigations.
 
 For per-browser storage internals, the built-in dialog interceptor (records `window.print`/`alert`/`confirm`/`prompt` calls into `window.__oddaDialogs`), and default userscripts, see [USERSCRIPTS.md](USERSCRIPTS.md).
+
+## Proxy-scripts (cross-cutting, proxy layer)
+
+`odda proxy-script` manages Python files in mitmproxy `-s` script format that odda execs and adds to the running proxy's addon chain. Install one to intercept, modify, record, or generate HTTP traffic at the proxy layer — before it reaches the browser or the upstream server. The file's module namespace is the addon: top-level `request`/`response`/`load`/`running`/... hook functions, or an `addons = [...]` list for composition — exactly what works with `mitmproxy -s addon.py`. Full mitmproxy addon power, including `ctx.options` and `loader.add_option(...)`. **Runs in the server process with full privileges** (file/network/subprocess access); the risk is documented, not gated. See [PROXY-SCRIPTS.md](PROXY-SCRIPTS.md) for the exec contract, scope, and failure model.
+
+- `odda proxy-script install --name <name> --file <path>` — Install a `.py` file as a proxy-script. Refuses to overwrite an existing name without `--force` (same semantics as `request clone`/`new`); with `--force`, removes the existing instance and adds the new one. Alternatively, use `--source "<py>"` for inline source (mutually exclusive with `--file`). Prints `name`/`size` lines (text) or the same as JSON (`--json`). Persisted under `.odda/proxy-scripts/<name>/script.py` and re-added on server boot.
+- `odda proxy-script list` — List installed proxy-scripts. Text output is a table (`name  size`); `--json` returns `[{name, size}]`. A proxy-script whose exec failed at boot is listed (on disk) but not live — check `odda logs` for the error.
+- `odda proxy-script remove --name <name>` — Remove a proxy-script: deletes its on-disk source and removes the live addon from the proxy chain. Prints `name`/`removed` lines (text) or the same as JSON (`--json`).
+
+Scope is **global** — one proxy shared across all browsers, so a proxy-script sees every flow (not per-browser like userscripts; see ADR-0018). odda's flow capture (`FlowFileAddon`) is ahead of user proxy-scripts in the addon chain, so captured `.odda/flows/<id>/` files record the **original** request/response and a proxy-script's mutations affect what goes upstream, not what is captured. Runtime hook errors are logged by mitmproxy's `safecall()` and surface via `odda logs`; a failing proxy-script never crashes the proxy.
 
 ## Dynamic analysis
 

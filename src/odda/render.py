@@ -277,6 +277,9 @@ RENDERERS: dict[str, Renderer] = {
     "userscript/install": KvSpec(["name", "size", "extension_id"]),
     "userscript/list": TableSpec(["name", "size"], "(no userscripts)"),
     "userscript/remove": KvSpec(["name", "removed", "extension_id"]),
+    "proxy-script/install": KvSpec(["name", "size"]),
+    "proxy-script/list": TableSpec(["name", "size"], "(no proxy-scripts)"),
+    "proxy-script/remove": KvSpec(["name", "removed"]),
     "request/clone": KvSpec(["name", "path", "flow_id", "scheme", "host", "port"]),
     "request/new": KvSpec(["name", "path", "scheme", "host", "port"]),
     "request/send": KvSpec(

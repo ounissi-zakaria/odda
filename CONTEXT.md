@@ -50,6 +50,12 @@ _Avoid_: hook, trap, intercept, monkey-patch, probe, breakpoint
 A JS helper that auto-runs at `document_start` on every navigation, before the page's own scripts, in the main world. Installed via `odda userscript install` and re-injected on every page load. odda ships built-in default userscripts (notably the dialog interceptor recording `window.print`/`alert`/`confirm`/`prompt` calls into `window.__oddaDialogs`). Scope: per-browser, not shared across browsers; an agent opening a fresh browser starts with only the default userscripts.
 _Avoid_: content script, extension script, injected helper, hook
 
+## Proxy interception
+
+**Proxy-script**:
+A Python file in mitmproxy `-s` script format that odda execs and adds to the running proxy's addon chain. Installed via `odda proxy-script install` (with `--force` to overwrite by name), persisted under `.odda/proxy-scripts/<name>/script.py`, re-added on server boot; scope is global (one proxy shared across all browsers, not per-browser like userscripts).
+_Avoid_: addon, interceptor, proxy addon, mitmproxy script, userscript
+
 **Dialog response**:
 A pre-registered value the dialog interceptor returns for a `confirm` or `prompt` call instead of the default. Defaults: `confirm` returns `true`, `prompt` returns `"odda"` (proceed-by-default). The agent overrides per-type by setting `window.__oddaDialogResponses` (e.g. `{prompt: "s3cr3t"}`) via `eval` before the triggering click, or via a userscript for on-load prompts; the interceptor reads the map and returns the registered value, recording the dialog in `window.__oddaDialogs` with that `result`. To restore the old deny-by-default, register `{confirm: false, prompt: null}`. The interceptor never resets the map (agent-owned state); no map set = proceed-by-default. Per-tab: the map lives on `window`, scoped to one document. Keys for `alert`/`print` are ignored — those types have no return value to influence. Registered values pass through verbatim (no type coercion).
 _Avoid_: dialog handler, dialog stub, dialog mock, prompt override

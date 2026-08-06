@@ -28,6 +28,10 @@ request_app = typer.Typer(name="request", help="Raw HTTP request commands")
 userscript_app = typer.Typer(
     name="userscript", help="Manage userscripts that auto-run on every page"
 )
+proxy_script_app = typer.Typer(
+    name="proxy-script",
+    help="Manage proxy-scripts (user-supplied mitmproxy addons that run in the proxy)",
+)
 coverage_app = typer.Typer(
     name="coverage", help="Block-level code coverage (start, snapshot, stop)"
 )
@@ -46,6 +50,7 @@ app.add_typer(browser_app)
 app.add_typer(tabs_app)
 app.add_typer(request_app)
 app.add_typer(userscript_app)
+app.add_typer(proxy_script_app)
 app.add_typer(coverage_app)
 app.add_typer(wrap_app)
 wrap_app.add_typer(wrap_calls_app)
@@ -1268,6 +1273,80 @@ def userscript_remove(
         ),
         ctx,
         "userscript/remove",
+    )
+
+
+@proxy_script_app.command("install")
+def proxy_script_install(
+    ctx: typer.Context,
+    name: str = typer.Option(..., "--name", help="Name for the proxy-script"),
+    file: Path | None = typer.Option(
+        None, "--file", "-f", help="Python file (mitmproxy -s format) to install"
+    ),
+    source: str | None = typer.Option(
+        None,
+        "--source",
+        help="Inline Python source (mutually exclusive with --file)",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite an existing proxy-script of the same name",
+    ),
+) -> None:
+    """Install a proxy-script (mitmproxy addon) from a file or inline source.
+
+    The file is a mitmproxy ``-s`` script: its module namespace is the
+    addon (top-level ``request``/``response``/``load``/``running``/...
+    hooks, or an ``addons = [...]`` list). odda execs it in the running
+    proxy process, so it has full server-process privileges (file and
+    network access). Overwrites an existing proxy-script of the same
+    name only with ``--force``. Persisted under
+    ``.odda/proxy-scripts/<name>/script.py`` and re-added on server boot.
+    Scope is global: one proxy shared across all browsers.
+    """
+    if file is not None and source is not None:
+        _emit_error(
+            "Provide either --file or --source, not both", json_mode=ctx.obj["json"]
+        )
+        raise typer.Exit(code=1)
+    if file is None and source is None:
+        _emit_error("Provide --file <path> or --source <py>", json_mode=ctx.obj["json"])
+        raise typer.Exit(code=1)
+    if file is not None:
+        if not file.is_file():
+            _emit_error(f"File not found: {file}", json_mode=ctx.obj["json"])
+            raise typer.Exit(code=1)
+        payload: dict[str, Any] = {"name": name, "file": str(file), "force": force}
+    else:
+        payload = {"name": name, "source": source, "force": force}
+    _run_coro(
+        _client(ctx).call("proxy-script/install", payload),
+        ctx,
+        "proxy-script/install",
+    )
+
+
+@proxy_script_app.command("list")
+def proxy_script_list(ctx: typer.Context) -> None:
+    """List installed proxy-scripts."""
+    _run_coro(
+        _client(ctx).call("proxy-script/list", {}),
+        ctx,
+        "proxy-script/list",
+    )
+
+
+@proxy_script_app.command("remove")
+def proxy_script_remove(
+    ctx: typer.Context,
+    name: str = typer.Option(..., "--name", help="Name of the proxy-script to remove"),
+) -> None:
+    """Remove a proxy-script: delete its source and drop it from the live proxy."""
+    _run_coro(
+        _client(ctx).call("proxy-script/remove", {"name": name}),
+        ctx,
+        "proxy-script/remove",
     )
 
 

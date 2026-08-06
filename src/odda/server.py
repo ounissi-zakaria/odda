@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from odda import flowstore, rpc
+from odda import flowstore, proxyscript, rpc
 from odda.browser import (
     NAVIGATE_WAIT_UNTIL_EVENTS,
     BrowserManager,
@@ -63,6 +63,12 @@ class OddaServer:
         flowstore.set_data_dir(self.data_dir)
         self.proxy = ProxyServer()
         self.browser = BrowserManager(proxy=self.proxy)
+        # Re-add any proxy-scripts persisted from a previous server run.
+        # Called after set_data_dir so the manager sees the right .odda
+        # path, and after ProxyServer is up so the DumpMaster addon chain
+        # is ready. A failing proxy-script is logged and skipped, never
+        # blocking boot.
+        self.proxy.restore_scripts_on_boot()
 
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         if self.socket_path.exists():
@@ -657,6 +663,50 @@ class OddaServer:
         return await self.browser.remove_userscript(
             params["browser_id"], params["name"]
         )
+
+    # --- Proxy-script handlers ---
+
+    async def method_proxy_script_install(
+        self, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Install a proxy-script (user-supplied mitmproxy addon).
+
+        Params:
+            name: Proxy-script name (odda's key; overwrite gated by ``force``).
+            file: Path to a .py file (read by the server), or
+            source: Inline Python source. ``file`` takes precedence.
+            force: If False (default), refuse when ``name`` is already
+                installed; if True, remove the existing instance first.
+        """
+        name = params["name"]
+        file_path = params.get("file")
+        if file_path:
+            source = Path(file_path).read_text(encoding="utf-8")
+        else:
+            source = params.get("source", "")
+        if not source.strip():
+            raise rpc.JsonRpcError(rpc.INVALID_PARAMS, "source is empty")
+        force = bool(params.get("force", False))
+        if not force and proxyscript.name_exists(name):
+            raise rpc.JsonRpcError(
+                rpc.INVALID_PARAMS,
+                f"Proxy-script '{name}' already installed. Use --force to overwrite.",
+            )
+        return self.proxy.install_script(name, source)
+
+    async def method_proxy_script_list(self, _params: dict[str, Any]) -> list[dict]:
+        """List installed proxy-scripts (from disk, annotated with live state)."""
+        return self.proxy.list_scripts()
+
+    async def method_proxy_script_remove(
+        self, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Remove a proxy-script: live instance + on-disk source.
+
+        Params:
+            name: Proxy-script name.
+        """
+        return self.proxy.remove_script(params["name"])
 
     # --- Request (raw resend) handlers ---
 

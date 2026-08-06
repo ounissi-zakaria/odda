@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import socket
 from contextlib import suppress
+from typing import Any
 
 from mitmproxy.options import Options
 from mitmproxy.tools.dump import DumpMaster
 
 from odda.flowstore import FlowFileAddon
+from odda.proxyscript import ProxyScriptManager
 
 
 class ProxyServer:
@@ -51,6 +53,14 @@ class ProxyServer:
         self.db_addon = FlowFileAddon()
         self.m.addons.add(self.db_addon)
 
+        # Proxy-script manager: holds user-supplied mitmproxy addons.
+        # Constructed after FlowFileAddon so FlowFileAddon stays ahead of
+        # user proxy-scripts in the chain — captured .odda/flows/<id>/
+        # files record the original request/response and a proxy-script's
+        # mutations affect what goes upstream, not what is captured
+        # (ADR-0018).
+        self.scripts = ProxyScriptManager(self.m)
+
         self.task = asyncio.create_task(self.m.run())
 
     @staticmethod
@@ -83,3 +93,39 @@ class ProxyServer:
             HTTP proxy URL string.
         """
         return f"http://{self.options.listen_host}:{self.options.listen_port}"
+
+    # --- proxy-scripts ------------------------------------------------
+
+    def install_script(self, name: str, source: str) -> dict[str, Any]:
+        """Persist, exec, and add a proxy-script under ``name``.
+
+        Overwrites an existing proxy-script of the same name (remove-then-add),
+        which is the ``--force`` path; the caller gates whether overwrite
+        is allowed.
+
+        Raises:
+            ValueError: If exec fails (syntax/import error). The persisted
+                file is left on disk for the boot scan to retry.
+        """
+        return self.scripts.install(name, source)
+
+    def remove_script(self, name: str) -> dict[str, Any]:
+        """Remove a proxy-script: live instance + on-disk source.
+
+        Raises:
+            ValueError: If the proxy-script is not on disk.
+        """
+        return self.scripts.remove(name)
+
+    def list_scripts(self) -> list[dict[str, Any]]:
+        """List proxy-scripts from disk, annotated with whether they're live."""
+        return self.scripts.list_live()
+
+    def restore_scripts_on_boot(self) -> None:
+        """Re-exec and add every persisted proxy-script.
+
+        Called during server boot, after :func:`flowstore.set_data_dir`.
+        A proxy-script that fails to exec is logged and skipped; the rest
+        of the chain comes up.
+        """
+        self.scripts.restore_on_boot()
