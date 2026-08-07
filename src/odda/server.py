@@ -22,10 +22,13 @@ from odda.request import (
     new as new_request,
     send as send_request,
     send_pipeline as send_request_pipeline,
+    send_repeat as send_request_repeat,
 )
 
 # Two or more names selects the multi-name pipeline mode (ADR-0019).
 _PIPELINE_MIN_NAMES = 2
+# repeat >= 2 selects the concurrent-send mode (ADR-0020).
+_REPEAT_MIN = 2
 
 
 class OddaServer:
@@ -752,20 +755,27 @@ class OddaServer:
         Single-name (``name``) is the frozen single-shot contract: one
         flow record, one ``--json`` object. Multi-name (``names`` as a
         list of two or more) is the pipeline mode: one HTTP/1.1
-        connection, one flow record per request, a list of records in
-        ``--json``. See ADR-0019.
+        connection (sequential keep-alive) or HTTP/2 concurrent
+        stream-multiplex (multi-endpoint race), one flow record per
+        request, a list of records in ``--json``. ``repeat`` (>= 2) with
+        one ``name`` is the concurrent-send mode: N copies of one
+        request, one flow record each, a list in ``--json``. See
+        ADR-0019 and ADR-0020.
 
         Params:
-            name: Editable request name (single-name mode).
+            name: Editable request name (single-name or repeat mode).
             names: List of editable request names (multi-name pipeline
-                mode). When present, ``name`` is ignored.
+                mode). When present, ``name`` and ``repeat`` are ignored.
+            repeat: Number of concurrent copies (>= 2 for the race /
+                limit-overrun path). Single-name only.
             fix_content_length: Recompute Content-Length from the body
-                before sending (single-name only; rejected in multi-name).
+                before sending (single-name and repeat; rejected in
+                multi-name).
             timeout: Total timeout in seconds (default 30).
             insecure: Skip TLS certificate verification (default False).
-            pipelining: Send all requests then read all responses (true
-                H1 pipelining) instead of send-then-read per request
-                (sequential keep-alive, the default). Multi-name only.
+            pipelining: Multi-name H1 only: send all requests then read
+                all responses (true H1 pipelining) instead of send-then-
+                read per request (sequential keep-alive, the default).
         """
         names = params.get("names")
         if isinstance(names, list) and len(names) >= _PIPELINE_MIN_NAMES:
@@ -775,6 +785,15 @@ class OddaServer:
                 timeout=float(params.get("timeout", 30.0)),
                 insecure=params.get("insecure", False),
                 pipelining=params.get("pipelining", False),
+            )
+        repeat = int(params.get("repeat", 1))
+        if repeat >= _REPEAT_MIN:
+            return await send_request_repeat(
+                params["name"],
+                repeat,
+                fix_content_length=params.get("fix_content_length", False),
+                timeout=float(params.get("timeout", 30.0)),
+                insecure=params.get("insecure", False),
             )
         return await send_request(
             params["name"],

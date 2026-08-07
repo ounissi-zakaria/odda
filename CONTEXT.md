@@ -50,6 +50,16 @@ _Avoid_: hook, trap, intercept, monkey-patch, probe, breakpoint
 A JS helper that auto-runs at `document_start` on every navigation, before the page's own scripts, in the main world. Installed via `odda userscript install` and re-injected on every page load. odda ships built-in default userscripts (notably the dialog interceptor recording `window.print`/`alert`/`confirm`/`prompt` calls into `window.__oddaDialogs`). Scope: per-browser, not shared across browsers; an agent opening a fresh browser starts with only the default userscripts.
 _Avoid_: content script, extension script, injected helper, hook
 
+## Request crafting
+
+**Multi-name pipeline**:
+The sequential mode of `odda request send` when two or more `--name` flags are given: one HTTP/1.1 connection, requests sent and responses read in order, connection kept open across sends. Serves same-connection attacks (response-queue poisoning, CL.0 confirmation, H1 request smuggling). `--pipelining` switches to send-all-then-read-all (true H1 pipelining) for victim-consumption smuggling. Single-name `send` (one `--name`, no `--repeat`) is a separate, frozen single-shot contract, not a pipeline.
+_Avoid_: pipeline, request pipeline, send pipeline
+
+**Concurrent send**:
+The concurrent mode of `odda request send`, used for race-condition / limit-overrun attacks where N requests must arrive at the server near-simultaneously to slip through a check-then-write window. Two input shapes: `--repeat N` (one request, N copies — the limit-overrun and rate-limit-bypass pattern) and multi-name over HTTP/2 (N different requests as concurrent streams — the multi-endpoint race pattern). HTTP/2 uses stream multiplexing with the last-byte single-packet technique (all N HEADERS frames in one TLS record) so the requests arrive atomically; HTTP/1.1 cannot multiplex on one connection, so `--repeat` opens N parallel connections. Distinct from the Multi-name pipeline, which is sequential and HTTP/1.1-only.
+_Avoid_: race send, parallel send, single-packet send, stream multiplex
+
 ## Proxy interception
 
 **Proxy-script**:

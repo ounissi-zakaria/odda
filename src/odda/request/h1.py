@@ -11,8 +11,10 @@ from odda.request.response import parse_response_head
 from odda.request.types import (
     _MAX_HEADER_BYTES,
     _READ_CHUNK,
+    ConcurrentResult,
     ParsedRequest,
     RawResponse,
+    StreamError,
 )
 
 
@@ -309,3 +311,99 @@ async def send_h1_pipeline(
         writer.close()
         with contextlib.suppress(Exception):
             await writer.wait_closed()
+
+
+async def _send_one_h1_parallel(
+    index: int,
+    request_bytes: bytes,
+    parsed: ParsedRequest,
+    host: str,
+    port: int,
+    scheme: str,
+    *,
+    deadline: float,
+    insecure: bool,
+) -> tuple[int, ConcurrentResult]:
+    """Open one H1 connection, send one request, return (index, result)."""
+    try:
+        reader, writer = await _open_h1(
+            host, port, scheme, deadline=deadline, insecure=insecure
+        )
+    except Exception as exc:
+        msg = str(exc) or type(exc).__name__
+        return index, StreamError(error=f"connect failed: {msg}")
+    try:
+        writer.write(request_bytes)
+        if (
+            bool(parsed.body)
+            and not parsed.has_content_length
+            and not parsed.has_transfer_encoding
+        ):
+            with contextlib.suppress(Exception, RuntimeError):
+                writer.write_eof()
+        await writer.drain()
+        raw = await _read_one_response(reader, parsed.method, deadline=deadline)
+    except Exception as exc:
+        msg = str(exc) or type(exc).__name__
+        return index, StreamError(error=msg)
+    else:
+        return index, raw
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def send_h1_parallel(
+    host: str,
+    port: int,
+    scheme: str,
+    requests: list[tuple[bytes, ParsedRequest]],
+    *,
+    timeout: float,
+    insecure: bool,
+) -> list[ConcurrentResult]:
+    """Send N identical requests on N parallel HTTP/1.1 connections.
+
+    H1 cannot stream-multiplex on one connection, and H1 pipelining is
+    server-side sequential (only the first request lands in a race
+    window). So for concurrent delivery over H1 we open N parallel
+    TCP/TLS connections in the same process and fire one request on
+    each. Tighter than bash-parallel (no ~100-300ms process startup
+    spread) but each connection does its own TLS handshake, so there's
+    residual handshake spread. Matches Burp's "send group in parallel"
+    (ADR-0020).
+
+    Per-connection failures are isolated: that slot gets a
+    :class:`StreamError`, the others continue. There is no
+    connection-level abort (each request is on its own connection).
+
+    Args:
+        host: TCP destination host.
+        port: TCP destination port.
+        scheme: ``http`` or ``https``.
+        requests: N (request_bytes, parsed) tuples.
+        timeout: Total timeout for connect + send + read, per connection.
+        insecure: Skip TLS certificate verification.
+
+    Returns:
+        A list of ``ConcurrentResult`` (one per input request, in send
+        order).
+    """
+    deadline = time.monotonic() + timeout
+    tasks = [
+        _send_one_h1_parallel(
+            i,
+            request_bytes,
+            parsed,
+            host,
+            port,
+            scheme,
+            deadline=deadline,
+            insecure=insecure,
+        )
+        for i, (request_bytes, parsed) in enumerate(requests)
+    ]
+    gathered = await asyncio.gather(*tasks)
+    by_index: dict[int, ConcurrentResult] = dict(gathered)
+    return [by_index[i] for i in range(len(requests))]

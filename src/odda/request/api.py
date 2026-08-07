@@ -9,12 +9,18 @@ from typing import Any
 
 from odda import flowstore
 from odda.flowstore import RequestMeta
-from odda.request.h1 import PipelineError, send_h1, send_h1_pipeline
-from odda.request.h2 import send_h2
+from odda.request.h1 import PipelineError, send_h1, send_h1_parallel, send_h1_pipeline
+from odda.request.h2 import ConcurrentConnectionError, send_h2, send_h2_concurrent
 from odda.request.parsing import fix_content_length_bytes, parse_request
 from odda.request.response import decode_content_encoding
 from odda.request.storage import read_meta, requests_dir, resolve_name_dir, write_meta
-from odda.request.types import REQUEST_FILENAME, EditableMeta, ParsedRequest
+from odda.request.types import (
+    REQUEST_FILENAME,
+    ConcurrentResult,
+    EditableMeta,
+    ParsedRequest,
+    StreamError,
+)
 
 
 def clone(flow_id: str, name: str, *, force: bool = False) -> dict[str, Any]:
@@ -293,10 +299,12 @@ async def send_pipeline(
 
     writer = flowstore.get_writer()
 
-    # Load + parse every request up front so pre-emptive rejections (H2,
-    # missing request) fire before any flow id is allocated or any socket
-    # opens. A failure here raises with no side effects.
+    # Load + parse every request up front so pre-emptive rejections fire
+    # before any flow id is allocated or any socket opens. A failure here
+    # raises with no side effects.
     loaded: list[tuple[str, bytes, ParsedRequest, EditableMeta]] = []
+    is_h2_all = True
+    is_h1_all = True
     for name in names:
         req_dir = requests_dir() / name
         if not req_dir.exists():
@@ -309,13 +317,15 @@ async def send_pipeline(
             raise ValueError(msg)
         parsed = parse_request(request_bytes)
         if parsed.version.upper().startswith("HTTP/2"):
-            msg = (
-                "multi-name send is HTTP/1.1 only; H2 smuggling is a "
-                "different attack class, use single-name send for H2"
-            )
-            raise ValueError(msg)
+            is_h1_all = False
+        else:
+            is_h2_all = False
+        # Bare-body rejection applies to the H1 pipeline path only (it
+        # requires write_eof, ending the connection). H2 concurrent uses
+        # stream framing, so a body without Content-Length/TE is fine.
         if (
-            bool(parsed.body)
+            not parsed.version.upper().startswith("HTTP/2")
+            and bool(parsed.body)
             and not parsed.has_content_length
             and not parsed.has_transfer_encoding
         ):
@@ -326,6 +336,22 @@ async def send_pipeline(
             )
             raise ValueError(msg)
         loaded.append((name, request_bytes, parsed, meta))
+
+    if not is_h2_all and not is_h1_all:
+        msg = (
+            "multi-name send cannot mix HTTP/1.1 and HTTP/2 request lines; "
+            "use all HTTP/2 for concurrent stream-multiplex (ADR-0020) or "
+            "all HTTP/1.1 for the sequential pipeline"
+        )
+        raise ValueError(msg)
+
+    if is_h2_all and pipelining:
+        msg = (
+            "--pipelining is HTTP/1.1 multi-name only (send-all-then-read-all "
+            "sequential); HTTP/2 multi-name is already concurrent "
+            "stream-multiplex — drop --pipelining for H2"
+        )
+        raise ValueError(msg)
 
     # Pre-write all N flow records (request files + meta sidecars) before
     # opening the socket. On crash mid-pipeline, all N request files are
@@ -365,6 +391,28 @@ async def send_pipeline(
         )
 
     try:
+        if is_h2_all:
+            # H2 multi-name: concurrent stream-multiplex (ADR-0020), the
+            # multi-endpoint race path. send_h2_concurrent returns one
+            # ConcurrentResult (RawResponse | StreamError) per request in
+            # send order; per-stream errors are isolated. A connection-
+            # level error raises ConcurrentConnectionError carrying the
+            # partial results.
+            parsed_list = [pr for _n, _rb, pr, _m in loaded]
+            try:
+                concurrent_raws = await send_h2_concurrent(
+                    first_meta.host,
+                    first_meta.port,
+                    first_meta.scheme,
+                    parsed_list,
+                    timeout=timeout,
+                    insecure=insecure,
+                )
+            except ConcurrentConnectionError as exc:
+                concurrent_raws = exc.results
+            return _write_concurrent_results(
+                prewritten, concurrent_raws, writer, start_time
+            )
         raws = await send_h1_pipeline(
             first_meta.host,
             first_meta.port,
@@ -416,3 +464,175 @@ async def send_pipeline(
         _write_response_record(flow_id, rmeta, raw)
         for (flow_id, _name, rmeta, _parsed), raw in zip(prewritten, raws, strict=True)
     ]
+
+
+def _write_concurrent_results(
+    prewritten: list[tuple[str, str, RequestMeta, ParsedRequest]],
+    concurrent_raws: list[ConcurrentResult],
+    writer: Any,
+    start_time: float,
+) -> list[dict[str, Any]]:
+    """Write flow records for a concurrent-send result list.
+
+    Each slot is a :class:`RawResponse` (write a response flow) or a
+    :class:`StreamError` (write an error flow). Per-stream errors are
+    isolated; ``flows.jsonl`` stays complete — N pre-written requests, N
+    lines (ADR-0020).
+    """
+    records: list[dict[str, Any]] = []
+    for (flow_id, _name, rmeta, _parsed), result in zip(
+        prewritten, concurrent_raws, strict=True
+    ):
+        if isinstance(result, StreamError):
+            records.append(
+                writer.write_error(flow_id=flow_id, meta=rmeta, error_msg=result.error)
+            )
+        else:
+            decoded_body = decode_content_encoding(
+                result.body_bytes, result.content_encoding
+            )
+            duration_ms = (time.monotonic() - start_time) * 1000
+            records.append(
+                writer.write_response(
+                    flow_id=flow_id,
+                    meta=rmeta,
+                    status_code=result.status_code,
+                    response_headers_bytes=result.headers_bytes,
+                    body_bytes=decoded_body,
+                    content_type=result.content_type,
+                    total_duration_ms=duration_ms,
+                    keep_body=True,
+                )
+            )
+    return records
+
+
+async def send_repeat(
+    name: str,
+    repeat: int,
+    *,
+    fix_content_length: bool = False,
+    timeout: float = 30.0,
+    insecure: bool = False,
+) -> list[dict[str, Any]]:
+    """Send one editable request N times concurrently (ADR-0020).
+
+    Same request, N copies, all at once — the race / limit-overrun
+    pattern. HTTP/2 uses stream multiplexing with the last-byte
+    single-packet technique (all N HEADERS frames in one TLS record) so
+    the requests arrive near-simultaneously; HTTP/1.1 opens N parallel
+    connections (H1 cannot multiplex on one connection, and pipelining is
+    server-side sequential).
+
+    All N flow records (one-request-one-response, ADR-0019 invariant)
+    are pre-written before the socket opens: N identical request files,
+    N ``meta.json`` sidecars, N ``flows.jsonl`` lines. The agent counts
+    successes by reading the N flows' ``status_code``.
+
+    Pre-emptive rejections (before the socket opens):
+
+    - ``repeat`` < 2 → error (use single-name ``send`` for one request).
+    - ``--pipelining`` is rejected (``--repeat`` is concurrent;
+      ``--pipelining`` is H1 multi-name sequential).
+
+    Error policy (ADR-0020): per-stream errors are isolated (one stream's
+    failure does not abort the others); a connection-level error (H2
+    GOAWAY, TLS drop) aborts all not-yet-complete streams.
+
+    Args:
+        name: Editable request name (single-name only).
+        repeat: Number of concurrent copies (>= 2).
+        fix_content_length: Recompute Content-Length from the body once
+            before sending (allowed: the race is never a CL-differential
+            attack; ADR-0019's multi-name rejection rationale does not
+            transfer).
+        timeout: Total timeout for connect + all sends + all reads.
+        insecure: Skip TLS certificate verification.
+
+    Returns:
+        A list of ``flows.jsonl`` records (one per copy, in send order).
+    """
+    if repeat < 2:
+        msg = (
+            f"--repeat must be >= 2 (got {repeat}); for a single request "
+            "use `request send --name <name>` without --repeat"
+        )
+        raise ValueError(msg)
+
+    req_dir = requests_dir() / name
+    if not req_dir.exists():
+        msg = f"Request '{name}' not found"
+        raise ValueError(msg)
+
+    meta = read_meta(req_dir)
+    request_bytes = (req_dir / REQUEST_FILENAME).read_bytes()
+    if not request_bytes:
+        msg = "Request file is empty"
+        raise ValueError(msg)
+
+    parsed = parse_request(request_bytes)
+
+    if fix_content_length:
+        request_bytes = fix_content_length_bytes(request_bytes)
+        parsed = parse_request(request_bytes)
+
+    is_h2 = parsed.version.upper().startswith("HTTP/2")
+
+    rmeta = RequestMeta(
+        method=parsed.method,
+        scheme=meta.scheme,
+        host=meta.host,
+        port=meta.port,
+        path=parsed.path,
+    )
+
+    writer = flowstore.get_writer()
+
+    # Pre-write all N flow records (identical request files + meta
+    # sidecars) before opening any socket. On crash, all N request files
+    # are durable (ADR-0019 two-phase durability scaled to N).
+    prewritten: list[tuple[str, RequestMeta]] = []
+    for _ in range(repeat):
+        flow_id = writer.alloc_flow_id()
+        writer.write_request(flow_id, request_bytes)
+        writer.write_meta(flow_id, scheme=meta.scheme, host=meta.host, port=meta.port)
+        prewritten.append((flow_id, rmeta))
+
+    start_time = time.monotonic()
+
+    try:
+        if is_h2:
+            concurrent_raws = await send_h2_concurrent(
+                meta.host,
+                meta.port,
+                meta.scheme,
+                [parsed for _ in range(repeat)],
+                timeout=timeout,
+                insecure=insecure,
+            )
+        else:
+            concurrent_raws = await send_h1_parallel(
+                meta.host,
+                meta.port,
+                meta.scheme,
+                [(request_bytes, parsed) for _ in range(repeat)],
+                timeout=timeout,
+                insecure=insecure,
+            )
+    except ConcurrentConnectionError as exc:
+        concurrent_raws = exc.results
+    except Exception as exc:
+        # Pre-flight failure (connect timeout before any stream opened).
+        # Mark all N flows as errored. flows.jsonl stays complete.
+        error_msg = str(exc) or type(exc).__name__
+        return [
+            writer.write_error(flow_id=flow_id, meta=rm, error_msg=error_msg)
+            for flow_id, rm in prewritten
+        ]
+
+    return _write_concurrent_results(
+        [(flow_id, name, rm, parsed) for (flow_id, rm) in prewritten],
+        concurrent_raws,
+        writer,
+        start_time,
+    )

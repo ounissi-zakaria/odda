@@ -44,3 +44,22 @@ class RawResponse:
     body_bytes: bytes
     content_type: str | None
     content_encoding: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class StreamError:
+    """A per-stream failure in a concurrent H2 send.
+
+    Carries the error message; the flow writer records this as an error
+    flow for the affected stream's pre-written request. Other streams in
+    the same connection are unaffected (H2 streams are independent).
+    """
+
+    error: str
+
+
+# Outcome of one stream in a concurrent send: a complete response or a
+# per-stream error. A connection-level error aborting the whole send is
+# raised as a ``ConcurrentConnectionError`` (defined in h2.py to avoid an
+# import cycle for the aborted-indices list).
+ConcurrentResult = RawResponse | StreamError

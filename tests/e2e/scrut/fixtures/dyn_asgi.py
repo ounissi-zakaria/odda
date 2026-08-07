@@ -11,7 +11,10 @@ bound to ``127.0.0.1:<port>`` with a self-signed cert and this app.
 from __future__ import annotations
 
 import gzip
+import os
+import time
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 
@@ -23,6 +26,16 @@ async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
     qd = urllib.parse.parse_qs(
         raw_qs.decode() if raw_qs else "", keep_blank_values=True
     )
+    # `?race=<id>` records this request's arrival time (monotonic, ms) to
+    # a file named by the id, so a test can assert N concurrent requests
+    # arrived in a tight window (the single-packet property). The file is
+    # one timestamp per line, in arrival order.
+    race_id = qd.get("race", [None])[0]
+    if race_id:
+        race_dir = Path(os.environ.get("ODDA_RACE_DIR", "/tmp/odda-race"))
+        race_dir.mkdir(parents=True, exist_ok=True)
+        with (race_dir / race_id).open("a") as f:
+            f.write(f"{time.monotonic_ns()}\n")
     body = qd.get("body", [""])[0].encode()
     status = int(qd.get("status", ["200"])[0])
     headers: list[tuple[bytes, bytes]] = []

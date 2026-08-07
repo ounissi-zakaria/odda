@@ -149,10 +149,13 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 Error: * (glob)
 ```
 
-## HTTP/2 request line in multi-name is rejected
+## Mixed HTTP/1.1 + HTTP/2 request lines in multi-name is rejected
 
-H1-style smuggling is meaningless in pure H2; multi-name is an H1-only
-feature. If any `--name`'s request line says `HTTP/2`, error pre-emptively.
+H1 multi-name is sequential keep-alive; H2 multi-name is concurrent
+stream-multiplex (ADR-0020). Different mechanisms on one connection make
+no sense, so a mix is rejected pre-emptively. (This document exercises
+the H1 sequential path; the H2 concurrent path is covered in
+`21-request-concurrent-multiname.md`.)
 
 ```scrut
 $ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \

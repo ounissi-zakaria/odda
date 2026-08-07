@@ -1163,8 +1163,10 @@ def request_new(
 
 
 # Two or more --name flags selects the multi-name pipeline mode (ADR-0019);
-# one --name keeps the frozen single-shot contract.
+# one --name keeps the frozen single-shot contract. --repeat >= 2 selects
+# the concurrent-send mode (ADR-0020).
 _PIPELINE_MIN_NAMES = 2
+_REPEAT_MIN = 2
 
 
 @request_app.command("send")
@@ -1174,6 +1176,13 @@ def request_send(
         ...,
         "--name",
         help="Name of the editable request to send (repeat for multi-name pipeline)",
+    ),
+    repeat: int = typer.Option(
+        1,
+        "--repeat",
+        help="Send the request N times concurrently (race / limit-overrun). "
+        ">=2 enables concurrent send (H2 stream-multiplex or H1 parallel "
+        "connections). Single-name only; rejected with multiple --name.",
     ),
     fix_content_length: bool = typer.Option(
         False,
@@ -1196,11 +1205,40 @@ def request_send(
 
     One ``--name`` is the single-shot contract (one flow record). Two or
     more ``--name`` flags is the multi-name pipeline: one HTTP/1.1
-    connection, one flow record per request, a list in ``--json``. See
-    ADR-0019 for the contract and the rejected alternatives.
+    connection (sequential keep-alive, or HTTP/2 concurrent
+    stream-multiplex for multi-endpoint races), one flow record per
+    request, a list in ``--json``. ``--repeat N`` (single ``--name``)
+    sends N concurrent copies — the race / limit-overrun path. See
+    ADR-0019 and ADR-0020.
     """
-    if len(name) >= _PIPELINE_MIN_NAMES:
+    is_repeat = repeat >= _REPEAT_MIN
+    is_multiname = len(name) >= _PIPELINE_MIN_NAMES
+
+    if is_repeat and is_multiname:
+        _emit_error(
+            "--repeat is single-name only; use --repeat with one --name, "
+            "or multi-name without --repeat (the combo is ambiguous)",
+            json_mode=ctx.obj["json"],
+        )
+        raise typer.Exit(code=1)
+    if is_repeat and pipelining:
+        _emit_error(
+            "--repeat is concurrent; --pipelining is H1 multi-name "
+            "sequential — they cannot be combined",
+            json_mode=ctx.obj["json"],
+        )
+        raise typer.Exit(code=1)
+
+    if is_repeat:
         payload: dict[str, Any] = {
+            "name": name[0],
+            "repeat": repeat,
+            "fix_content_length": fix_content_length,
+            "timeout": timeout,
+            "insecure": insecure,
+        }
+    elif is_multiname:
+        payload = {
             "names": name,
             "fix_content_length": fix_content_length,
             "timeout": timeout,
