@@ -8,6 +8,9 @@
   <input id="text-input" type="text" placeholder="Type here">
   <div id="text-result">empty</div>
 
+  <textarea id="area-input" placeholder="Paste here"></textarea>
+  <div id="area-result">empty</div>
+
   <div id="hover-target" style="width:100px;height:50px;border:1px solid black">Hover me</div>
   <div id="hover-result">not hovered</div>
 
@@ -26,6 +29,11 @@
     document.getElementById('text-input').addEventListener('input', (e) => {
       const v = e.target.value;
       document.getElementById('text-result').textContent = v === '' ? 'empty' : v;
+    });
+
+    document.getElementById('area-input').addEventListener('input', (e) => {
+      const v = e.target.value;
+      document.getElementById('area-result').textContent = v === '' ? 'empty' : v;
     });
 
     document.getElementById('hover-target').addEventListener('mouseenter', () => {

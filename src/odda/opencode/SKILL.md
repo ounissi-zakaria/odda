@@ -48,7 +48,7 @@ Add the targeting flags from the Targeting model above to every command below �
 | List event listeners        | `odda event-listeners`                                            |
 | Snapshot (find refs)        | `odda page snapshot`                                              |
 | Click by ref                | `odda page click --ref <ref> [--timeout N]`                       |
-| Fill by ref                 | `odda page fill --ref <ref> --value "<value>" [--timeout N]`      |
+| Fill by ref                 | `odda page fill --ref <ref> (--value "<v>" | --file <path>) [--timeout N]` |
 | Hover by ref                | `odda page hover --ref <ref> [--timeout N]`                       |
 | Upload files by ref         | `odda page upload --ref <ref> --file <path> [--file <path>...]`   |
 | Install a userscript        | `odda userscript install --name <name> --file <path>`             |
@@ -111,7 +111,7 @@ Commands (all tab-scoped):
 
 - `odda page snapshot` — Return the page's accessibility tree as YAML-ish text with `[ref=eN]` tags. The agent greps the text for the element it wants. No filter options; the full tree is returned. Prefer `page snapshot` over `odda screenshot` for finding elements and understanding page structure: the snapshot is text (cheaper on context, grep-able, carries refs for action commands), while the screenshot is pixels (useful only for visual layout, icons, or canvas the a11y tree can't see). Use screenshots when you need to see what the page looks like; use snapshots when you need to find an element to act on.
 - `odda page click --ref <ref> [--timeout N]` — Click the element identified by `ref` (plain left-click). Prints `status: clicked` / `ref: <ref>` lines (text) or `{status: "clicked", ref: "<ref>"}` (`--json`). If the ref no longer resolves, errors cleanly with a stale-ref message.
-- `odda page fill --ref <ref> --value "<value>" [--timeout N]` — Fill the element identified by `ref` with `value`. Clears the field first, then types. Works on text inputs, textareas, contenteditable elements, checkboxes (`"true"`/`"false"`), radios, and selects. Prints `status: filled` / `ref: <ref>` lines (text) or `{status: "filled", ref: "<ref>"}` (`--json`).
+- `odda page fill --ref <ref> (--value "<value>" | --file <path>) [--timeout N]` — Fill the element identified by `ref` with `value`. Clears the field first, then types. Works on text inputs, textareas, contenteditable elements, checkboxes (`"true"`/`"false"`), radios, and selects. `--file <path>` reads the value from a file (preserves newlines; avoids shell-quoting pitfalls for multiline HTML payloads in textareas). `--value` and `--file` are mutually exclusive; at least one is required. Prints `status: filled` / `ref: <ref>` lines (text) or `{status: "filled", ref: "<ref>"}` (`--json`).
 - `odda page hover --ref <ref> [--timeout N]` — Hover the element identified by `ref`. Auto-scrolls the element into view first. Prints `status: hovered` / `ref: <ref>` lines (text) or `{status: "hovered", ref: "<ref>"}` (`--json`).
 - `odda page upload --ref <ref> --file <path> [--file <path>...] [--timeout N]` — Set files on a file input identified by `ref`. Repeat `--file` for multiple files (`<input type="file" multiple>`). Prints `status: uploaded` / `ref: <ref>` plus a `files:` list (text) or `{status: "uploaded", ref: "<ref>", files: [...]}` (`--json`). **This sets the file on the input but does not submit the form** — click the form's submit button by ref separately to POST it.
 

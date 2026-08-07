@@ -583,7 +583,15 @@ def page_fill(
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
     ref: str = typer.Option(..., "--ref", help="Element ref from a snapshot"),
-    value: str = typer.Option(..., "--value", help="Value to fill (clears first)"),
+    value: str | None = typer.Option(
+        None, "--value", help="Value to fill (clears first)"
+    ),
+    file: Path | None = typer.Option(
+        None,
+        "--file",
+        "-f",
+        help="Read the fill value from a file (preserves newlines)",
+    ),
     timeout: float = typer.Option(
         5.0, "--timeout", help="Timeout in seconds (default 5)"
     ),
@@ -592,8 +600,22 @@ def page_fill(
 
     Clears the field first, then types the value. Works on text inputs,
     textareas, contenteditable elements, checkboxes (``"true"``/``"false"``),
-    radios, and selects.
+    radios, and selects. Pass ``--value <string>`` inline, or ``--file <path>``
+    to read the value from a file (the two are mutually exclusive); ``--file``
+    avoids shell-quoting pitfalls for multiline payloads.
     """
+    json_mode = ctx.obj["json"]
+    if file is not None and value is not None:
+        _emit_error("Provide either --value or --file, not both", json_mode=json_mode)
+        raise typer.Exit(code=1)
+    if file is None and value is None:
+        _emit_error("Provide --value <string> or --file <path>", json_mode=json_mode)
+        raise typer.Exit(code=1)
+    if file is not None:
+        if not file.is_file():
+            _emit_error(f"File not found: {file}", json_mode=json_mode)
+            raise typer.Exit(code=1)
+        value = file.read_text(encoding="utf-8")
     _run_coro(
         _client(ctx).call(
             "page/fill",

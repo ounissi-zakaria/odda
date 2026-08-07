@@ -199,6 +199,79 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 world
 ```
 
+## `page fill --file` fills a textarea with file contents, preserving newlines
+
+`--file <path>` reads the file and fills the element with its
+contents, mirroring `--file` on `eval` and `page upload`. For
+multiline HTML payloads (exploit server Body, CSRF payloads) it
+avoids the shell-quoting pitfalls of `--value "$(cat file.html)"`.
+Snapshot, find the textarea ref, write a multiline file, fill with
+`--file`, and read back `.value` to confirm newlines survived.
+
+```scrut
+$ AREF=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   page snapshot --browser-id 1 --tab-id 1 \
+>   | python3 -c '
+> import sys, re
+> d = sys.stdin.read()
+> line = next(l for l in d.splitlines() if "Paste here" in l)
+> m = re.search(r"\[ref=(e\d+)\]", line)
+> print(m.group(1))
+> ')
+```
+
+```scrut
+$ printf '<b>line1</b>\n<i>line2</i>\n<p>line3</p>' > "$PWD/fill-payload.html"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   page fill --browser-id 1 --tab-id 1 --ref "$AREF" --file "$PWD/fill-payload.html" \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["ref"] == "'"$AREF"'")'
+filled True
+```
+
+The textarea value contains all three lines with newlines intact.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "JSON.stringify(document.getElementById('area-input').value)" --browser-id 1 --tab-id 1
+"<b>line1</b>\n<i>line2</i>\n<p>line3</p>"
+```
+
+## `page fill` rejects `--file` and `--value` given together
+
+`--file` and `--value` are mutually exclusive; providing both is an
+error. In text mode the error prints as `Error: ...` on stderr with
+a non-zero exit code.
+
+```scrut {output_stream: stderr}
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   page fill --browser-id 1 --tab-id 1 --ref "$AREF" --value "x" --file "$PWD/fill-payload.html"
+[1]
+Error: Provide either --value or --file, not both
+```
+
+## `page fill` rejects neither `--file` nor `--value`
+
+At least one of `--value` or `--file` is required.
+
+```scrut {output_stream: stderr}
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   page fill --browser-id 1 --tab-id 1 --ref "$AREF"
+[1]
+Error: Provide --value <string> or --file <path>
+```
+
+## `page fill --file` with a missing file is rejected
+
+```scrut {output_stream: stderr}
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   page fill --browser-id 1 --tab-id 1 --ref "$AREF" --file "$PWD/nope.html"
+[1]
+Error: File not found: * (glob)
+```
+
 ## `page hover` hovers the element identified by `--ref`
 
 Snapshot, find the "Hover me" ref, hover it, and verify the hover

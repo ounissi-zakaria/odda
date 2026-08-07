@@ -24,7 +24,11 @@ Refs are valid until the element leaves the DOM (navigation, SPA swap). Re-snaps
 
 ```
 odda page fill --ref <ref> --value "<value>" --browser-id <B> --tab-id <T>
+# or, for a multiline payload (e.g. an exploit server Body textarea), read it from a file:
+odda page fill --ref <ref> --file <path> --browser-id <B> --tab-id <T>
 ```
+
+`--value` and `--file` are mutually exclusive; at least one is required. `--file` preserves newlines and avoids shell-quoting pitfalls (`--value "$(cat file.html)"` can collapse or corrupt multiline content depending on the shell).
 
 Fill each input/textarea/select in turn, then snapshot again if you need the submit button's ref (it may have appeared after the page settled).
 
