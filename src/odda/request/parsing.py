@@ -78,9 +78,14 @@ def fix_content_length_bytes(data: bytes) -> bytes:
     r"""Fix ``Content-Length`` in raw HTTP request bytes in-place.
 
     Replaces the value of every ``Content-Length`` header with the actual
-    body length, preserving the original header name casing. If no
-    ``Content-Length`` header exists and the body is non-empty, one is
-    inserted before the blank line separator. All other bytes are preserved.
+    body length, preserving the original header name casing and the
+    surrounding line terminator (``\r\n``). If no ``Content-Length``
+    header exists and the body is non-empty, one is inserted before the
+    blank line separator. All other bytes are preserved.
+
+    The match targets only the digits of the existing value (not the
+    optional trailing whitespace or the line terminator), so the
+    replacement never drops the ``\r`` that terminates the header line.
 
     Args:
         data: Raw HTTP request bytes.
@@ -94,10 +99,10 @@ def fix_content_length_bytes(data: bytes) -> bytes:
     body = data[idx + len(sep) :] if idx != -1 else b""
     cl_value = str(len(body)).encode("ascii")
 
-    cl_pattern = re.compile(rb"(?im)^(content-length:)\s*\d+\s*$")
+    cl_pattern = re.compile(rb"(?im)^(content-length:\s*)\d+")
 
     if cl_pattern.search(head):
-        new_head = cl_pattern.sub(rb"\1 " + cl_value, head)
+        new_head = cl_pattern.sub(lambda _m, v=cl_value: _m.group(1) + v, head)
     elif body:
         new_head = head + b"\r\nContent-Length: " + cl_value
     else:

@@ -146,6 +146,11 @@ async def send(
 
     if fix_content_length:
         request_bytes = fix_content_length_bytes(request_bytes)
+        # Re-parse so the H2 path (which builds wire frames from ``parsed``
+        # headers, not ``request_bytes``) sees the corrected Content-Length
+        # and body-length match. The H1 path sends ``request_bytes`` raw,
+        # so it already carries the fix.
+        parsed = parse_request(request_bytes)
 
     is_h2 = parsed.version.upper().startswith("HTTP/2")
 

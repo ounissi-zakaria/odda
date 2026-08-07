@@ -133,6 +133,107 @@ $ grep -F "Content-Length: 999" "$PWD/data/requests/cl-test/request" >/dev/null 
 editable unchanged
 ```
 
+## `--fix-content-length` preserves CRLF when CL is followed by another header
+
+Regression: when `Content-Length` is not the last header before the blank
+line, the regex used to rewrite the value consumed the trailing `\r`
+(via `\s*`) and emitted a bare `\n`, gluing the next header onto the
+same line and producing a malformed-on-the-wire request. The body
+(`postbody` = 8 bytes) differs from the declared `Content-Length: 999`
+so the flag has work to do, and `X-Order: trailing` is placed after the
+`Content-Length` header to expose the corruption.
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name cl-crlf --host 127.0.0.1 --port $port --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); printf 'POST /a?body=cl-crlf-ok&status=200&header=Content-Type:application/json HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nContent-Type: application/json\r\nContent-Length: 999\r\nX-Order: trailing\r\nConnection: close\r\n\r\npostbody' "$port" > "$PWD/data/requests/cl-crlf/request"
+```
+
+A bare-LF after `Content-Length` would glue `X-Order: trailing` onto the
+CL line, and hypercorn would reject the request (400 / connection drop)
+instead of returning the requested 200.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request send --name cl-crlf --fix-content-length --insecure --timeout 10 \
+>   | grep -E '^status_code: 200$'
+status_code: 200
+```
+
+The stored on-the-wire request must keep CRLF after the rewritten
+`Content-Length` (the bug dropped the `\r`). Asserted in Python on the
+raw bytes so the CRLF is actually inspected, not just a substring.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name cl-crlf --fix-content-length --insecure --timeout 10 \
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/cl_crlf_flow_id"
+```
+
+```scrut
+$ cl_crlf_flow_id=$(cat "$PWD/cl_crlf_flow_id")
+```
+
+```scrut
+$ python3 -c 'import sys; b=open(sys.argv[1],"rb").read(); \
+>   ok=b"Content-Length: 8\r\nX-Order: trailing\r\n" in b; \
+>   print("crlf preserved" if ok else "BARE LF: "+repr(b[b.find(b"Content-Length"):b.find(b"Content-Length")+40]))' \
+>   "$PWD/data/flows/$cl_crlf_flow_id/request"
+crlf preserved
+```
+
+## `--fix-content-length` preserves CRLF on the HTTP/2 send path
+
+The same corruption affects the HTTP/2 send path: `fix_content_length_bytes`
+runs on the raw request bytes before the H2/H1 branch, so a `Content-Length`
+header followed by another header loses its `\r` there too. This is the
+path the bug report flags as the affected one. Build an `HTTP/2` request
+with a wrong `Content-Length: 999` followed by a trailing header and a
+shortened body (`h2body` = 6 bytes), send it, and assert the stored
+on-the-wire bytes keep CRLF after the rewritten `Content-Length`.
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name cl-h2 --host 127.0.0.1 --port $port --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); printf 'POST /a?body=cl-h2-ok&status=200&header=Content-Type:application/json HTTP/2\r\nHost: 127.0.0.1:%s\r\nContent-Type: application/json\r\nContent-Length: 999\r\nX-Order: trailing\r\n\r\nh2body' "$port" > "$PWD/data/requests/cl-h2/request"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request send --name cl-h2 --fix-content-length --insecure --timeout 10 \
+>   | grep -E '^status_code: 200$'
+status_code: 200
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name cl-h2 --fix-content-length --insecure --timeout 10 \
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/cl_h2_flow_id"
+```
+
+```scrut
+$ cl_h2_flow_id=$(cat "$PWD/cl_h2_flow_id")
+```
+
+The stored request keeps CRLF after the rewritten `Content-Length: 6`
+on the H2 path (the bug dropped the `\r`, gluing `X-Order` onto the CL
+line). The response must not be a 400 "Newlines in headers" — a 200
+proves the on-the-wire framing was accepted.
+
+```scrut
+$ python3 -c 'import sys; b=open(sys.argv[1],"rb").read(); \
+>   ok=b"Content-Length: 6\r\nX-Order: trailing\r\n" in b; \
+>   print("crlf preserved" if ok else "BARE LF: "+repr(b[b.find(b"Content-Length"):b.find(b"Content-Length")+40]))' \
+>   "$PWD/data/flows/$cl_h2_flow_id/request"
+crlf preserved
+```
+
 ## gzip response: empty body is handled gracefully
 
 The dyn server compresses the body and sets `Content-Encoding: gzip`
