@@ -16,6 +16,8 @@ Every browser/tab command takes an explicit target. Agents always specify which 
 - **Browser-scoped** commands take `--browser-id`: `browser open`, `browser close`, `tabs list` (optional filter), `tabs open`, `userscript install`/`remove`.
 - **Tab-scoped** commands take both `--browser-id` and `--tab-id`: `navigate` (existing tab), `eval`, `wait-for`, `screenshot`, `event-listeners`, `tabs close`, `coverage *`, `wrap *`, `logpoint *`, `page *`.
 
+Targeting flags go **after** the subcommand: `odda <cmd> --browser-id <id> [--tab-id <n>] ...` (e.g. `odda page snapshot --browser-id 1 --tab-id 1`). This is unlike the global `--json` flag, which goes **before** the subcommand (`odda --json <cmd> ...`); `--browser-id`/`--tab-id` before the subcommand is rejected.
+
 IDs are integers, monotonic, and **never reused**. A closed tab's id is retired forever; a stale `--tab-id` errors cleanly instead of silently hitting a different tab. This makes it safe for multiple agents to share one odda server: each agent owns the IDs it captured and never disturbs another agent's target.
 
 Get IDs once and reuse them:
