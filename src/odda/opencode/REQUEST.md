@@ -31,7 +31,14 @@ Repeat `--name` to send two or more editable requests on **one connection**. The
 
 ## `--pipelining` (multi-name only)
 
-`--pipelining` switches from sequential keep-alive (send-then-read per request, the default) to true H1 pipelining (send all requests, then read all responses). Use it for victim-consumption, where the victim request must arrive while the server is still parsing the smuggling POST's body so the victim gets consumed as body bytes. Sequential keep-alive covers response-queue poisoning and CL.0 confirmation.
+`--pipelining` switches from sequential keep-alive (send-then-read per request, the default) to true H1 pipelining (send all requests, then read all responses). Which one you want depends on where the smuggle's effect lives:
+
+- **Leftover-prefix smuggling (CL.TE, TE.CL, CL.0)** — the smuggle ends its body and leaves a literal prefix in the back-end's buffer that prefixes the *next* request's method. Use **sequential keep-alive (no flag)**: a second request on the same connection (the second `--name` in a multi-name send, or a fresh single-name `send` — "the next request" from here on) arrives after the smuggle and gets prefixed.
+- **Still-parsing / victim-consumption** — the victim must arrive *while* the server is still parsing the smuggling POST's body, so it gets consumed as body bytes. Use **`--pipelining`**: all requests go on the wire up front, so the victim is in flight before the body parse completes.
+
+Sequential keep-alive also covers response-queue poisoning and same-connection CL.0 confirmation. A single `request send` (no victim) may suffice when the back-end surfaces the smuggled method on its own response — e.g. a `0\r\n\r\nG` body turns the next method into `GPOST`, and if the server echoes `"Unrecognized method GPOST"` on the smuggle's own response, one send confirms it. Send the next request only when the back-end buffers the prefix for a *later* victim rather than echoing it.
+
+**Where the interesting response lands.** In leftover-prefix smuggling the response queue desyncs from the request queue, so the interesting response (the smuggled method's error or confirmation) lands on the **smuggle** flow's record, not the victim's. The victim flow can show `status_code: 0` with an empty body — that's expected, not a failure signal. Read both flows before concluding the smuggle did nothing.
 
 ## Race conditions / concurrent send (`--repeat N` and H2 multi-name)
 
