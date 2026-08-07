@@ -43,6 +43,29 @@ _MIME_TO_EXT: dict[str, str] = {
     "text/yaml": ".yaml",
     "application/yaml": ".yaml",
     "image/svg+xml": ".svg",
+    "image/jpeg": ".jpeg",
+    "image/jpg": ".jpeg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/x-icon": ".ico",
+    "image/vnd.microsoft.icon": ".ico",
+    "image/apng": ".apng",
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "video/ogg": ".ogv",
+    "video/x-msvideo": ".avi",
+    "video/quicktime": ".mov",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/webm": ".weba",
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "audio/x-midi": ".mid",
     "application/pdf": ".pdf",
     "application/zip": ".zip",
     "application/gzip": ".gz",
@@ -323,6 +346,7 @@ class FlowRecordWriter:
         body_bytes: bytes | None,
         content_type: str | None,
         total_duration_ms: float | None,
+        keep_body: bool = False,
     ) -> dict[str, Any]:
         """Write response files and append the jsonl line for a completed flow.
 
@@ -337,6 +361,11 @@ class FlowRecordWriter:
                 body file extension and decide whether to store the body.
             total_duration_ms: Total request+response duration in
                 milliseconds, or ``None``.
+            keep_body: If True, store the body even when ``content_type`` is
+                in the excluded set (images/video/audio/fonts). Used by
+                ``odda request send`` (which always passes True) where the
+                body is the payload the caller asked for; the
+                browser-capture addon path never sets this.
 
         Returns:
             The flows.jsonl record that was appended.
@@ -344,7 +373,7 @@ class FlowRecordWriter:
         flow_dir = self._flows_dir / flow_id
 
         body_file: str | None = None
-        if body_bytes is not None and should_store_body(content_type):
+        if body_bytes is not None and (keep_body or should_store_body(content_type)):
             ext = _mime_to_ext(content_type)
             body_name = f"response_body{ext}"
             _write_readonly(flow_dir / body_name, body_bytes)

@@ -128,6 +128,19 @@ async def send(
     (two-phase durability). On any error (timeout, DNS, TLS, connection),
     an error flow record is written instead.
 
+    The response body is always stored, regardless of ``Content-Type``.
+    The image/video/audio/font exclusion policy in
+    :func:`~odda.flowstore.should_store_body` exists for browser-captured
+    sub-resources (telemetry, tracking pixels); a hand-built raw request
+    exists to see its response body (e.g. a path-traversal file mislabeled
+    ``image/jpeg``), so ``keep_body=True`` is passed to the writer.
+
+    Args:
+        name: Editable request name.
+        fix_content_length: Recompute ``Content-Length`` from the body.
+        timeout: Total timeout in seconds.
+        insecure: Skip TLS certificate verification.
+
     Returns:
         The ``flows.jsonl`` record that was appended.
     """
@@ -204,6 +217,7 @@ async def send(
             body_bytes=decoded_body,
             content_type=raw.content_type,
             total_duration_ms=duration_ms,
+            keep_body=True,
         )
 
     except Exception as exc:
@@ -252,6 +266,14 @@ async def send_pipeline(
     failed"`` error flow (their pre-written request files already exist);
     the connection closes unconditionally. ``flows.jsonl`` stays complete
     — every pre-written request has a corresponding line.
+
+    Args:
+        names: Two or more editable request names.
+        fix_content_length: Rejected (raises) for multi-name sends.
+        timeout: Total timeout in seconds for connect + all sends + reads.
+        insecure: Skip TLS certificate verification.
+        pipelining: True H1 pipelining (send all, then read all) instead of
+            sequential keep-alive (send-then-read per request).
 
     Returns:
         A list of ``flows.jsonl`` records (one per request), in send order.
@@ -339,6 +361,7 @@ async def send_pipeline(
             body_bytes=decoded_body,
             content_type=raw.content_type,
             total_duration_ms=duration_ms,
+            keep_body=True,
         )
 
     try:

@@ -326,6 +326,50 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 Error: * (glob)
 ```
 
+## `request send` stores the body even for excluded Content-Types
+
+Browser capture drops response bodies whose `Content-Type` is in the
+excluded set (images/video/audio/fonts), but `request send` does not —
+a hand-built request exists to see its response body (e.g. a
+path-traversal file mislabeled `image/jpeg`). The dyn server serves an
+arbitrary body with a caller-chosen `Content-Type`, so we ask for
+`image/jpeg` carrying a text payload and assert the body is stored as
+`response_body.jpeg` and is readable, with no special flag.
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name img-test --host 127.0.0.1 --port $port --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=secret-file-contents&status=200&header=Content-Type:image/jpeg HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: close\r\n\r\n' "$port" > "$PWD/data/requests/img-test/request"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request send --name img-test --insecure --timeout 10 \
+>   | grep -E '^(status_code: 200|body_file: flows/.*/response_body\.jpeg)$'
+status_code: 200
+body_file: flows/*/response_body.jpeg (glob)
+```
+
+The body file is readable and holds the payload, not dropped.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name img-test --insecure --timeout 10 \
+>   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' > "$PWD/img_flow_id"
+```
+
+```scrut
+$ img_flow_id=$(cat "$PWD/img_flow_id")
+```
+
+```scrut
+$ cat "$PWD/data/flows/$img_flow_id/response_body.jpeg"
+secret-file-contents (no-eol)
+```
+
 ## Teardown: stop the dyn server
 
 ```scrut
