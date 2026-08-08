@@ -732,20 +732,27 @@ class OddaServer:
         )
 
     async def method_request_new(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Create a new empty editable request.
+        r"""Create a new empty editable request.
 
         Params:
             name: Editable request name.
             host: Target host (required).
             protocol: ``http`` or ``https`` (default ``https``).
             port: Target port (default 80 for http, 443 for https).
+            line_terminator: Byte sequence the request parser splits header
+                lines on (default ``\r\n``), as a list of byte ints. H2-only;
+                lets an agent put a literal CRLF inside an H2 header value
+                for H2->H1 downgrade smuggling by setting it to ``\n``.
             force: If True, overwrite an existing request of the same name.
         """
+        lt = params.get("line_terminator")
+        lt_bytes = bytes(lt) if lt is not None else b"\r\n"
         return new_request(
             params["name"],
             host=params["host"],
             protocol=params.get("protocol", "https"),
             port=params.get("port"),
+            line_terminator=lt_bytes,
             force=params.get("force", False),
         )
 

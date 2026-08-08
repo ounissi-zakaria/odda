@@ -14,11 +14,19 @@ _READ_CHUNK = 65536
 
 @dataclass(frozen=True, slots=True)
 class EditableMeta:
-    """Sidecar metadata for an editable request (scheme/host/port)."""
+    r"""Sidecar metadata for an editable request (scheme/host/port).
+
+    ``line_terminator`` is the byte sequence the request parser splits
+    header lines on (default ``\r\n``). Only honored for HTTP/2 request
+    files (H1 is wire-faithful); lets an agent put a literal CRLF inside
+    an H2 header value for H2→H1 downgrade smuggling by setting it to
+    ``\n``.
+    """
 
     scheme: str
     host: str
     port: int
+    line_terminator: bytes = b"\r\n"
 
 
 @dataclass(frozen=True, slots=True)

@@ -60,6 +60,18 @@ _Avoid_: pipeline, request pipeline, send pipeline
 The concurrent mode of `odda request send`, used for race-condition / limit-overrun attacks where N requests must arrive at the server near-simultaneously to slip through a check-then-write window. Two input shapes: `--repeat N` (one request, N copies — the limit-overrun and rate-limit-bypass pattern) and multi-name over HTTP/2 (N different requests as concurrent streams — the multi-endpoint race pattern). HTTP/2 uses stream multiplexing with the last-byte single-packet technique (all N HEADERS frames in one TLS record) so the requests arrive atomically; HTTP/1.1 cannot multiplex on one connection, so `--repeat` opens N parallel connections. Distinct from the Multi-name pipeline, which is sequential and HTTP/1.1-only.
 _Avoid_: race send, parallel send, single-packet send, stream multiplex
 
+**Wire-faithful**:
+An HTTP/1.1 request file whose bytes go on the socket verbatim. The parser extracts metadata (method, path, Content-Length, Host) only for bookkeeping; the file is the wire bytes. A byte sequence in an H1 `Host` value already goes on the wire as-is — no framing knob is needed or meaningful for H1.
+_Avoid_: verbatim, raw-send, byte-accurate
+
+**Frame-source**:
+An HTTP/2 request file that is parsed into header values and translated to H2 frames; the file's bytes never touch the socket. The file is a source for frame construction, not a wire transcript. This is why the line terminator is load-bearing for H2 (it determines how odda splits the file into header values, which determines what bytes land in each frame) and meaningless for H1 (wire-faithful — the file is the wire bytes). The H1-shaped text with `Host` is odda's input syntax for the `:authority` pseudo-header (RFC 9113 §8.3.1 forbids `Host` in H2; odda translates `Host` → `:authority` at send time), not a wire transcript.
+_Avoid_: H2 source, frame input, pseudo-header source
+
+**Line terminator**:
+The byte sequence ending a header line in the request file, stored in `meta.json` (`line_terminator`, default `\r\n`) and set via `request new --line-terminator <bytes>`. The block terminator (header/body separator) is always two line terminators. Only honored for frame-source (HTTP/2) request files; ignored on HTTP/1.1 (wire-faithful — the file is the wire bytes, no re-framing). Lets an agent put a literal CRLF inside a pseudo-header value (e.g. a `:path` of `/foo\r\nX-Evil: yes` for H2→H1 downgrade smuggling) by setting the line terminator to `\n`: the parser splits on `\n` / `\n\n`, never on `\r\n`, so the CRLF inside the value is preserved into the H2 frame. The agent's constraint is that no value contains the terminator.
+_Avoid_: separator, delimiter, line separator, framing byte
+
 ## Proxy interception
 
 **Proxy-script**:

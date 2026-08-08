@@ -85,15 +85,20 @@ def new(
     host: str,
     protocol: str = "https",
     port: int | None = None,
+    line_terminator: bytes = b"\r\n",
     force: bool = False,
 ) -> dict[str, Any]:
-    """Create a new empty editable request with a meta sidecar.
+    r"""Create a new empty editable request with a meta sidecar.
 
     Args:
         name: Editable request name.
         host: Target host (required).
         protocol: ``http`` or ``https`` (default ``https``).
         port: Target port. Defaults to 80 for http, 443 for https.
+        line_terminator: Byte sequence the request parser splits header
+            lines on (default ``\r\n``). Only honored for HTTP/2 request
+            files; lets an agent put a literal CRLF inside an H2 header
+            value (H2→H1 downgrade smuggling) by setting it to ``\n``.
         force: Overwrite an existing request of the same name.
     """
     scheme = protocol.lower()
@@ -105,7 +110,9 @@ def new(
 
     req_dir = resolve_name_dir(name, force=force)
     (req_dir / REQUEST_FILENAME).write_bytes(b"")
-    meta = EditableMeta(scheme=scheme, host=host, port=port)
+    meta = EditableMeta(
+        scheme=scheme, host=host, port=port, line_terminator=line_terminator
+    )
     write_meta(req_dir, meta)
     return {
         "name": name,
@@ -114,6 +121,21 @@ def new(
         "host": host,
         "port": port,
     }
+
+
+def _looks_like_h2(request_bytes: bytes) -> bool:
+    r"""Sniff whether the request line says ``HTTP/2`` without full parsing.
+
+    The version token lives in the request line at the very start of the
+    file. Rather than trying to find the end of the first line (which
+    requires knowing the line terminator — and we're sniffing to decide
+    whether to honor the custom terminator), check whether ``HTTP/2``
+    appears as the version token in the leading bytes. ``HTTP/1.1`` and
+    ``HTTP/1.0`` do not contain ``HTTP/2``, so a substring check on the
+    first chunk is unambiguous.
+    """
+    head = request_bytes[:4096]
+    return b" HTTP/2" in head or head.startswith(b"HTTP/2")
 
 
 async def send(
@@ -161,17 +183,18 @@ async def send(
         msg = "Request file is empty"
         raise ValueError(msg)
 
-    parsed = parse_request(request_bytes)
+    is_h2 = _looks_like_h2(request_bytes)
+    lt = meta.line_terminator if is_h2 else b"\r\n"
+
+    parsed = parse_request(request_bytes, line_terminator=lt)
 
     if fix_content_length:
-        request_bytes = fix_content_length_bytes(request_bytes)
+        request_bytes = fix_content_length_bytes(request_bytes, line_terminator=lt)
         # Re-parse so the H2 path (which builds wire frames from ``parsed``
         # headers, not ``request_bytes``) sees the corrected Content-Length
         # and body-length match. The H1 path sends ``request_bytes`` raw,
         # so it already carries the fix.
-        parsed = parse_request(request_bytes)
-
-    is_h2 = parsed.version.upper().startswith("HTTP/2")
+        parsed = parse_request(request_bytes, line_terminator=lt)
 
     rmeta = RequestMeta(
         method=parsed.method,
@@ -315,8 +338,12 @@ async def send_pipeline(
         if not request_bytes:
             msg = "Request file is empty"
             raise ValueError(msg)
-        parsed = parse_request(request_bytes)
-        if parsed.version.upper().startswith("HTTP/2"):
+        is_h2_req = _looks_like_h2(request_bytes)
+        parsed = parse_request(
+            request_bytes,
+            line_terminator=meta.line_terminator if is_h2_req else b"\r\n",
+        )
+        if is_h2_req:
             is_h1_all = False
         else:
             is_h2_all = False
@@ -570,13 +597,13 @@ async def send_repeat(
         msg = "Request file is empty"
         raise ValueError(msg)
 
-    parsed = parse_request(request_bytes)
+    is_h2 = _looks_like_h2(request_bytes)
+    lt = meta.line_terminator if is_h2 else b"\r\n"
+    parsed = parse_request(request_bytes, line_terminator=lt)
 
     if fix_content_length:
-        request_bytes = fix_content_length_bytes(request_bytes)
-        parsed = parse_request(request_bytes)
-
-    is_h2 = parsed.version.upper().startswith("HTTP/2")
+        request_bytes = fix_content_length_bytes(request_bytes, line_terminator=lt)
+        parsed = parse_request(request_bytes, line_terminator=lt)
 
     rmeta = RequestMeta(
         method=parsed.method,

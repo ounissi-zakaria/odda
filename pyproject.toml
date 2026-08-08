@@ -115,6 +115,7 @@ split-on-trailing-comma = false
 "src/odda/logpoint.py" = ["E501", "PLR0913"]
 "src/odda/render.py" = ["D103", "PERF401", "E501"]
 "tests/e2e/scrut/fixtures/dyn_asgi.py" = ["INP001", "ARG001", "S108"]
+"tests/e2e/scrut/fixtures/echo_path_h2server.py" = ["INP001", "S110"]
 "tests/e2e/scrut/fixtures/ws_header_h2server.py" = ["INP001", "S110"]
 "tests/e2e/scrut/fixtures/h2_cookie_client.py" = ["INP001"]
 "tests/e2e/scrut/fixtures/slow_load_server.py" = ["INP001"]

@@ -1163,11 +1163,26 @@ def request_new(
     port: int | None = typer.Option(
         None, "--port", help="Target port (default 80 for http, 443 for https)"
     ),
+    line_terminator: str = typer.Option(
+        "\r\n",
+        "--line-terminator",
+        help=(
+            "Byte sequence the request parser splits header lines on (default "
+            "CRLF, \\r\\n). H2-only: for H2->H1 downgrade smuggling where a "
+            "literal CRLF must live inside an H2 header value (e.g. :path), "
+            "set to \\n so the parser splits on LF, preserving CR in values. "
+            "Accepts backslash escapes (\\r, \\n, \\x00, ...). Ignored for "
+            "HTTP/1.1 request files (wire-faithful)."
+        ),
+    ),
     force: bool = typer.Option(
         False, "--force", help="Overwrite an existing request of the same name"
     ),
 ) -> None:
     """Create a new empty editable request."""
+    lt_bytes = (
+        line_terminator.encode("utf-8").decode("unicode_escape").encode("latin-1")
+    )
     _run_coro(
         _client(ctx).call(
             "request/new",
@@ -1176,6 +1191,7 @@ def request_new(
                 "host": host,
                 "protocol": protocol,
                 "port": port,
+                "line_terminator": list(lt_bytes),
                 "force": force,
             },
         ),
