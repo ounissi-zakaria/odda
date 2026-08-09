@@ -38,7 +38,7 @@ Repeat `--name` to send two or more editable requests on **one connection**. The
 
 Sequential keep-alive also covers response-queue poisoning and same-connection CL.0 confirmation. A single `request send` (no victim) may suffice when the back-end surfaces the smuggled method on its own response — e.g. a `0\r\n\r\nG` body turns the next method into `GPOST`, and if the server echoes `"Unrecognized method GPOST"` on the smuggle's own response, one send confirms it. Send the next request only when the back-end buffers the prefix for a *later* victim rather than echoing it.
 
-**Where the interesting response lands.** In leftover-prefix smuggling the response queue desyncs from the request queue, so the interesting response (the smuggled method's error or confirmation) lands on the **smuggle** flow's record, not the victim's. The victim flow can show `status_code: 0` with an empty body — that's expected, not a failure signal. Read both flows before concluding the smuggle did nothing.
+**Where the interesting response lands.** In leftover-prefix smuggling the response queue desyncs from the request queue, so the interesting response (the smuggled method's error or confirmation) lands on the **smuggle** flow's record, not the victim's. The victim flow may show `status_code: null` with an `error` (e.g. `"aborted: step N failed (connection closed before response headers)"`) and no body — that's expected, not a failure signal. Read both flows before concluding the smuggle did nothing.
 
 ## Race conditions / concurrent send (`--repeat N` and H2 multi-name)
 

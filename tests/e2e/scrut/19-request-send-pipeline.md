@@ -235,14 +235,17 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 2 True True
 ```
 
-## Mid-sequence failure: step 1 succeeds, step 2 fails (response kept)
+## Mid-sequence connection close: step 1 succeeds, step 2 fails with a descriptive error
 
-A true mid-sequence outcome: req1 with `Connection: close` gets a 200
-response; the server then closes the connection; req2's read returns an
-empty response (the connection was closed cleanly, so no exception —
-the read yields a `status_code: 0` pseudo-response, not an error). This
-proves the partial-response handling: steps before the connection close
-keep their responses.
+A true mid-sequence outcome (default sequential keep-alive): req1 with
+`Connection: close` gets a 200 response; the server then closes the
+connection. Req2's read hits EOF before any response headers arrive.
+This must surface as a descriptive `error` on step 2 (not
+`status_code: 0, error: null`, which is ambiguous — `0/null` could mean
+"connection dropped" or "empty response"). Steps before the close keep
+their responses; the failed step gets the underlying cause as its
+`error`; any steps after the failed step are recorded as aborted with
+an `"aborted: step N failed (...)"` message (ADR-0019).
 
 ```scrut
 $ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
@@ -262,16 +265,28 @@ $ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=step1-ok&status=200&header=Co
 $ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=step2 HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: keep-alive\r\n\r\n' "$port" > "$PWD/data/requests/pipe-close-2/request"
 ```
 
-Step 1 keeps its 200 response; step 2 gets a `status_code: 0` empty
-response (the server closed after step 1, so step 2's read hits EOF).
-Step 1's error is `null`; step 2's error is also `null` (clean EOF, not
-an exception). Both flow records are written.
+Step 1 keeps its 200 response (`status_code: 200`, `error: null`). Step
+2 is the *failed* step (the read hit EOF) — its `status_code` is `null`
+(an error flow, not a `0` pseudo-response) and its `error` carries the
+underlying cause. Both flow records are written.
 
 ```scrut
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
 >   request send --name pipe-close-1 --name pipe-close-2 --insecure --timeout 10 \
->   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d)==2, d[0]["status_code"]==200, d[0]["error"] is None, d[1]["status_code"]==0, d[1]["error"] is None)'
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d)==2, d[0]["status_code"]==200, d[0]["error"] is None, d[1]["status_code"] is None, isinstance(d[1]["error"],str) and len(d[1]["error"])>0)'
 True True True True True
+```
+
+Step 2's error explains the connection closed before headers — not a
+bare `null`. (There is no `"aborted: step ..."` prefix on step 2 itself;
+that prefix is reserved for steps *after* the failed one. Step 2 is the
+failed step, so it carries the cause directly.)
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name pipe-close-1 --name pipe-close-2 --insecure --timeout 10 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[1]["error"])'
+connection closed before response headers (glob)
 ```
 
 Step 1's response body was preserved (it was read before the connection
@@ -290,6 +305,144 @@ $ pc1=$(cat "$PWD/pc1_id")
 ```scrut
 $ cat "$PWD/data/flows/$pc1/response_body.json"
 step1-ok (no-eol)
+```
+
+## `--pipelining` mid-pipeline close: step 1 succeeds, step 2 fails, step 3 aborted
+
+`--pipelining` writes all N requests up front, then reads all N
+responses in order. When the server closes after the first response
+(`Connection: close` on request 1), responses 2..N hit EOF before
+headers. The failed step (step 2) gets the underlying cause as its
+`error`; every step after it (step 3) gets the
+`"aborted: step 2 failed (...)"` prefix. No flow records `status_code:
+0` with a `null` error.
+
+The dyn server (hypercorn) rejects pipelined bytes after a
+`Connection: close` with a `400` on the *first* response, which
+obscures the abort attribution. A raw close-after-first fixture server
+answers the first request cleanly then closes, discarding the
+pipelined follow-ups — the real smuggling-target behavior
+`--pipelining` is built for. Plain HTTP/1.1 (no TLS).
+
+```scrut
+$ pick_port > "$PWD/caf_port"
+```
+
+```scrut {detached: true, detached_kill_signal: term}
+$ port=$(cat "$PWD/caf_port"); ( python3 "$TESTDIR/fixtures/close_after_first_server.py" "$port" >"$PWD/caf.log" 2>&1 < /dev/null & )
+```
+
+```scrut
+$ for i in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$(cat "$PWD/caf_port")/" && exit 0; sleep 0.05; done; echo "caf server not reachable" >&2; exit 1
+```
+
+```scrut
+$ port=$(cat "$PWD/caf_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name pipe-abort-1 --host 127.0.0.1 --port $port --protocol http --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/caf_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name pipe-abort-2 --host 127.0.0.1 --port $port --protocol http --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/caf_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name pipe-abort-3 --host 127.0.0.1 --port $port --protocol http --force > /dev/null
+```
+
+```scrut
+$ printf 'GET /a?body=pa1-ok&status=200 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$PWD/data/requests/pipe-abort-1/request"
+```
+
+```scrut
+$ printf 'GET /b HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n' > "$PWD/data/requests/pipe-abort-2/request"
+```
+
+```scrut
+$ printf 'GET /c HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n' > "$PWD/data/requests/pipe-abort-3/request"
+```
+
+Step 1 returns 200 (`error: null`). Step 2 is the failed step —
+`status_code: null`, `error` is the underlying cause. Step 3 is aborted
+— `status_code: null`, `error` starts with `"aborted: step 2 failed"`
+(the failed step is step 2, 1-based).
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name pipe-abort-1 --name pipe-abort-2 --name pipe-abort-3 --pipelining --timeout 10 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d)==3, d[0]["status_code"]==200, d[0]["error"] is None, d[1]["status_code"] is None, isinstance(d[1]["error"],str) and "connection closed" in d[1]["error"], d[2]["status_code"] is None, isinstance(d[2]["error"],str) and d[2]["error"].startswith("aborted: step 2 failed"))'
+True True True True True True True
+```
+
+Step 2's error is the underlying cause (no `"aborted: ..."` prefix —
+it's the failed step, not a downstream abort).
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name pipe-abort-1 --name pipe-abort-2 --name pipe-abort-3 --pipelining --timeout 10 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[1]["error"])'
+connection closed before response headers (glob)
+```
+
+Step 3's error is the abort message naming the failed step (step 2).
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name pipe-abort-1 --name pipe-abort-2 --name pipe-abort-3 --pipelining --timeout 10 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[2]["error"])'
+aborted: step 2 failed (connection closed before response headers) (glob)
+```
+
+Stop the close-after-first fixture server.
+
+```scrut
+$ pkill -f "close_after_first_server.py $PWD" 2>/dev/null || true
+```
+
+```scrut
+$ for i in $(seq 1 100); do pgrep -f "close_after_first_server.py $PWD" >/dev/null || exit 0; sleep 0.05; done; echo "caf server still running" >&2; exit 1
+```
+
+## `--pipelining` clean keep-alive pipeline: all 3 succeed (regression)
+
+Regression guard: a clean 3-request `--pipelining` send to a
+keep-alive server must still produce three `status_code: 200` records
+with `error: null` — no false-positive aborts from the close-detection
+fix.
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name pipe-clean-1 --host 127.0.0.1 --port $port --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name pipe-clean-2 --host 127.0.0.1 --port $port --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name pipe-clean-3 --host 127.0.0.1 --port $port --force > /dev/null
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=pc1-ok&status=200&header=Content-Type:application/json HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: keep-alive\r\n\r\n' "$port" > "$PWD/data/requests/pipe-clean-1/request"
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=pc2-ok&status=200&header=Content-Type:application/json HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: keep-alive\r\n\r\n' "$port" > "$PWD/data/requests/pipe-clean-2/request"
+```
+
+```scrut
+$ port=$(cat "$PWD/dyn_port"); printf 'GET /a?body=pc3-ok&status=200&header=Content-Type:application/json HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: keep-alive\r\n\r\n' "$port" > "$PWD/data/requests/pipe-clean-3/request"
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name pipe-clean-1 --name pipe-clean-2 --name pipe-clean-3 --pipelining --insecure --timeout 10 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d)==3, all(r["status_code"]==200 for r in d), all(r["error"] is None for r in d))'
+True True True
 ```
 
 ## Teardown: stop the dyn server

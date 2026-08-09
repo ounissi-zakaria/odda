@@ -45,11 +45,28 @@ class PipelineError(Exception):
 async def _read_until_headers_end(
     reader: asyncio.StreamReader,
 ) -> bytes:
-    r"""Read until ``\r\n\r\n`` and return bytes through the terminator."""
+    r"""Read until ``\r\n\r\n`` and return bytes through the terminator.
+
+    Raises ``ConnectionError`` if EOF is reached before the header
+    terminator — a clean (or abrupt) close with no (or partial) response
+    headers. Swallowing that case and returning the empty/partial bytes
+    produces a ``status_code: 0`` pseudo-response that looks like a
+    successful empty response, masking a dropped connection. The
+    pipelining loop and single-shot caller both translate the raise into
+    a descriptive error flow ("connection closed before response
+    headers") instead of an ambiguous ``status_code: 0, error: null``.
+    """
     try:
         return await reader.readuntil(b"\r\n\r\n")
     except asyncio.IncompleteReadError as e:
-        return e.partial
+        if e.partial:
+            msg = (
+                "connection closed before response headers ended "
+                f"(got {len(e.partial)} partial bytes)"
+            )
+        else:
+            msg = "connection closed before response headers"
+        raise ConnectionError(msg) from None
     except asyncio.LimitOverrunError:
         msg = "response headers too large"
         raise ValueError(msg) from None
@@ -284,7 +301,22 @@ async def send_h1_pipeline(
         if pipelining:
             for request_bytes, _parsed in requests:
                 writer.write(request_bytes)
-            await writer.drain()
+            # Tolerate a close during the write-all phase: the server is
+            # allowed to read request 1, send its response, and close
+            # before we finish writing the pipelined follow-ups. If the
+            # transport closes mid-drain, suppress the write error and
+            # let the read loop below detect the real EOF — that yields
+            # the correct per-step attribution (step 1's buffered
+            # response is read, step 2 hits EOF and becomes the failed
+            # step, steps 3..N become aborted). Without this, a fast
+            # close aborts everything as "step 1 failed" and loses step
+            # 1's response. ``OSError`` covers every connection-close
+            # variant asyncio raises here (``ConnectionResetError``,
+            # ``BrokenPipeError``, ``ssl.SSLError``); the read loop is
+            # the authoritative attribution path, so non-transport errors
+            # are left to propagate.
+            with contextlib.suppress(OSError):
+                await writer.drain()
             responses: list[RawResponse] = []
             for i, (_request_bytes, parsed) in enumerate(requests):
                 try:

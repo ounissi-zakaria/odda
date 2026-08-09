@@ -309,6 +309,57 @@ $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 status_code: 200
 ```
 
+## A connection that closes without a response is an error flow (not `status_code: 0`)
+
+Single-shot `request send` shares the response-header reader with the
+multi-name pipeline. A server that accepts the connection then closes
+without sending any response headers must produce a descriptive error
+flow (`status_code: null` + `error`), not the ambiguous
+`status_code: 0, error: null` pseudo-response that masked dropped
+connections. A raw TCP fixture server accepts then closes immediately,
+so the read hits EOF before any headers.
+
+```scrut
+$ pick_port > "$PWD/close_port"
+```
+
+```scrut {detached: true, detached_kill_signal: term}
+$ port=$(cat "$PWD/close_port"); ( python3 "$TESTDIR/fixtures/close_without_response_server.py" "$port" >"$PWD/close.log" 2>&1 < /dev/null & )
+```
+
+```scrut
+$ for i in $(seq 1 100); do ( python3 -c "import socket; s=socket.socket(); s.connect((\"127.0.0.1\",$(cat "$PWD/close_port"))); s.close()" 2>/dev/null ) && exit 0; sleep 0.05; done; echo "close server not reachable" >&2; exit 1
+```
+
+```scrut
+$ port=$(cat "$PWD/close_port"); odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   request new --name close-no-resp --host 127.0.0.1 --port $port --protocol http --force > /dev/null
+```
+
+```scrut
+$ printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$PWD/data/requests/close-no-resp/request"
+```
+
+The flow record carries `status_code: null` and a descriptive `error`
+naming the connection close — not `status_code: 0` with `error: null`.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   request send --name close-no-resp --timeout 5 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status_code"] is None, isinstance(d["error"],str) and "connection closed" in d["error"])'
+True True
+```
+
+Stop the close-without-response fixture server.
+
+```scrut
+$ pkill -f "close_without_response_server.py $PWD" 2>/dev/null || true
+```
+
+```scrut
+$ for i in $(seq 1 100); do pgrep -f "close_without_response_server.py $PWD" >/dev/null || exit 0; sleep 0.05; done; echo "close server still running" >&2; exit 1
+```
+
 ## Empty `request` file is rejected
 
 `request new` makes an empty file; `request send` against an empty

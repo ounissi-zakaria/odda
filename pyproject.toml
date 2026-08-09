@@ -119,3 +119,5 @@ split-on-trailing-comma = false
 "tests/e2e/scrut/fixtures/ws_header_h2server.py" = ["INP001", "S110"]
 "tests/e2e/scrut/fixtures/h2_cookie_client.py" = ["INP001"]
 "tests/e2e/scrut/fixtures/slow_load_server.py" = ["INP001"]
+"tests/e2e/scrut/fixtures/close_after_first_server.py" = ["INP001", "S110"]
+"tests/e2e/scrut/fixtures/close_without_response_server.py" = ["INP001", "S110"]
