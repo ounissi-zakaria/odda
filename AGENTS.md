@@ -12,7 +12,7 @@
 ```bash
 uv venv --python 3.14
 uv pip install -e ".[dev]"
-odda install-opencode
+odda install opencode
 ```
 
 Use `.venv/bin/python` and `.venv/bin/ruff`. Avoid `pip` directly unless `uv` is unavailable.
@@ -44,15 +44,18 @@ E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that
 - `src/odda/browser.py` — patchright/Playwright browser automation.
 - `src/odda/proxy.py` — mitmproxy wrapper.
 - `src/odda/flowstore.py` — File-based flow storage (flows.jsonl + per-flow dirs).
-- `src/odda/opencode/plugin.js` — OpenCode plugin.
-- `src/odda/opencode/SKILL.md` — Agent skill documentation.
+- `src/odda/harness/opencode/plugin.js` — OpenCode plugin.
+- `src/odda/harness/pi/plugin-pi.ts` — pi extension (createBashTool + spawnHook).
+- `src/odda/harness/pi/plugin-omp.ts` — omp extension (tool_call + event.input.env).
+- `src/odda/harness/install.py` — Harness install dispatcher (`odda install <opencode|pi|omp>`).
+- `src/odda/harness/skill/SKILL.md` — Agent skill documentation (shared across harnesses).
 
 ## Conventions
 
 - Python 3.14+ with `from __future__ import annotations`.
 - CLI commands stay thin; logic belongs in server/library modules.
 - CLI output defaults to human-readable text; the global `--json` flag opts into structured output (stable by convention; the parse target for scripts). Errors print as `Error: <message>` on stderr with a non-zero exit code in text mode (`{"error": ...}` on stdout in `--json` mode).
-- If you add, remove, or change CLI commands/options, update `src/odda/opencode/SKILL.md` and run `odda install-opencode` so agents see the current tool surface. Text renderers live in `src/odda/render.py` — add one for any new command whose result a human or agent will read.
+- If you add, remove, or change CLI commands/options, update `src/odda/harness/skill/SKILL.md` and run `odda install opencode` so agents see the current tool surface. Text renderers live in `src/odda/render.py` — add one for any new command whose result a human or agent will read.
 - Skill docs (`SKILL.md` and linked `*.md`) describe behavior, not implementation — keep ADR refs, internal class/module/library/CDP API names, exact on-disk modes, and other internals out of them.
 - When incrementing the version, update **both** `pyproject.toml` and `src/odda/__init__.py` (`__version__`), then run `uv lock` so the lockfile stays in sync. The version lives in three places: `pyproject.toml`, `src/odda/__init__.py`, and `uv.lock`.
 

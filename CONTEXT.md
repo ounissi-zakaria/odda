@@ -2,10 +2,24 @@
 
 ## Language
 
+## Harness integrations
+
+**Harness**:
+An external coding-agent tool that odda integrates with by shipping a plugin (auto-starts the odda server at session load, injects `ODDA_*` env vars into shell tool calls) plus a skill (teaches the agent the odda CLI surface). odda integrates with OpenCode, pi, and omp.
+_Avoid_: host, agent runner, editor, IDE
+
+**Plugin**:
+A TypeScript module discovered from the harness's config tree that hooks lifecycle events and tool calls. odda's plugin listens for the session-start event to spawn the per-PID odda server and injects `ODDA_SOCKET`/`ODDA_DATA_DIR`/`ODDA_LOG` into the bash tool's environment. Two plugin source files exist for pi and omp because the clean env-injection mechanism diverged: `plugin-pi.ts` uses pi's `createBashTool({ spawnHook })` (omp removed that factory); `plugin-omp.ts` uses a `tool_call` handler that sets `event.input.env` (pi's bash schema has no `env` field). Each installs to its harness's extension dir (`~/.pi/agent/extensions/` or `~/.omp/agent/extensions/`).
+_Avoid_: extension, hook, add-on, mod
+
+**Skill**:
+A directory with a `SKILL.md` (Agent Skills standard) describing the odda CLI surface. One shared skill source lives at `src/odda/harness/skill/`; the install command copies it verbatim into each harness's first-party skill dir (`~/.pi/agent/skills/odda/`, `~/.omp/agent/skills/odda/`, or `~/.config/opencode/skills/odda/`). Per-harness install targets keep each integration self-contained in its own config tree; the skill *source* is shared in the repo, the install *target* is not. The skill is the contract the agent reads to learn odda's commands; the plugin only handles lifecycle, never teaches commands.
+_Avoid_: docs, instructions, prompt
+
 ## Storage locations
 
 **Session dir**:
-`$XDG_RUNTIME_DIR` — holds the per-PID Unix socket (`odda-<pid>.sock`) and the per-PID server log (`odda-<pid>.log`). Ephemeral: tied to one odda server process, cleaned on logout/reboot. Created by the OpenCode plugin (or whoever starts the server); the data dir is not. `odda logs` finds the log here via `ODDA_LOG` or `status.log_path`.
+`$XDG_RUNTIME_DIR` — holds the per-PID Unix socket (`odda-<pid>.sock`) and the per-PID server log (`odda-<pid>.log`). Ephemeral: tied to one odda server process, cleaned on logout/reboot. Created by the harness plugin (or whoever starts the server); the data dir is not. `odda logs` finds the log here via `ODDA_LOG` or `status.log_path`.
 _Avoid_: runtime dir, socket dir, temp dir
 
 **Data dir**:

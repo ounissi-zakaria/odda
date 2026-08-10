@@ -14,7 +14,7 @@ import typer
 
 from odda import __version__, client, render, server
 from odda.browser import NAVIGATE_WAIT_UNTIL_EVENTS
-from odda.opencode.install import install_opencode_assets
+from odda.harness.install import Harness, install_harness
 
 app = typer.Typer(
     name="odda",
@@ -139,7 +139,7 @@ def _run_value(
     """Emit a sync result (no coroutine) in the requested mode.
 
     The sync sibling of :func:`_run_coro_raw` for the few commands whose
-    result is computed in-process (``version``, ``install-opencode``)
+    result is computed in-process (``version``, ``install``)
     rather than fetched from the server. Renders via the same renderer
     registry; errors go through :func:`_emit_error` by the caller.
     """
@@ -252,16 +252,20 @@ def version(ctx: typer.Context) -> None:
 
 
 @app.command()
-def install_opencode(ctx: typer.Context) -> None:
-    """Install the OpenCode plugin and skill."""
+def install(ctx: typer.Context, harness: Harness) -> None:
+    """Install the odda plugin and skill for a harness (opencode, pi, or omp)."""
     json_mode = ctx.obj["json"]
     try:
-        plugin_path, skill_path = install_opencode_assets()
-        result = {"plugin": str(plugin_path), "skill": str(skill_path)}
+        plugin_path, skill_path = install_harness(harness)
+        result = {
+            "harness": harness.value,
+            "plugin": str(plugin_path),
+            "skill": str(skill_path),
+        }
     except Exception as exc:
         _emit_error(str(exc), json_mode=json_mode)
         raise typer.Exit(code=1) from exc
-    _run_value(result, json_mode=json_mode, render_key="install-opencode")
+    _run_value(result, json_mode=json_mode, render_key="install")
 
 
 @app.command("server")

@@ -249,11 +249,11 @@ def render(result: Any, spec: Renderer) -> str:
 
 # Registry: command name -> renderer (callable or spec). Command names
 # match the JSON-RPC method names the CLI dispatches to (or the command's
-# own name for non-RPC commands like version/install-opencode). ``logs``
+# own name for non-RPC commands like version/install). ``logs``
 # is handled inline in cli.py (streaming) and deliberately has no entry.
 RENDERERS: dict[str, Renderer] = {
     "version": r_version,
-    "install-opencode": KvSpec(["plugin", "skill"]),
+    "install": KvSpec(["harness", "plugin", "skill"]),
     "status": KvSpec(
         ["socket", "data_dir", "parent_pid", "proxy_url", "browser_count", "log_path"]
     ),

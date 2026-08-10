@@ -2,7 +2,7 @@
 
 Browser automation and HTTP traffic capture CLI for AI agents.
 
-`odda` is composable command-line tool. An OpenCode plugin starts a per-session background server; the agent invokes `odda` commands from bash to drive Chrome and inspect captured network traffic.
+`odda` is composable command-line tool. A harness plugin (OpenCode, pi, or omp) starts a per-session background server; the agent invokes `odda` commands from bash to drive Chrome and inspect captured network traffic.
 
 ## Installation
 
@@ -10,17 +10,17 @@ With `uv` (recommended):
 
 ```bash
 uv pip install odda
-odda install-opencode
+odda install opencode   # or: odda install pi | odda install omp
 ```
 
 Or with `pip`:
 
 ```bash
 pip install odda
-odda install-opencode
+odda install opencode   # or: odda install pi | odda install omp
 ```
 
-This installs the `odda` CLI and copies the OpenCode plugin + skill into `~/.config/opencode/`.
+This installs the `odda` CLI and copies the plugin + skill into the harness's config directory (`~/.config/opencode/`, `~/.pi/agent/`, or `~/.omp/agent/`).
 
 ## Requirements
 
@@ -54,7 +54,7 @@ ODDA_SOCKET=/tmp/odda-$$.sock odda navigate https://example.com --browser-id 1 -
 
 ```
 odda server              # Run the background server
-odda install-opencode    # Install OpenCode plugin and skill
+odda install <harness>  # Install plugin + skill (opencode, pi, or omp)
 odda status              # Server status
 odda logs                # Server logs
 
