@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import subprocess
 import tempfile
 import time
 from contextlib import suppress
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
+BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
 
 #: Playwright ``page.goto`` lifecycle events accepted by :meth:`navigate`,
 #: in firing order. Shared across the browser module, the JSON-RPC handler,
@@ -75,10 +76,50 @@ def _prepare_user_data_dir() -> str:
         user data directory.
     """
     temp_dir = tempfile.mkdtemp(prefix="odda_")
-    if _BASE_PROFILE_DIR.is_dir():
+    if BASE_PROFILE_DIR.is_dir():
         with suppress(OSError):
-            shutil.copytree(_BASE_PROFILE_DIR, temp_dir, dirs_exist_ok=True)
+            shutil.copytree(BASE_PROFILE_DIR, temp_dir, dirs_exist_ok=True)
     return temp_dir
+
+
+def init_chrome_profile() -> dict[str, Any]:
+    """Launch Chrome against the base profile dir so the user can configure it.
+
+    Finds a Chrome executable, refuses to start if the base profile is
+    already locked by a running Chrome, launches Chrome with
+    ``--user-data-dir=<BASE_PROFILE_DIR>`` plus the minimal first-run
+    flags, and blocks until the user closes the window. The configured
+    profile is then copied by :func:`_prepare_user_data_dir` into each
+    isolated browser session.
+
+    Returns:
+        ``{"chrome": <path>, "profile_dir": <path>, "status": "closed"}``.
+
+    Raises:
+        RuntimeError: If Chrome is not found, or if the base profile
+            directory is locked by another Chrome instance.
+    """
+    chrome = _find_chrome_executable()
+    profile_dir = BASE_PROFILE_DIR
+
+    if (profile_dir / "SingletonLock").exists():
+        msg = (
+            f"Profile directory {profile_dir} appears to be locked "
+            "by another Chrome instance. Close it first."
+        )
+        raise RuntimeError(msg)
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    args = [
+        chrome,
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    subprocess.run(args, check=True)  # noqa: S603
+
+    return {"chrome": chrome, "profile_dir": str(profile_dir), "status": "closed"}
 
 
 class BrowserOperationError(Exception):

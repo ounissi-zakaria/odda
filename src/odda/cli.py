@@ -13,7 +13,7 @@ from typing import Any
 import typer
 
 from odda import __version__, client, render, server
-from odda.browser import NAVIGATE_WAIT_UNTIL_EVENTS
+from odda.browser import NAVIGATE_WAIT_UNTIL_EVENTS, init_chrome_profile
 from odda.harness.install import Harness, install_harness
 
 app = typer.Typer(
@@ -266,6 +266,25 @@ def install(ctx: typer.Context, harness: Harness) -> None:
         _emit_error(str(exc), json_mode=json_mode)
         raise typer.Exit(code=1) from exc
     _run_value(result, json_mode=json_mode, render_key="install")
+
+
+@app.command("init-chrome-profile")
+def init_chrome_profile_cmd(ctx: typer.Context) -> None:
+    """Launch Chrome against the base profile so you can configure it.
+
+    Opens a visible Chrome window pointed at odda's base profile
+    directory (cookies, extensions, preferences). Close the window
+    when done; odda copies the configured profile into each isolated
+    browser session. Fails if Chrome is not found or the base profile
+    is already locked by a running Chrome.
+    """
+    json_mode = ctx.obj["json"]
+    try:
+        result = init_chrome_profile()
+    except Exception as exc:
+        _emit_error(str(exc), json_mode=json_mode)
+        raise typer.Exit(code=1) from exc
+    _run_value(result, json_mode=json_mode, render_key="init-chrome-profile")
 
 
 @app.command("server")

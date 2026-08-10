@@ -189,4 +189,4 @@ For the `send` flags (`--fix-content-length`, `--timeout`, `--insecure`, `--pipe
 - `odda logs [--follow] [--n N]` — Show or tail the server log. Default `--n` is 50.
 - `odda version` — Print the odda version.
 
-`odda server` and `odda install` exist but are normally handled by the plugin and the package installer, not by agents at runtime.
+`odda server`, `odda install`, and `odda init-chrome-profile` exist but are normally handled by the plugin, the package installer, and a one-time host setup step respectively, not by agents at runtime.

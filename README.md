@@ -102,7 +102,7 @@ plugin) or the server's `status.log_path` field.
 To configure a base Chrome profile (cookies, extensions, preferences):
 
 ```bash
-scripts/init-chrome-profile
+odda init-chrome-profile
 ```
 
 `odda` copies this profile for each isolated browser session.

@@ -254,6 +254,7 @@ def render(result: Any, spec: Renderer) -> str:
 RENDERERS: dict[str, Renderer] = {
     "version": r_version,
     "install": KvSpec(["harness", "plugin", "skill"]),
+    "init-chrome-profile": KvSpec(["chrome", "profile_dir", "status"]),
     "status": KvSpec(
         ["socket", "data_dir", "parent_pid", "proxy_url", "browser_count", "log_path"]
     ),
