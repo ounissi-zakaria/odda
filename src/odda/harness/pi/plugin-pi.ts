@@ -27,43 +27,45 @@ async function waitForSocket(socketPath: string, timeoutMs = 5000): Promise<void
 }
 
 export default async function (pi: ExtensionAPI) {
-  let started = false;
 
   const startServer = async (cwd: string) => {
-    if (started) {
-      return;
-    }
-    started = true;
 
-    const dataDir = join(cwd, ".odda");
-    process.env.ODDA_DATA_DIR = dataDir;
+        const dataDir = join(cwd, ".odda");
+        process.env.ODDA_DATA_DIR = dataDir;
 
-    const oddaBin = process.env.ODDA_BIN || "odda";
-    const out = openSync(logPath, "a");
+        const oddaBin = process.env.ODDA_BIN || "odda";
+        const out = openSync(logPath, "a");
+        
+        const server = spawn(
+          oddaBin,
+          [
+            "server",
+            "--socket", socketPath,
+            "--data-dir", dataDir,
+            "--log", logPath,
+            "--parent-pid", String(ppid),
+          ],
+          {
+            stdio: ["ignore", out, out],
+            detached: false,
+          },
+        );
 
-    const server = spawn(
-      oddaBin,
-      [
-        "server",
-        "--socket", socketPath,
-        "--data-dir", dataDir,
-        "--log", logPath,
-        "--parent-pid", String(ppid),
-      ],
-      {
-        stdio: ["ignore", out, out],
-        detached: false,
-      },
-    );
+        server.on("error", (err) => {
+          console.error("[odda] failed to start server:", err);
+        });
 
-    server.on("error", (err) => {
-      console.error("[odda] failed to start server:", err);
-    });
-
-    await waitForSocket(socketPath);
+        await waitForSocket(socketPath);
   };
 
-  pi.on("session_start", async (_event, ctx) => {
-    await startServer(ctx.cwd);
+  pi.on("session_start", async (event, ctx) => {
+    console.error(`[odda] session_start reason=${event.reason} cwd=${ctx.cwd}`);
+    // The server is owned by the harness process (it dies with
+    // --parent-pid), so only the process-boot session_start spawns it.
+    // Subagent runtimes fire their own session_start; if that reason is
+    // also "startup", the socket probe dedupes the spawn.
+    if (event.reason === "startup") {
+      await startServer(ctx.cwd);
+    }
   });
 }

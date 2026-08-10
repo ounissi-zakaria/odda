@@ -61,3 +61,23 @@ the obvious questions, and the answers (env injection via `process.env`
 inheritance makes the bash-tool divergence moot; per-harness skill dirs keep
 installs self-contained) are not visible without reading both forks' bash
 executor env construction and skill discovery paths.
+
+## One server per process, reused across sessions
+
+The socket path is derived from `process.pid`, and every session inside one
+harness process loads `plugin-pi.ts` as a fresh module instance. A
+per-instance `started` flag therefore cannot dedupe across sessions: the
+second session would spawn a second `odda server` on the same path, which
+`server.py` would previously unlink-and-rebind, orphaning the first server
+(browsers, tabs, and flows became unreachable while its process lingered).
+
+Instead the plugin probes the socket before spawning — a `net.connect`
+succeeds only if a live server already owns the path — and reuses it. The
+socket itself is the cross-instance lock; the in-instance promise only
+dedupes concurrent `session_start` events within one session. Spawn is
+additionally gated on `session_start`'s `reason === "startup"` (pi
+extension event reasons: `"startup" | "reload" | "new" | "resume" |
+"fork"`): the server is owned by the harness process, so only the
+process-boot event may start it; a subagent runtime that also fires
+`"startup"` is deduped by the socket probe. The shared server shuts down
+with the harness process (`--parent-pid`).
