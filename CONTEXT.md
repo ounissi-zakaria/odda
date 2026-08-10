@@ -9,7 +9,7 @@ An external coding-agent tool that odda integrates with by shipping a plugin (au
 _Avoid_: host, agent runner, editor, IDE
 
 **Plugin**:
-A TypeScript module discovered from the harness's config tree that hooks lifecycle events and tool calls. odda's plugin listens for the session-start event to spawn the per-PID odda server and injects `ODDA_SOCKET`/`ODDA_DATA_DIR`/`ODDA_LOG` into the bash tool's environment. Two plugin source files exist for pi and omp because the clean env-injection mechanism diverged: `plugin-pi.ts` uses pi's `createBashTool({ spawnHook })` (omp removed that factory); `plugin-omp.ts` uses a `tool_call` handler that sets `event.input.env` (pi's bash schema has no `env` field). Each installs to its harness's extension dir (`~/.pi/agent/extensions/` or `~/.omp/agent/extensions/`).
+A TypeScript module discovered from the harness's config tree that hooks lifecycle events and tool calls. odda's plugin spawns the per-PID odda server at session start and makes `ODDA_SOCKET`/`ODDA_DATA_DIR`/`ODDA_LOG` available to every bash child. One plugin source file (`plugin-pi.ts`) installs to both pi and omp; each installs to its harness's extension dir (`~/.pi/agent/extensions/` or `~/.omp/agent/extensions/`).
 _Avoid_: extension, hook, add-on, mod
 
 **Skill**:

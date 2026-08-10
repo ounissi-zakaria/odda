@@ -1,5 +1,7 @@
 # pi + omp plugins: two extension sources, per-harness skill dirs, one install command
 
+Status: superseded by ADR 0024 (one source, `process.env` inheritance).
+
 pi (earendil-works/pi) and omp (can1357/oh-my-pi, "omp.sh") are the same
 harness family: omp is a fork of pi-mono by Mario Zechner, rewritten and
 extended by Can Bölük. Both share the Agent Skills standard for skills and
@@ -14,18 +16,24 @@ hook — the clean env-injection mechanism shown in pi's
 `examples/extensions/bash-spawn-hook.ts`); omp removed `createBashTool` and
 `spawnHook` entirely — its `BashTool` is a class with an empty
 `BashToolOptions` interface and no env-injection hook. The only env-injection
-mechanism that works on both is `tool_call` event mutation of
-`event.input.command` (prepend `export ODDA_*\n`), which works but pollutes
-every bash transcript entry and ignores omp's clean `event.input.env` field.
+mechanism that worked on both was `tool_call` event mutation of
+`event.input.command` (prepend `export ODDA_*\n`), which worked but polluted
+every bash transcript entry and ignored omp's clean `event.input.env` field.
 
-We ship **two** extension source files (`plugin-pi.ts` using
+At the time, we shipped **two** extension source files (`plugin-pi.ts` using
 `createBashTool({ spawnHook })`, `plugin-omp.ts` using `tool_call` env
 injection) and **one** shared skill source (in `src/odda/harness/skill/`)
 installed **per harness** to `~/.pi/agent/skills/odda/` (pi) and
 `~/.omp/agent/skills/odda/` (omp) — each harness's first-party skill dir,
 not the shared `~/.agents/skills/` location. One install command,
-`odda install <pi|omp|opencode>`, dispatches to the matching plugin file
+`odda install <pi|omp|opencode>`, dispatched to the matching plugin file
 and skill path. See ADR 0023 for the env-injection mechanism details.
+
+This was superseded by ADR 0024: omp later shipped a legacy-pi-coding-agent
+compat shim that rewrites `@earendil-works/pi-coding-agent` imports, and the
+plugin switched to `process.env` inheritance (no bash re-registration on
+either harness), making the `createBashTool`/`spawnHook` divergence moot.
+The per-harness skill-dir decision still stands.
 
 Install targets:
 - pi:     extension → `~/.pi/agent/extensions/odda.ts`,  skill → `~/.pi/agent/skills/odda/`

@@ -45,8 +45,7 @@ E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that
 - `src/odda/proxy.py` — mitmproxy wrapper.
 - `src/odda/flowstore.py` — File-based flow storage (flows.jsonl + per-flow dirs).
 - `src/odda/harness/opencode/plugin.js` — OpenCode plugin.
-- `src/odda/harness/pi/plugin-pi.ts` — pi extension (createBashTool + spawnHook).
-- `src/odda/harness/pi/plugin-omp.ts` — omp extension (tool_call + event.input.env).
+- `src/odda/harness/pi/plugin-pi.ts` — pi + omp extension (process.env inheritance; one source, two install targets).
 - `src/odda/harness/install.py` — Harness install dispatcher (`odda install <opencode|pi|omp>`).
 - `src/odda/harness/skill/SKILL.md` — Agent skill documentation (shared across harnesses).
 

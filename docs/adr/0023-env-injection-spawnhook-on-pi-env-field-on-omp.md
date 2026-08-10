@@ -1,5 +1,7 @@
 # Env injection: `spawnHook` on pi, `event.input.env` on omp — two mechanisms, two files
 
+Status: superseded by ADR 0024 (`process.env` inheritance, one mechanism, one file).
+
 The pi/omp extension must make `ODDA_SOCKET`, `ODDA_DATA_DIR`, and
 `ODDA_LOG` available to the agent's `odda` shell invocations. OpenCode has
 a dedicated `shell.env` hook for this; pi/omp have no equivalent — env vars
@@ -23,13 +25,18 @@ Three mechanisms exist across the two harnesses, and the clean one
 - **`tool_call` handler prepending to `event.input.command`** (both) —
   works on both but pollutes every bash transcript entry.
 
-We use the **clean per-harness mechanism**: `plugin-pi.ts` re-registers
+We used the **clean per-harness mechanism**: `plugin-pi.ts` re-registered
 bash via `createBashTool({ spawnHook })` with `env: { ...env, ODDA_SOCKET,
-ODDA_DATA_DIR, ODDA_LOG }`; `plugin-omp.ts` uses a `tool_call` handler that
-returns `{ input: { ...event.input, env: { ...event.input.env, ODDA_* } } }`,
+ODDA_DATA_DIR, ODDA_LOG }`; `plugin-omp.ts` used a `tool_call` handler that
+returned `{ input: { ...event.input, env: { ...event.input.env, ODDA_* } } }`,
 honored by omp's wrapper (no transcript pollution — the `env` field is a
-structured input, not part of `command`). See ADR 0022 for why we ship two
+structured input, not part of `command`). See ADR 0022 for why we shipped two
 files instead of one with a runtime branch.
+
+This was superseded by ADR 0024: the plugin switched to `process.env`
+inheritance (set the vars at load time, let the harness's session env carry
+them into every bash child), so neither `spawnHook` nor `event.input.env`
+mutation is used on either harness anymore.
 
 Rejected: (i) one file using `tool_call` command-prepend on both — the
 lowest-common-denominator, but pollutes every bash transcript entry where a
