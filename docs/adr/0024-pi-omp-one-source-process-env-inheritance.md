@@ -12,14 +12,14 @@ ADR 0022 shipped two extension source files because the env-injection
 mechanism diverged across the fork: pi had `createBashTool({ spawnHook })`,
 omp did not. That divergence no longer matters — the plugin no longer
 re-registers bash on either harness. Instead it sets `ODDA_SOCKET` and
-`ODDA_LOG` on `process.env` at extension load time (before any bash call),
-and `ODDA_DATA_DIR` inside `startServer` (it is cwd-dependent, so it cannot
-be set until `session_start` supplies the cwd). Child-process inheritance
-carries all three into every bash child via the harness's session env. Both
-pi and omp build the bash session env from `Bun.env` (pi:
-`filterChildShellEnv(Bun.env)` in `buildSpawnEnv`; omp: the same path
-through `procmgr.getShellConfig`), so a `process.env` write reaches the
-bash tool's spawned children without re-registering the tool, without a
+`ODDA_LOG` on `process.env` inside `startServer` (the first
+`session_start` that spawns the server), alongside `ODDA_DATA_DIR` (which is
+cwd-dependent, so it cannot be set until `session_start` supplies the cwd).
+Child-process inheritance carries all three into every bash child via the
+harness's session env. Both pi and omp build the bash session env from
+`Bun.env` (pi: `filterChildShellEnv(Bun.env)` in `buildSpawnEnv`; omp: the
+same path through `procmgr.getShellConfig`), so a `process.env` write reaches
+the bash tool's spawned children without re-registering the tool, without a
 `tool_call` handler, and without transcript pollution. `ODDA_DATA_DIR`'s
 late write is safe because `startServer` runs on `session_start` and awaits
 the socket before the handler returns — no bash child runs before it
@@ -71,13 +71,27 @@ second session would spawn a second `odda server` on the same path, which
 `server.py` would previously unlink-and-rebind, orphaning the first server
 (browsers, tabs, and flows became unreachable while its process lingered).
 
-Instead the plugin probes the socket before spawning — a `net.connect`
-succeeds only if a live server already owns the path — and reuses it. The
-socket itself is the cross-instance lock; the in-instance promise only
-dedupes concurrent `session_start` events within one session. Spawn is
-additionally gated on `session_start`'s `reason === "startup"` (pi
-extension event reasons: `"startup" | "reload" | "new" | "resume" |
-"fork"`): the server is owned by the harness process, so only the
-process-boot event may start it; a subagent runtime that also fires
-`"startup"` is deduped by the socket probe. The shared server shuts down
-with the harness process (`--parent-pid`).
+Instead the plugin gates the spawn on `process.env.ODDA_SOCKET !== socketPath`:
+`ODDA_SOCKET` is set inside `startServer` (a pid-derived path), so it is
+absent until the first `session_start` spawns the server and present
+thereafter. `process.env` is process-wide, so it survives the per-session
+module reload that defeats a module-level `started` flag — it is the
+cross-instance lock. The equality check, not mere truthiness, rejects an
+inherited parent process's `ODDA_SOCKET`, which carries a different
+pid-derived path: a child harness process inherits the parent's env but
+must start its own server, not reuse the parent's. The server is owned by
+the harness process (it dies with `--parent-pid`), so every `session_start`
+may attempt the spawn; the env gate dedupes subsequent ones within the
+process. The shared server shuts down with the harness process
+(`--parent-pid`).
+
+An earlier version of the plugin gated the spawn on `session_start`'s
+`reason === "startup"` (pi's event reasons: `"startup" | "reload" | "new" |
+"resume" | "fork"`). That gate is not portable to omp: omp's
+`SessionStartEvent` (`@oh-my-pi/pi-coding-agent`'s `shared-events.d.ts`)
+carries only `type: "session_start"` — no `reason` field — so every omp
+`session_start` fired with `reason === undefined` and the server never
+started. The legacy-pi-compat shim rewrites the import path but not the
+event payload shape. The env gate is harness-agnostic because it depends
+only on `process.env`, not on event-field conventions that diverge across
+the fork.

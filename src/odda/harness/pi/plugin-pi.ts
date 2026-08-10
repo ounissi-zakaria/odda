@@ -10,8 +10,6 @@ const RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || "/tmp";
 const ppid = process.pid;
 const socketPath = join(RUNTIME_DIR, `odda-${ppid}.sock`);
 const logPath = join(RUNTIME_DIR, `odda-${ppid}.log`);
-process.env.ODDA_SOCKET = socketPath;
-process.env.ODDA_LOG = logPath;
 
 async function waitForSocket(socketPath: string, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
@@ -29,13 +27,15 @@ async function waitForSocket(socketPath: string, timeoutMs = 5000): Promise<void
 export default async function (pi: ExtensionAPI) {
 
   const startServer = async (cwd: string) => {
+        process.env.ODDA_SOCKET = socketPath;
+        process.env.ODDA_LOG = logPath;
 
         const dataDir = join(cwd, ".odda");
         process.env.ODDA_DATA_DIR = dataDir;
 
         const oddaBin = process.env.ODDA_BIN || "odda";
         const out = openSync(logPath, "a");
-        
+
         const server = spawn(
           oddaBin,
           [
@@ -60,11 +60,14 @@ export default async function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (event, ctx) => {
     console.error(`[odda] session_start reason=${event.reason} cwd=${ctx.cwd}`);
-    // The server is owned by the harness process (it dies with
-    // --parent-pid), so only the process-boot session_start spawns it.
-    // Subagent runtimes fire their own session_start; if that reason is
-    // also "startup", the socket probe dedupes the spawn.
-    if (event.reason === "startup") {
+    // ODDA_SOCKET is set inside startServer (a pid-derived path), so it is
+    // absent until the first session_start spawns the server and present
+    // thereafter — including on subagent session_starts that reload this
+    // plugin as a fresh module. process.env survives that reload (unlike a
+    // module-level flag), so it gates across sessions within one process.
+    // The equality check, not mere truthiness, rejects an inherited parent
+    // process's ODDA_SOCKET, which carries a different pid-derived path.
+    if (process.env.ODDA_SOCKET !== socketPath) {
       await startServer(ctx.cwd);
     }
   });
