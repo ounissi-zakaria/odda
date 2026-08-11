@@ -30,9 +30,11 @@ If you add, remove, or change a dependency in `pyproject.toml`, regenerate the l
 ```bash
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 ./scripts/test-e2e.sh -j4
+./scripts/test-e2e.sh 02            # one file (prefix, bare name, or full path)
+./scripts/test-e2e.sh 02 05 07      # a subset
 ```
 
-E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that carries Chrome, scrut, and all system deps. No host Chrome or scrut installation required. `-j N` controls parallelism across test documents (default 1, use `-j4` for speed, `-j0` for unlimited). Each `scrut test <file>` runs in its own `$PWD` with its own odda server and auto-picked fixture port, so parallel docs never collide.
+E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that carries Chrome, scrut, and all system deps. No host Chrome or scrut installation required. `-j N` controls parallelism across test documents (default 4, use `-j 1` for sequential, `-j0` for unlimited). Each `scrut test <file>` runs in its own `$PWD` with its own odda server and auto-picked fixture port, so parallel docs never collide. Positional args select specific test files (prefix like `02`, bare filename, or full path); with no args the full suite runs. Iterate on one file first, then run the full suite to confirm nothing else broke.
 
 **When running tests, read the full output.** Do not pipe test commands through `grep`, `head`, `tail`, or any truncation. Grep for a pass/fail marker and you will miss the failure context (the diff block, the stderr traceback, which doc actually failed) and end up re-running the suite to recover what the first run already told you. The Bash tool captures the full output to a file when it exceeds the display window — read that file with the Read tool (offset/limit) instead of truncating on the shell side.
 

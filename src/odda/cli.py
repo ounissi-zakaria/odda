@@ -12,8 +12,7 @@ from typing import Any
 
 import typer
 
-from odda import __version__, client, render, server
-from odda.browser import NAVIGATE_WAIT_UNTIL_EVENTS, init_chrome_profile
+from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, client, render
 from odda.harness.install import Harness, install_harness
 
 app = typer.Typer(
@@ -279,6 +278,8 @@ def init_chrome_profile_cmd(ctx: typer.Context) -> None:
     is already locked by a running Chrome.
     """
     json_mode = ctx.obj["json"]
+    from odda.browser import init_chrome_profile
+
     try:
         result = init_chrome_profile()
     except Exception as exc:
@@ -313,6 +314,8 @@ def server_cmd(
 
     This command is normally started automatically by the OpenCode plugin.
     """
+    from odda import server
+
     server.run(
         socket_path=socket,
         data_dir=data_dir,

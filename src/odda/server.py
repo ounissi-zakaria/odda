@@ -10,12 +10,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from odda import flowstore, proxyscript, rpc
-from odda.browser import (
-    NAVIGATE_WAIT_UNTIL_EVENTS,
-    BrowserManager,
-    BrowserOperationError,
-)
+from odda import NAVIGATE_WAIT_UNTIL_EVENTS, flowstore, proxyscript, rpc
+from odda.browser import BrowserManager, BrowserOperationError
 from odda.proxy import ProxyServer
 from odda.request import (
     clone as clone_request,

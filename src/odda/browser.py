@@ -34,15 +34,6 @@ logger = logging.getLogger(__name__)
 
 BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
 
-#: Playwright ``page.goto`` lifecycle events accepted by :meth:`navigate`,
-#: in firing order. Shared across the browser module, the JSON-RPC handler,
-#: and the CLI so the vocabulary lives in one place.
-NAVIGATE_WAIT_UNTIL_EVENTS: tuple[str, ...] = (
-    "commit",
-    "domcontentloaded",
-    "load",
-    "networkidle",
-)
 
 
 def _find_chrome_executable() -> str:

@@ -42,7 +42,7 @@ success.
 ```scrut
 $ wait_for_fixture_server() {
 >   port=$(cat "$PWD/fixture_port")
->   for i in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$port/" && exit 0; sleep 0.05; done
+>   for i in $(seq 1 250); do curl -s -o /dev/null "http://127.0.0.1:$port/" && exit 0; sleep 0.02; done
 >   echo "fixture server on $port not reachable" >&2
 >   exit 1
 > }
@@ -56,7 +56,7 @@ $ stop_fixture_server() {
 >   [ -f "$PWD/fixture_port" ] || return 0
 >   port=$(cat "$PWD/fixture_port")
 >   pkill -f "http.server $port.*$PWD/site" 2>/dev/null || true
->   for i in $(seq 1 100); do pgrep -f "http.server $port.*$PWD/site" >/dev/null || exit 0; sleep 0.05; done
+>   for i in $(seq 1 250); do pgrep -f "http.server $port.*$PWD/site" >/dev/null || exit 0; sleep 0.02; done
 >   echo "fixture server still running on $port" >&2
 >   exit 1
 > }
@@ -70,7 +70,7 @@ for mitmproxy to flush the flow to disk.
 ```scrut
 $ wait_for_flow() {
 >   marker="$1"
->   for i in $(seq 1 100); do grep -q "$marker" "$PWD/data/flows/flows.jsonl" 2>/dev/null && exit 0; sleep 0.05; done
+>   for i in $(seq 1 250); do grep -q "$marker" "$PWD/data/flows/flows.jsonl" 2>/dev/null && exit 0; sleep 0.02; done
 >   echo "flow matching $marker not flushed to disk" >&2
 >   exit 1
 > }
