@@ -16,10 +16,10 @@
 
 ```bash
 uv tool install git+https://github.com/ounissi-zakaria/odda.git
-odda install opencode   # or: odda install pi | odda install omp
+odda install opencode   # or: odda install pi | odda install omp | odda install claude
 ```
 
-The first command installs the `odda` CLI globally. The second copies the plugin + skill into your harness's config directory (`~/.config/opencode/`, `~/.pi/agent/`, or `~/.omp/agent/`) so an AI agent session auto-starts the odda server and learns the command surface.
+The first command installs the `odda` CLI globally. The second copies the plugin + skill into your harness's config directory (`~/.config/opencode/`, `~/.pi/agent/`, `~/.omp/agent/`, or `~/.claude/skills/odda/`) so an AI agent session auto-starts the odda server and learns the command surface. For Claude Code, `odda install claude` writes a self-contained first-class plugin bundle (a `.claude-plugin/plugin.json` manifest plus a `SessionStart` hook and the shared skill) that Claude Code auto-loads from `~/.claude/skills/` — no marketplace and `~/.claude/settings.json` is never touched.
 
 ### Chrome profile (one-time)
 
@@ -33,7 +33,7 @@ This opens a visible Chrome window pointed at odda's base profile directory. Log
 
 ## Usage
 
-From inside an OpenCode (or pi / omp) session, the plugin starts the server and injects `ODDA_SOCKET` / `ODDA_DATA_DIR` for you. A typical loop:
+From inside an OpenCode (or pi / omp / Claude Code) session, the plugin starts the server and injects `ODDA_SOCKET` / `ODDA_DATA_DIR` for you. A typical loop:
 
 ```bash
 odda browser open                              # returns {browser_id, tab_id}
@@ -116,6 +116,6 @@ See [REQUEST.md](src/odda/harness/skill/REQUEST.md) for framing details and [rec
 
 - odda runs a **background server** (`odda server`) that holds the proxy, the browser instances, and the captured-flow state in one process.
 - The **CLI** commands talk to it over a Unix socket via JSON-RPC — every `odda <command>` is one short-lived client call.
-- A **harness plugin** (OpenCode / pi / omp) starts the server at session load and injects `ODDA_SOCKET` + `ODDA_DATA_DIR` into every shell the agent runs, so you almost never run `odda server` yourself.
+- A **harness plugin** (OpenCode / pi / omp / Claude Code) starts the server at session load and injects `ODDA_SOCKET` + `ODDA_DATA_DIR` into every shell the agent runs, so you almost never run `odda server` yourself.
 
 Project state lives in `.odda/` in the working directory: `flows/`, `requests/`, `browsers/`. It's created lazily on the first state-producing command, not when the server boots.
