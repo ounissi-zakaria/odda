@@ -1,6 +1,6 @@
 """odda - Browser automation and HTTP traffic capture CLI for AI agents."""
 
-__version__ = "0.40.4"
+__version__ = "0.40.5"
 
 #: Playwright ``page.goto`` lifecycle events accepted by navigate, in firing
 #: order. The single source of truth shared across the browser module (used by

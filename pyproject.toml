@@ -1,13 +1,13 @@
 [project]
 name = "odda"
-version = "0.40.4"
+version = "0.40.5"
 description = "Browser automation and HTTP traffic capture CLI for AI agents"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "typer>=0.15.0",
     "mitmproxy>=11.0.2",
-    "patchright>=1.60",
+    "patchright>=1.62",
     "h2>=4.0.0",
 ]
 
