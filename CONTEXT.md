@@ -5,15 +5,15 @@
 ## Harness integrations
 
 **Harness**:
-An external coding-agent tool that odda integrates with by shipping a plugin (auto-starts the odda server at session load, injects `ODDA_*` env vars into shell tool calls) plus a skill (teaches the agent the odda CLI surface). odda integrates with OpenCode, pi, and omp.
+An external coding-agent tool that odda integrates with by shipping a plugin (auto-starts the odda server at session load, injects `ODDA_*` env vars into shell tool calls) plus a skill (teaches the agent the odda CLI surface). odda integrates with OpenCode, pi, omp, and Claude Code.
 _Avoid_: host, agent runner, editor, IDE
 
 **Plugin**:
-A TypeScript module discovered from the harness's config tree that hooks lifecycle events and tool calls. odda's plugin spawns the per-PID odda server at session start and makes `ODDA_SOCKET`/`ODDA_DATA_DIR`/`ODDA_LOG` available to every bash child. One plugin source file (`plugin-pi.ts`) installs to both pi and omp; each installs to its harness's extension dir (`~/.pi/agent/extensions/` or `~/.omp/agent/extensions/`).
-_Avoid_: extension, hook, add-on, mod
+The lifecycle piece odda ships to a harness: it spawns the per-PID odda server at session start and makes `ODDA_SOCKET`/`ODDA_DATA_DIR`/`ODDA_LOG` available to every shell tool call. The form is per-harness, not a fixed artifact: a TypeScript module for OpenCode (`plugin.js`), pi/omp (`plugin-pi.ts`, one source, two install targets), and a self-contained first-class plugin bundle for Claude Code (a `.claude-plugin/plugin.json` manifest plus a `SessionStart` hook in `hooks/hooks.json` and the shared skill, written to `~/.claude/skills/odda/` which Claude Code auto-loads as a skills-directory plugin — no marketplace, and the user's `~/.claude/settings.json` is never touched; the hook writes `export ODDA_SOCKET=…` etc. into `$CLAUDE_ENV_FILE`, which Claude Code sources as a preamble before every Bash command). Each installs to its harness's config tree (`~/.config/opencode/plugins/`, `~/.pi/agent/extensions/` or `~/.omp/agent/extensions/`, `~/.claude/skills/odda/` for Claude Code).
+_Avoid_: extension, add-on, mod. (Claude Code calls its own lifecycle callbacks "hooks"; odda's Plugin *uses* a Claude Code hook but is not itself named "hook" in odda's language.)
 
 **Skill**:
-A directory with a `SKILL.md` (Agent Skills standard) describing the odda CLI surface. One shared skill source lives at `src/odda/harness/skill/`; the install command copies it verbatim into each harness's first-party skill dir (`~/.pi/agent/skills/odda/`, `~/.omp/agent/skills/odda/`, or `~/.config/opencode/skills/odda/`). Per-harness install targets keep each integration self-contained in its own config tree; the skill *source* is shared in the repo, the install *target* is not. The skill is the contract the agent reads to learn odda's commands; the plugin only handles lifecycle, never teaches commands.
+A directory with a `SKILL.md` (Agent Skills standard) describing the odda CLI surface. One shared skill source lives at `src/odda/harness/skill/`; the install command copies it verbatim into each harness's first-party skill dir (`~/.pi/agent/skills/odda/`, `~/.omp/agent/skills/odda/`, `~/.config/opencode/skills/odda/`, or `~/.claude/skills/odda/skills/odda/` inside the Claude Code plugin bundle). Per-harness install targets keep each integration self-contained in its own config tree; the skill *source* is shared in the repo, the install *target* is not. The skill is the contract the agent reads to learn odda's commands; the plugin only handles lifecycle, never teaches commands.
 _Avoid_: docs, instructions, prompt
 
 ## Storage locations

@@ -48,7 +48,8 @@ E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that
 - `src/odda/flowstore.py` — File-based flow storage (flows.jsonl + per-flow dirs).
 - `src/odda/harness/opencode/plugin.js` — OpenCode plugin.
 - `src/odda/harness/pi/plugin-pi.ts` — pi + omp extension (process.env inheritance; one source, two install targets).
-- `src/odda/harness/install.py` — Harness install dispatcher (`odda install <opencode|pi|omp>`).
+- `src/odda/harness/claude/start.py` — Claude Code `SessionStart` hook (starts the odda server, outliving the hook via reparenting — not detached into a new session — and bound to `$CLAUDE_PID` via `--parent-pid`; writes `ODDA_SOCKET`/`ODDA_DATA_DIR`/`ODDA_LOG` into `$CLAUDE_ENV_FILE`); shipped as `scripts/start.py` inside the plugin bundle that `odda install claude` writes to `~/.claude/skills/odda/`.
+- `src/odda/harness/install.py` — Harness install dispatcher (`odda install <opencode|pi|omp|claude>`).
 - `src/odda/harness/skill/SKILL.md` — Agent skill documentation (shared across harnesses).
 
 ## Conventions
