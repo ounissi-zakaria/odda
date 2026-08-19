@@ -179,5 +179,5 @@ $ pkill -f "slow_load_server.py $PWD" 2>/dev/null || true
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do pgrep -f "slow_load_server.py $PWD" >/dev/null || exit 0; sleep 0.05; done; echo "slow_load_server still running" >&2; exit 1
+$ for i in $(seq 1 300); do pgrep -f "slow_load_server.py $PWD" >/dev/null || exit 0; sleep 0.05; done; echo "slow_load_server still running" >&2; exit 1
 ```

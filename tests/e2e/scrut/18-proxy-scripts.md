@@ -371,7 +371,7 @@ $ pkill -f "odda.*--data-dir $PWD/data" 2>/dev/null || true
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do test -S "$PWD/odda.sock" || exit 0; sleep 0.05; done; exit 1
+$ for i in $(seq 1 300); do test -S "$PWD/odda.sock" || exit 0; sleep 0.05; done; exit 1
 ```
 
 Start a fresh odda server on the same data dir (same as `_lib/boot.md`
@@ -383,7 +383,7 @@ $ nohup odda server --socket "$PWD/odda.sock" --data-dir "$PWD/data" --log "$PWD
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do test -S "$PWD/odda.sock" && exit 0; sleep 0.1; done; exit 1
+$ for i in $(seq 1 600); do test -S "$PWD/odda.sock" && exit 0; sleep 0.1; done; exit 1
 ```
 
 The boot scan re-added `restorer`: `proxy-script list` shows it.

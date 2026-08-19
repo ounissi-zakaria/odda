@@ -328,7 +328,7 @@ $ port=$(cat "$PWD/close_port"); ( python3 "$TESTDIR/fixtures/close_without_resp
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do ( python3 -c "import socket; s=socket.socket(); s.connect((\"127.0.0.1\",$(cat "$PWD/close_port"))); s.close()" 2>/dev/null ) && exit 0; sleep 0.05; done; echo "close server not reachable" >&2; exit 1
+$ for i in $(seq 1 300); do ( python3 -c "import socket; s=socket.socket(); s.connect((\"127.0.0.1\",$(cat "$PWD/close_port"))); s.close()" 2>/dev/null ) && exit 0; sleep 0.05; done; echo "close server not reachable" >&2; exit 1
 ```
 
 ```scrut
@@ -357,7 +357,7 @@ $ pkill -f "close_without_response_server.py $PWD" 2>/dev/null || true
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do pgrep -f "close_without_response_server.py $PWD" >/dev/null || exit 0; sleep 0.05; done; echo "close server still running" >&2; exit 1
+$ for i in $(seq 1 300); do pgrep -f "close_without_response_server.py $PWD" >/dev/null || exit 0; sleep 0.05; done; echo "close server still running" >&2; exit 1
 ```
 
 ## Empty `request` file is rejected

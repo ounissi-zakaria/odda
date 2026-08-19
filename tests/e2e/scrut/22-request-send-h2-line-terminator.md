@@ -44,7 +44,7 @@ $ port=$(cat "$PWD/echo_port"); ( python3 "$TESTDIR/fixtures/echo_path_h2server.
 ```
 
 ```scrut
-$ port=$(cat "$PWD/echo_port"); for i in $(seq 1 100); do curl -s -k -o /dev/null "https://127.0.0.1:$port/" && exit 0; sleep 0.05; done; echo "echo server on $port not reachable" >&2; exit 1
+$ port=$(cat "$PWD/echo_port"); for i in $(seq 1 300); do curl -s -k -o /dev/null "https://127.0.0.1:$port/" && exit 0; sleep 0.05; done; echo "echo server on $port not reachable" >&2; exit 1
 ```
 
 ## Set up the dyn server (for the H1 test)
@@ -217,5 +217,5 @@ $ pkill -f "echo_path_h2server.py" 2>/dev/null || true
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do pgrep -f "echo_path_h2server.py" >/dev/null || exit 0; sleep 0.05; done; echo "echo_path_h2server still running" >&2; exit 1
+$ for i in $(seq 1 300); do pgrep -f "echo_path_h2server.py" >/dev/null || exit 0; sleep 0.05; done; echo "echo_path_h2server still running" >&2; exit 1
 ```

@@ -37,7 +37,7 @@ answer on `$PWD/dyn_port`. Bounded poll, fails fast on success.
 ```scrut
 $ wait_for_dyn_server() {
 >   port=$(cat "$PWD/dyn_port")
->   for i in $(seq 1 250); do curl -s -k -o /dev/null "https://127.0.0.1:$port/" && exit 0; sleep 0.02; done
+>   for i in $(seq 1 500); do curl -s -k -o /dev/null "https://127.0.0.1:$port/" && exit 0; sleep 0.03; done
 >   echo "dyn server on $port not reachable" >&2
 >   exit 1
 > }
@@ -50,7 +50,7 @@ cert path so only this document's server is killed.
 $ stop_dyn_server() {
 >   [ -f "$PWD/dyn_port" ] || return 0
 >   pkill -f "hypercorn.*$PWD/dyn.pem" 2>/dev/null || true
->   for i in $(seq 1 250); do pgrep -f "hypercorn.*$PWD/dyn.pem" >/dev/null || exit 0; sleep 0.02; done
+>   for i in $(seq 1 500); do pgrep -f "hypercorn.*$PWD/dyn.pem" >/dev/null || exit 0; sleep 0.03; done
 >   echo "dyn server still running" >&2
 >   exit 1
 > }

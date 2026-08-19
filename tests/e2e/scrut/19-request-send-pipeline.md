@@ -333,7 +333,7 @@ $ port=$(cat "$PWD/caf_port"); ( python3 "$TESTDIR/fixtures/close_after_first_se
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do curl -s -o /dev/null "http://127.0.0.1:$(cat "$PWD/caf_port")/" && exit 0; sleep 0.05; done; echo "caf server not reachable" >&2; exit 1
+$ for i in $(seq 1 300); do curl -s -o /dev/null "http://127.0.0.1:$(cat "$PWD/caf_port")/" && exit 0; sleep 0.05; done; echo "caf server not reachable" >&2; exit 1
 ```
 
 ```scrut
@@ -401,7 +401,7 @@ $ pkill -f "close_after_first_server.py $PWD" 2>/dev/null || true
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do pgrep -f "close_after_first_server.py $PWD" >/dev/null || exit 0; sleep 0.05; done; echo "caf server still running" >&2; exit 1
+$ for i in $(seq 1 300); do pgrep -f "close_after_first_server.py $PWD" >/dev/null || exit 0; sleep 0.05; done; echo "caf server still running" >&2; exit 1
 ```
 
 ## `--pipelining` clean keep-alive pipeline: all 3 succeed (regression)

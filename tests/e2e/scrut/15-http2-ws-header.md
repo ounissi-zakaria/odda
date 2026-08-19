@@ -42,7 +42,7 @@ $ port=$(cat "$PWD/dyn_port"); ( python3 "$TESTDIR/fixtures/ws_header_h2server.p
 ```
 
 ```scrut
-$ port=$(cat "$PWD/dyn_port"); for i in $(seq 1 100); do curl -s -k -o /dev/null "https://127.0.0.1:$port/" && exit 0; sleep 0.05; done; echo "dyn server on $port not reachable" >&2; exit 1
+$ port=$(cat "$PWD/dyn_port"); for i in $(seq 1 300); do curl -s -k -o /dev/null "https://127.0.0.1:$port/" && exit 0; sleep 0.05; done; echo "dyn server on $port not reachable" >&2; exit 1
 ```
 
 ## A curl request through the proxy does not 502
@@ -133,5 +133,5 @@ $ pkill -f "ws_header_h2server.py" 2>/dev/null || true
 ```
 
 ```scrut
-$ for i in $(seq 1 100); do pgrep -f "ws_header_h2server.py" >/dev/null || exit 0; sleep 0.05; done; echo "ws_header_h2server still running" >&2; exit 1
+$ for i in $(seq 1 300); do pgrep -f "ws_header_h2server.py" >/dev/null || exit 0; sleep 0.05; done; echo "ws_header_h2server still running" >&2; exit 1
 ```

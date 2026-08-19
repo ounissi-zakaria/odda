@@ -67,6 +67,24 @@ async def _read_until_headers_end(
         else:
             msg = "connection closed before response headers"
         raise ConnectionError(msg) from None
+    except OSError as e:
+        # A hard transport reset surfaces on the reader as an ``OSError``
+        # subclass — ``ConnectionResetError``/``BrokenPipeError`` over a
+        # plain TCP socket, or ``ssl.SSLError`` over a TLS connection (e.g.
+        # an unexpected close mid-handshake/mid-read) — rather than a clean
+        # EOF (``IncompleteReadError``). This happens most often under load
+        # in the ``--pipelining`` write-all path: the server reads request
+        # 1, responds, and closes while the client is still writing/draining
+        # the pipelined follow-ups, so the reader observes a reset before
+        # any headers. ``asyncio.LimitOverrunError`` is a ``ValueError``,
+        # not an ``OSError``, so it is still caught by its own clause below.
+        # Without this normalization the raw ``OSError`` escapes to the
+        # pipeline loop and gets attributed to whatever step is reading
+        # (e.g. "step 1 failed ([Errno 32] Broken pipe)") instead of the
+        # clean "connection closed before response headers" message that
+        # the single-shot and pipeline callers already translate into a
+        # descriptive error flow.
+        raise ConnectionError("connection closed before response headers") from e
     except asyncio.LimitOverrunError:
         msg = "response headers too large"
         raise ValueError(msg) from None

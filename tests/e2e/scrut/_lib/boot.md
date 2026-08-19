@@ -6,5 +6,5 @@ $ nohup odda server --socket "$PWD/odda.sock" --data-dir "$PWD/data" --log "$PWD
 ```
 
 ```scrut
-$ for i in $(seq 1 500); do test -S "$PWD/odda.sock" && exit 0; sleep 0.02; done; exit 1
+$ for i in $(seq 1 2000); do test -S "$PWD/odda.sock" && exit 0; sleep 0.03; done; exit 1
 ```

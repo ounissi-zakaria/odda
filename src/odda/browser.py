@@ -1043,6 +1043,13 @@ class BrowserManager:
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--enable-unsafe-extension-debugging",
+                # Chrome writes temp files to /dev/shm by default; in Docker
+                # that mount is tiny (~64MB) and under parallel browser
+                # launches it fills up, causing Chrome to crash or hang on
+                # launch (the "180s timeout" / "no tab_id" e2e flakes). This
+                # flag redirects those temp files to /tmp, which is sized by
+                # the container's storage driver and has no such pressure.
+                "--disable-dev-shm-usage",
             ],
         )
 
