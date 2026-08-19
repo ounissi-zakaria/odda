@@ -27,7 +27,7 @@ where = ["src"]
 "" = "src"
 
 [tool.setuptools.package-data]
-odda = ["harness/opencode/*.js", "harness/pi/*.ts", "harness/skill/*.md", "harness/skill/recipes/*.md", "userscripts/default/*.js"]
+odda = ["harness/opencode/*.js", "harness/pi/*.ts", "harness/claude/start.py", "harness/skill/*.md", "harness/skill/recipes/*.md", "userscripts/default/*.js"]
 
 [tool.ruff]
 target-version = "py311"

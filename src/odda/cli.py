@@ -252,7 +252,7 @@ def version(ctx: typer.Context) -> None:
 
 @app.command()
 def install(ctx: typer.Context, harness: Harness) -> None:
-    """Install the odda plugin and skill for a harness (opencode, pi, or omp)."""
+    """Install the odda plugin and skill for a harness (opencode|pi|omp|claude)."""
     json_mode = ctx.obj["json"]
     try:
         plugin_path, skill_path = install_harness(harness)

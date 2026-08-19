@@ -1,18 +1,25 @@
 """Install odda harness plugins and the shared skill into user config dirs.
 
-Supports three harnesses: ``opencode``, ``pi``, ``omp``. Each installs a
-plugin/extension into the harness's first-party extension dir and the shared
-skill into the harness's first-party skill dir. The skill source is shared
-across all harnesses (``odda.harness.skill``); only the install target
-differs.
+Supports four harnesses: ``opencode``, ``pi``, ``omp``, ``claude``. Each
+installs a plugin/extension into the harness's first-party extension dir and
+the shared skill into the harness's first-party skill dir. The skill source is
+shared across all harnesses (``odda.harness.skill``); only the install target
+differs. For Claude Code the "plugin" is a self-contained first-class plugin
+bundle written to ``~/.claude/skills/odda/`` (a ``.claude-plugin/plugin.json``
+manifest plus a ``SessionStart`` hook and the shared skill); Claude Code
+auto-loads it as a skills-directory plugin, so the user's
+``~/.claude/settings.json`` is never touched.
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 from enum import StrEnum
 from importlib import resources
 from pathlib import Path
+
+from odda import __version__
 
 
 class Harness(StrEnum):
@@ -21,6 +28,7 @@ class Harness(StrEnum):
     opencode = "opencode"
     pi = "pi"
     omp = "omp"
+    claude = "claude"
 
 
 def install_harness(harness: Harness) -> tuple[Path, Path]:
@@ -37,6 +45,8 @@ def install_harness(harness: Harness) -> tuple[Path, Path]:
     """
     if harness is Harness.opencode:
         return _install_opencode()
+    if harness is Harness.claude:
+        return _install_claude()
     return _install_pi_family(harness)
 
 
@@ -88,6 +98,90 @@ def _install_pi_family(harness: Harness) -> tuple[Path, Path]:
 
     skill_dst = _install_skill(skills_dir)
     return plugin_dst, skill_dst
+
+
+def _install_claude() -> tuple[Path, Path]:
+    """Install the odda plugin bundle and skill into ``~/.claude/skills/odda/``.
+
+    Claude Code auto-loads a self-contained plugin from any directory under
+    ``~/.claude/skills/`` that holds a ``.claude-plugin/plugin.json`` manifest
+    (the skills-directory plugin mechanism — no marketplace needed). odda's
+    bundle carries a ``SessionStart`` hook (``hooks/hooks.json`` →
+    ``scripts/start.py``) that starts the per-session server and writes the
+    ``ODDA_*`` env into ``$CLAUDE_ENV_FILE``, plus the shared skill under
+    ``skills/odda/``. The user's ``~/.claude/settings.json`` is never touched.
+    """
+    claude_dir = Path.home() / ".claude"
+    plugin_dir = claude_dir / "skills" / "odda"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "hooks").mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "scripts").mkdir(parents=True, exist_ok=True)
+    skills_dir = plugin_dir / "skills" / "odda"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_plugin_manifest(plugin_dir / ".claude-plugin" / "plugin.json")
+    _write_plugin_hooks(plugin_dir / "hooks" / "hooks.json")
+
+    try:
+        with resources.as_file(resources.files("odda.harness.claude")) as asset_dir:
+            hook_src = asset_dir / "start.py"
+            if not hook_src.exists():
+                msg = "Claude Code hook script not found in odda package"
+                raise RuntimeError(msg)
+            hook_dst = plugin_dir / "scripts" / "start.py"
+            shutil.copy2(hook_src, hook_dst)
+            hook_dst.chmod(0o755)
+    except (OSError, ValueError) as exc:
+        msg = f"Failed to install Claude Code hook: {exc}"
+        raise RuntimeError(msg) from exc
+
+    skill_dst = _install_skill(skills_dir)
+    return plugin_dir, skill_dst
+
+
+def _write_plugin_manifest(manifest_path: Path) -> None:
+    """Write the plugin manifest (``plugin.json``) for the odda bundle.
+
+    Generated inline so the version tracks ``odda.__version__`` without a
+    static template file to keep in sync.
+    """
+    manifest = {
+        "name": "odda",
+        "version": __version__,
+        "description": (
+            "Browser automation, HTTP traffic capture, dynamic analysis, "
+            "and raw request crafting via the odda CLI. Starts a per-session "
+            "odda server and teaches the agent the odda CLI surface."
+        ),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_plugin_hooks(hooks_path: Path) -> None:
+    """Write the plugin's ``SessionStart`` hook config.
+
+    Uses the ``${CLAUDE_PLUGIN_ROOT}`` placeholder (resolved by Claude Code to
+    the bundle dir) and the exec form (``command`` + ``args``) so the script
+    path is passed as a single argument with no shell-quoting risk. The hook is
+    Python (``python3 …/start.py``); the hook's runtime is the same ``python3``
+    odda already requires, and a Python hook can probe a Unix socket natively.
+    """
+    hooks = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3",
+                            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/start.py"],
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+    hooks_path.write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
 
 
 def _install_skill(skills_dir: Path) -> Path:
