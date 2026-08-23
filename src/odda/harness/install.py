@@ -75,7 +75,7 @@ def _install_opencode() -> tuple[Path, Path]:
 
 
 def _install_pi_family(harness: Harness) -> tuple[Path, Path]:
-    """Copy the shared pi/omp extension and skill into the harness config dir."""
+    """Copy the harness's extension and the shared skill into its config dir."""
     config_root = ".pi" if harness is Harness.pi else ".omp"
     agent_dir = Path.home() / config_root / "agent"
     extensions_dir = agent_dir / "extensions"
@@ -83,9 +83,10 @@ def _install_pi_family(harness: Harness) -> tuple[Path, Path]:
     extensions_dir.mkdir(parents=True, exist_ok=True)
     skills_dir.mkdir(parents=True, exist_ok=True)
 
-    plugin_name = "plugin-pi.ts"
+    package = "odda.harness.pi" if harness is Harness.pi else "odda.harness.omp"
+    plugin_name = "plugin-pi.ts" if harness is Harness.pi else "plugin-omp.ts"
     try:
-        with resources.as_file(resources.files("odda.harness.pi")) as asset_dir:
+        with resources.as_file(resources.files(package)) as asset_dir:
             plugin_src = asset_dir / plugin_name
             if not plugin_src.exists():
                 msg = f"{harness.value} plugin not found in odda package"
