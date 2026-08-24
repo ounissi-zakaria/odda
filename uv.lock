@@ -627,7 +627,7 @@ requires-dist = [
     { name = "h2", specifier = ">=4.0.0" },
     { name = "hypercorn", marker = "extra == 'dev'", specifier = ">=0.18.0" },
     { name = "mitmproxy", specifier = ">=11.0.2" },
-    { name = "patchright", specifier = ">=1.62" },
+    { name = "patchright", specifier = "==1.62.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.11" },
     { name = "typer", specifier = ">=0.15.0" },
 ]

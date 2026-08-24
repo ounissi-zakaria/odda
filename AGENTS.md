@@ -44,6 +44,7 @@ E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that
 - `src/odda/server.py` — JSON-RPC server and request handlers.
 - `src/odda/client.py` — JSON-RPC client.
 - `src/odda/browser.py` — patchright/Playwright browser automation.
+- `src/odda/chrome_args.py` — Redeclared Chrome launch flags (the patchright `chromiumSwitches` mirror + m150 model-store suppression); see the drift audit note below.
 - `src/odda/proxy.py` — mitmproxy wrapper.
 - `src/odda/flowstore.py` — File-based flow storage (flows.jsonl + per-flow dirs).
 - `src/odda/harness/opencode/plugin.js` — OpenCode plugin.
@@ -61,6 +62,7 @@ E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that
 - If you add, remove, or change CLI commands/options, update `src/odda/harness/skill/SKILL.md` and run `odda install opencode` so agents see the current tool surface. Text renderers live in `src/odda/render.py` — add one for any new command whose result a human or agent will read.
 - Skill docs (`SKILL.md` and linked `*.md`) describe behavior, not implementation — keep ADR refs, internal class/module/library/CDP API names, exact on-disk modes, and other internals out of them.
 - When incrementing the version, update **both** `pyproject.toml` and `src/odda/__init__.py` (`__version__`), then run `uv lock` so the lockfile stays in sync. The version lives in three places: `pyproject.toml`, `src/odda/__init__.py`, and `uv.lock`.
+- **`patchright` is pinned to an exact version** (`patchright==<x.y.z>` in `pyproject.toml`). On a bump, audit `src/odda/chrome_args.py` against the new `chromiumSwitches` block in the installed driver's `coreBundle.js` (search `init_chromiumSwitches`): diff `_DISABLED_FEATURES` against the driver's `disabledFeatures` array and `_CHROMIUM_SWITCHES` against the driver's desktop `chromiumSwitches()` resolution (the driver's `_innerDefaultArgs` calls it with no options — the `android: true` branch that drops `--disable-sync` only fires on the Android path, not `launch_persistent_context`). Confirm two deliberate exclusions stay absent: `--password-store=basic` and `--use-mock-keychain` (real system keychain so seeded cookies persist). Confirm `--disable-blink-features=AutomationControlled` (stealth) stays present — no e2e doc checks `navigator.webdriver`, so the pin + this note are the only guards against a silent stealth regression.
 
 ## Agent skills
 

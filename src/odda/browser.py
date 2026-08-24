@@ -26,6 +26,7 @@ from odda import (
     userscript as userscript_mod,
     wrap as wrap_mod,
 )
+from odda.chrome_args import build_chrome_args
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -34,6 +35,65 @@ logger = logging.getLogger(__name__)
 
 BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
 
+# Chrome-managed junk deleted from the base profile once by
+# ``_slim_base_profile`` (called from ``init_chrome_profile`` after the user
+# closes Chrome). Root junk is dropped at the profile root; profile junk one
+# level inside ``Default`` / ``Profile N`` only, so deeper same-named dirs
+# (extension/site storage) survive. Measured: 188MB -> 13MB, cookies intact.
+_SEED_JUNK_ROOT: frozenset[str] = frozenset(
+    {
+        "component_crx_cache",
+        "optimization_guide_model_store",
+        "optimization_guide_prediction_model_downloads",
+        "WasmTtsEngine",
+        "Safe Browsing",
+        "OnDeviceHeadSuggestModel",
+        "ZxcvbnData",
+        "GPUPersistentCache",
+        "GraphiteDawnCache",
+        "GrShaderCache",
+        "ShaderCache",
+        "CertificateRevocation",
+        "Crashpad",
+        "BrowserMetrics",
+        "MEIPreload",
+        "OptimizationHints",
+        "extensions_crx_cache",
+    }
+)
+# Cache dirs that live inside a profile dir (``Default`` / ``Profile N``).
+_SEED_JUNK_PROFILE: frozenset[str] = frozenset(
+    {
+        "Cache",
+        "Code Cache",
+        "Media Cache",
+        "GPUCache",
+        "DawnWebGPUCache",
+        "DawnGraphiteCache",
+        "GraphiteDawnCache",
+        "ShaderCache",
+    }
+)
+
+
+def _slim_base_profile() -> None:
+    """Delete Chrome-managed junk from ``BASE_PROFILE_DIR`` once.
+
+    Called from :func:`init_chrome_profile` after the user closes Chrome, so
+    the base profile stays slim for every subsequent seed copy. Deletes
+    ``_SEED_JUNK_ROOT`` at the profile root and ``_SEED_JUNK_PROFILE`` one
+    level inside each profile dir (``Default`` / ``Profile N``) only; deeper
+    same-named dirs (extension/site storage) survive.
+    """
+    with suppress(OSError):
+        for name in _SEED_JUNK_ROOT:
+            shutil.rmtree(BASE_PROFILE_DIR / name, ignore_errors=True)
+        for profile in BASE_PROFILE_DIR.iterdir():
+            if profile.is_dir() and (
+                profile.name == "Default" or profile.name.startswith("Profile ")
+            ):
+                for name in _SEED_JUNK_PROFILE:
+                    shutil.rmtree(profile / name, ignore_errors=True)
 
 
 def _find_chrome_executable() -> str:
@@ -62,6 +122,10 @@ def _find_chrome_executable() -> str:
 def _prepare_user_data_dir() -> str:
     """Create a temp user data dir, optionally seeded from the base profile.
 
+    The base profile is slimmed once by :func:`_slim_base_profile` during
+    :func:`init_chrome_profile`, so the copy here is a plain ``copytree`` (no
+    per-launch filtering).
+
     Returns:
         Path to a temporary directory that can be used as Chrome's
         user data directory.
@@ -79,9 +143,10 @@ def init_chrome_profile() -> dict[str, Any]:
     Finds a Chrome executable, refuses to start if the base profile is
     already locked by a running Chrome, launches Chrome with
     ``--user-data-dir=<BASE_PROFILE_DIR>`` plus the minimal first-run
-    flags, and blocks until the user closes the window. The configured
-    profile is then copied by :func:`_prepare_user_data_dir` into each
-    isolated browser session.
+    flags, and blocks until the user closes the window. After close, slims
+    Chrome-managed junk from the profile once (so each subsequent seed copy
+    stays small). The configured profile is then copied by
+    :func:`_prepare_user_data_dir` into each isolated browser session.
 
     Returns:
         ``{"chrome": <path>, "profile_dir": <path>, "status": "closed"}``.
@@ -109,6 +174,7 @@ def init_chrome_profile() -> dict[str, Any]:
         "--no-default-browser-check",
     ]
     subprocess.run(args, check=True)  # noqa: S603
+    _slim_base_profile()
 
     return {"chrome": chrome, "profile_dir": str(profile_dir), "status": "closed"}
 
@@ -1035,22 +1101,17 @@ class BrowserManager:
             headless=headless,
             proxy=proxy_config,
             ignore_https_errors=True,
-            ignore_default_args=[
-                "--password-store=basic",
-                "--use-mock-keychain",
-            ],
-            args=[
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--enable-unsafe-extension-debugging",
-                # Chrome writes temp files to /dev/shm by default; in Docker
-                # that mount is tiny (~64MB) and under parallel browser
-                # launches it fills up, causing Chrome to crash or hang on
-                # launch (the "180s timeout" / "no tab_id" e2e flakes). This
-                # flag redirects those temp files to /tmp, which is sized by
-                # the container's storage driver and has no such pressure.
-                "--disable-dev-shm-usage",
-            ],
+            # ignore_default_args=True (bool) so Chrome receives only our
+            # redeclared args (src/odda/chrome_args.py), which carry the m150
+            # model-store suppression names in --disable-features. See
+            # chrome_args.py and the AGENTS.md drift note for the two
+            # deliberate omissions (password-store/mock-keychain).
+            ignore_default_args=True,
+            args=build_chrome_args(
+                user_data_dir,
+                self.proxy.proxy_url if self.proxy else None,
+                headless=headless,
+            ),
         )
 
         instance = BrowserInstance(browser_id, playwright, context)

@@ -7,7 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "typer>=0.15.0",
     "mitmproxy>=11.0.2",
-    "patchright>=1.62",
+    "patchright==1.62.1",
     "h2>=4.0.0",
 ]
 
