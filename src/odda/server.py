@@ -27,6 +27,19 @@ _PIPELINE_MIN_NAMES = 2
 _REPEAT_MIN = 2
 
 
+def _require_coord(params: dict[str, Any], name: str) -> float:
+    """Return ``params[name]`` as a float, raising INVALID_PARAMS if absent.
+
+    Coordinate mode needs both x and y; a missing half is a client error.
+    """
+    try:
+        return float(params[name])
+    except (KeyError, TypeError, ValueError):
+        raise rpc.JsonRpcError(
+            rpc.INVALID_PARAMS, "Provide both x and y for coordinate mode"
+        ) from None
+
+
 class OddaServer:
     """Long-running stateful server exposed over a Unix socket."""
 
@@ -347,8 +360,24 @@ class OddaServer:
             browser_id: Target browser ID.
             tab_id: Target tab ID.
             ref: Element ref from a snapshot (e.g. ``e2`` or ``f1e2``).
-            timeout: Timeout in seconds (default 5).
+            x, y: Viewport coordinates for a raw trusted click, mutually
+                exclusive with ``ref``.
+            timeout: Timeout in seconds (default 5), ref mode only.
         """
+        if "x" in params or "y" in params:
+            if "ref" in params:
+                raise rpc.JsonRpcError(
+                    rpc.INVALID_PARAMS, "Provide either x/y or ref, not both"
+                )
+            x = _require_coord(params, "x")
+            y = _require_coord(params, "y")
+            return await self.browser.page_click_coords(
+                params["browser_id"], params["tab_id"], x=x, y=y
+            )
+        if "ref" not in params:
+            raise rpc.JsonRpcError(
+                rpc.INVALID_PARAMS, "Provide either ref or x/y coordinates"
+            )
         timeout_s = float(params.get("timeout", 5.0))
         return await self.browser.page_click(
             params["browser_id"],
@@ -384,8 +413,24 @@ class OddaServer:
             browser_id: Target browser ID.
             tab_id: Target tab ID.
             ref: Element ref from a snapshot.
-            timeout: Timeout in seconds (default 5).
+            x, y: Viewport coordinates for a raw trusted hover, mutually
+                exclusive with ``ref``.
+            timeout: Timeout in seconds (default 5), ref mode only.
         """
+        if "x" in params or "y" in params:
+            if "ref" in params:
+                raise rpc.JsonRpcError(
+                    rpc.INVALID_PARAMS, "Provide either x/y or ref, not both"
+                )
+            x = _require_coord(params, "x")
+            y = _require_coord(params, "y")
+            return await self.browser.page_hover_coords(
+                params["browser_id"], params["tab_id"], x=x, y=y
+            )
+        if "ref" not in params:
+            raise rpc.JsonRpcError(
+                rpc.INVALID_PARAMS, "Provide either ref or x/y coordinates"
+            )
         timeout_s = float(params.get("timeout", 5.0))
         return await self.browser.page_hover(
             params["browser_id"],

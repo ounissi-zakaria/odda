@@ -74,7 +74,7 @@ To run without a harness, start the server manually: `odda server --socket /tmp/
 A real Chrome (via patchright/Playwright), headless by default:
 
 - **Open / navigate / eval / screenshot / wait-for** — drive the browser and run JS in the page.
-- **Ref-driven page interaction** — `page snapshot` returns the accessibility tree with `[ref=eN]` tags; pass the ref to `page click` / `fill` / `hover` / `upload`. Cross-iframe is transparent.
+- **Ref-driven page interaction** — `page snapshot` returns the accessibility tree with `[ref=eN]` tags; pass the ref to `page click` / `fill` / `hover` / `upload`. `click` and `hover` also accept viewport coordinates (`-x`/`-y`) as a raw trusted event for targets the a11y tree can't name. Cross-iframe is transparent.
 - **Per-browser userscripts** — JS that auto-runs at `document_start` on every navigation, before the page's own scripts.
 - **Dialog interceptor** — `alert` / `confirm` / `prompt` / `print` proceed by default and are recorded for inspection.
 

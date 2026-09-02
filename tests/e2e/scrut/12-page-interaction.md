@@ -17,7 +17,9 @@ to `click`, `fill`, `hover`, and `upload` to identify the target.
 Refs are valid as long as their element remains in the DOM; if the
 element is removed (SPA content swap, navigation), the action errors
 cleanly. Re-snapshot to discover refs for new elements; existing refs
-continue to work without re-snapshotting.
+continue to work without re-snapshotting. `click` and `hover` also
+accept viewport coordinates (`-x`/`-y`) as a raw trusted event for
+targets the a11y tree can't name.
 
 All commands are tab-scoped (`--browser-id` + `--tab-id`). Actions
 accept `--timeout` (default 5s) for ref resolution and the action
@@ -151,6 +153,149 @@ The iframe's click handler set its result div.
 $ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
 >   eval --js "document.getElementById('inner-frame').contentWindow.document.getElementById('iframe-result').textContent" --browser-id 1 --tab-id 1
 clicked in iframe
+```
+
+## `page click -x/-y` clicks at viewport coordinates
+
+Coordinate mode is the raw alternative to refs: `-x`/`-y` are
+viewport-relative CSS pixels, and odda dispatches a trusted mouse event
+at that point with no element resolution and no actionability checks.
+The `coord-click-target` div is `position:fixed` at `left:50px;
+top:300px`, so its center `(100, 330)` is a stable viewport point.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   page click --browser-id 1 --tab-id 1 -x 100 -y 330 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["x"], d["y"])'
+clicked 100.0 330.0
+```
+
+The event landed on the coord target and its handler recorded the
+dispatch coordinates verbatim.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "document.getElementById('coord-click-result').textContent" --browser-id 1 --tab-id 1
+coord clicked @ 100,330
+```
+
+## `page hover -x/-y` hovers at viewport coordinates
+
+The `coord-hover-target` div is `position:fixed` at `left:200px;
+top:300px`; its center `(250, 330)` is a stable viewport point. The
+raw `mouseenter` fired with the dispatch coordinates verbatim.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   page hover --browser-id 1 --tab-id 1 -x 250 -y 330 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"], d["x"], d["y"])'
+hovered 250.0 330.0
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "document.getElementById('coord-hover-result').textContent" --browser-id 1 --tab-id 1
+coord hovered @ 250,330
+```
+
+## Coordinate clicks reach into iframes
+
+A viewport-coord click lands on whatever renders at that point —
+iframe content included, with no special handling. The iframe's
+`iframe-coord-btn` is `position:fixed` at `left:20px; top:100px` inside
+the iframe, so the button's viewport position depends on where the
+iframe itself sits in the page. The real discovery workflow is to
+read the element's rect via `eval` and click that point — the test
+does exactly that.
+
+```scrut
+$ XY=$(odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "(()=>{const r=document.getElementById('inner-frame').getBoundingClientRect();const b=document.getElementById('inner-frame').contentWindow.document.getElementById('iframe-coord-btn').getBoundingClientRect();return JSON.stringify([r.left+b.left+b.width/2, r.top+b.top+b.height/2])})()" \
+>   --browser-id 1 --tab-id 1) \
+>   && echo "$XY" | python3 -c 'import json,sys; x,y=json.load(sys.stdin); print("XY ok" if isinstance(x,(int,float)) and isinstance(y,(int,float)) else "XY bad")'
+XY ok
+```
+
+```scrut
+$ X=$(echo "$XY" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)[0]))'); echo "x=$X"
+x=* (glob)
+```
+
+```scrut
+$ Y=$(echo "$XY" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)[1]))'); echo "y=$Y"
+y=* (glob)
+```
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   page click --browser-id 1 --tab-id 1 -x "$X" -y "$Y" \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"])'
+clicked
+```
+
+The iframe's own handler recorded the iframe-relative coordinates of
+the dispatch.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "document.getElementById('inner-frame').contentWindow.document.getElementById('iframe-result').textContent" --browser-id 1 --tab-id 1
+coord in iframe @ 5*,11* (glob)
+```
+
+## `page click -x/-y` on empty space succeeds as a no-op
+
+No element resolution means no failure when nothing is there: the
+dispatch lands wherever it lands and the command reports success.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" --json \
+>   page click --browser-id 1 --tab-id 1 -x 700 -y 10 \
+>   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["status"])'
+clicked
+```
+
+The click landed on the page body — no handler fired. Both coord
+result divs still show the texts the earlier sections' actions left,
+proving this dispatch triggered nothing.
+
+```scrut
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   eval --js "JSON.stringify([document.getElementById('coord-click-result').textContent, document.getElementById('coord-hover-result').textContent])" --browser-id 1 --tab-id 1
+["coord clicked @ 100,330","coord hovered @ 250,330"]
+```
+
+## `page click` rejects `--ref` together with `-x`/`-y`
+
+`--ref` and the coordinate pair are mutually exclusive; providing
+both is an error before any browser interaction.
+
+```scrut {output_stream: stderr}
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   page click --browser-id 1 --tab-id 1 --ref e1 -x 10 -y 10
+[1]
+Error: Provide either --ref or -x/-y, not both
+```
+
+## `page click -x` without `-y` is rejected
+
+Coordinates come as a pair.
+
+```scrut {output_stream: stderr}
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   page click --browser-id 1 --tab-id 1 -x 10
+[1]
+Error: Provide both -x and -y
+```
+
+## `page hover` with no targeting arguments is rejected
+
+Neither `--ref` nor `-x`/`-y` given.
+
+```scrut {output_stream: stderr}
+$ odda --socket "$PWD/odda.sock" --data-dir "$PWD/data" \
+>   page hover --browser-id 1 --tab-id 1
+[1]
+Error: Provide --ref <ref> or -x <n> -y <n>
 ```
 
 ## `page fill` fills the element identified by `--ref`

@@ -21,6 +21,11 @@
 
   <iframe id="inner-frame" src="page-interaction-inner.html" style="width:400px;height:200px;border:1px solid black"></iframe>
 
+  <div id="coord-click-target" style="position:fixed;left:50px;top:300px;width:100px;height:60px;background:#eee">Coord target</div>
+  <div id="coord-click-result">not coord clicked</div>
+  <div id="coord-hover-target" style="position:fixed;left:200px;top:300px;width:100px;height:60px;background:#eee">Coord hover</div>
+  <div id="coord-hover-result">not coord hovered</div>
+
   <script>
     document.getElementById('click-btn').addEventListener('click', () => {
       document.getElementById('click-result').textContent = 'clicked';
@@ -45,6 +50,14 @@
       const names = Array.from(e.target.files).map(f => f.name);
       document.getElementById('upload-result').textContent =
         n === 0 ? 'no files' : names.join(', ');
+    });
+
+    document.getElementById('coord-click-target').addEventListener('click', (e) => {
+      document.getElementById('coord-click-result').textContent = 'coord clicked @ ' + e.clientX + ',' + e.clientY;
+    });
+
+    document.getElementById('coord-hover-target').addEventListener('mouseenter', (e) => {
+      document.getElementById('coord-hover-result').textContent = 'coord hovered @ ' + e.clientX + ',' + e.clientY;
     });
   </script>
 </body>

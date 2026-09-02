@@ -267,9 +267,9 @@ RENDERERS: dict[str, Renderer] = {
     "wait-for": r_eval,  # same pass-through as eval
     "screenshot": PassthroughSpec(),
     "page/snapshot": PassthroughSpec(),
-    "page/click": KvSpec(["status", "ref"]),
+    "page/click": KvSpec(["status", "ref", "x", "y"]),
     "page/fill": KvSpec(["status", "ref"]),
-    "page/hover": KvSpec(["status", "ref"]),
+    "page/hover": KvSpec(["status", "ref", "x", "y"]),
     "page/upload": r_page_upload,
     "tabs/list": r_tabs_list,
     "tabs/open": KvSpec(["browser_id", "tab_id", "status"]),

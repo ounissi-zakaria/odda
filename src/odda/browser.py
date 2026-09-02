@@ -648,6 +648,57 @@ class BrowserInstance:
         )
         return {"status": "clicked", "ref": ref}
 
+    async def page_click_coords(
+        self, tab_id: int, *, x: float, y: float
+    ) -> dict[str, Any]:
+        """Click at viewport coordinates (raw trusted event dispatch).
+
+        Uses Playwright's ``page.mouse.click(x, y)``: a CDP
+        ``Input.dispatchMouseEvent`` move+down+up at viewport-relative
+        CSS-pixel coordinates. No element resolution, no actionability
+        checks, no retries — the event lands on whatever renders at that
+        point (iframes included), and clicking empty space is a success
+        no-op. This is the escape hatch for cases the ref path cannot
+        express: elements behind overlays, canvas, custom hit-testing,
+        deliberate off-center clicks, and coordinates taken from a
+        screenshot. There is nothing to time out on, so no timeout
+        applies.
+        """
+        page = self._require_tab(tab_id)
+        try:
+            await page.mouse.click(x, y)
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during click."
+                ) from exc
+            raise BrowserOperationError(f"Click error: {exc!s}") from exc
+        return {"status": "clicked", "x": x, "y": y}
+
+    async def page_hover_coords(
+        self, tab_id: int, *, x: float, y: float
+    ) -> dict[str, Any]:
+        """Hover at viewport coordinates (raw trusted event dispatch).
+
+        Uses Playwright's ``page.mouse.move(x, y)``: the same raw CDP
+        event dispatch as a coordinate click, without the button press.
+        Whatever renders at that point (iframes included) receives the
+        mouseover/mousemove/mouseenter cascade. No element resolution,
+        no actionability checks, no scrolling, no timeout.
+        """
+        page = self._require_tab(tab_id)
+        try:
+            await page.mouse.move(x, y)
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during hover."
+                ) from exc
+            raise BrowserOperationError(f"Hover error: {exc!s}") from exc
+        return {"status": "hovered", "x": x, "y": y}
+
     async def page_fill(
         self, tab_id: int, ref: str, value: str, *, timeout_ms: float
     ) -> dict[str, Any]:
@@ -1258,6 +1309,20 @@ class BrowserManager:
         """Click the element identified by ``ref`` in the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.page_click(tab_id, ref, timeout_ms=timeout_ms)
+
+    async def page_click_coords(
+        self, browser_id: int, tab_id: int, *, x: float, y: float
+    ) -> dict[str, Any]:
+        """Click at viewport coordinates in the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_click_coords(tab_id, x=x, y=y)
+
+    async def page_hover_coords(
+        self, browser_id: int, tab_id: int, *, x: float, y: float
+    ) -> dict[str, Any]:
+        """Hover at viewport coordinates in the target tab."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_hover_coords(tab_id, x=x, y=y)
 
     async def page_fill(
         self,

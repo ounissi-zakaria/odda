@@ -578,29 +578,43 @@ def page_click(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
-    ref: str = typer.Option(..., "--ref", help="Element ref from a snapshot (e.g. e2)"),
+    ref: str | None = typer.Option(
+        None, "--ref", help="Element ref from a snapshot (e.g. e2)"
+    ),
+    x: float | None = typer.Option(None, "-x", help="X viewport coordinate"),
+    y: float | None = typer.Option(None, "-y", help="Y viewport coordinate"),
     timeout: float = typer.Option(
-        5.0, "--timeout", help="Timeout in seconds (default 5)"
+        5.0, "--timeout", help="Timeout in seconds (default 5), --ref mode only"
     ),
 ) -> None:
-    """Click the element identified by ``ref`` (plain left-click).
+    """Click the element identified by ``ref``, or at viewport coordinates.
 
-    If the ref no longer resolves (element removed, navigated away),
-    errors cleanly with a stale-ref message instead of hanging.
+    Pass ``--ref eN`` to click the element resolved from a snapshot; if
+    the ref no longer resolves (element removed, navigated away), errors
+    cleanly with a stale-ref message instead of hanging.
+
+    Pass ``-x <n> -y <n>`` instead to click at viewport-relative CSS-pixel
+    coordinates — a raw trusted event dispatch with no element resolution,
+    no actionability checks, and no timeout. The event lands on whatever
+    renders at that point (iframes included); clicking empty space is a
+    success no-op. ``--ref`` and ``-x``/``-y`` are mutually exclusive.
     """
-    _run_coro(
-        _client(ctx).call(
-            "page/click",
-            {
-                "browser_id": browser_id,
-                "tab_id": tab_id,
-                "ref": ref,
-                "timeout": timeout,
-            },
-        ),
-        ctx,
-        "page/click",
-    )
+    json_mode = ctx.obj["json"]
+    payload: dict[str, Any] = {"browser_id": browser_id, "tab_id": tab_id}
+    if x is not None or y is not None:
+        if ref is not None:
+            _emit_error("Provide either --ref or -x/-y, not both", json_mode=json_mode)
+            raise typer.Exit(code=1)
+        if x is None or y is None:
+            _emit_error("Provide both -x and -y", json_mode=json_mode)
+            raise typer.Exit(code=1)
+        payload |= {"x": x, "y": y}
+    else:
+        if ref is None:
+            _emit_error("Provide --ref <ref> or -x <n> -y <n>", json_mode=json_mode)
+            raise typer.Exit(code=1)
+        payload |= {"ref": ref, "timeout": timeout}
+    _run_coro(_client(ctx).call("page/click", payload), ctx, "page/click")
 
 
 @page_app.command("fill")
@@ -663,28 +677,40 @@ def page_hover(
     ctx: typer.Context,
     browser_id: int = typer.Option(..., "--browser-id", help="Target browser ID"),
     tab_id: int = typer.Option(..., "--tab-id", help="Target tab ID"),
-    ref: str = typer.Option(..., "--ref", help="Element ref from a snapshot"),
+    ref: str | None = typer.Option(None, "--ref", help="Element ref from a snapshot"),
+    x: float | None = typer.Option(None, "-x", help="X viewport coordinate"),
+    y: float | None = typer.Option(None, "-y", help="Y viewport coordinate"),
     timeout: float = typer.Option(
-        5.0, "--timeout", help="Timeout in seconds (default 5)"
+        5.0, "--timeout", help="Timeout in seconds (default 5), --ref mode only"
     ),
 ) -> None:
-    """Hover the element identified by ``ref``.
+    """Hover the element identified by ``ref``, or at viewport coordinates.
 
-    Auto-scrolls the element into view before hovering.
+    Pass ``--ref eN`` to hover the element resolved from a snapshot;
+    auto-scrolls the element into view first.
+
+    Pass ``-x <n> -y <n>`` instead to hover at viewport-relative CSS-pixel
+    coordinates — a raw trusted event dispatch with no element resolution,
+    no actionability checks, no scrolling, and no timeout. Whatever renders
+    at that point (iframes included) receives the mouseover/mousemove/
+    mouseenter cascade. ``--ref`` and ``-x``/``-y`` are mutually exclusive.
     """
-    _run_coro(
-        _client(ctx).call(
-            "page/hover",
-            {
-                "browser_id": browser_id,
-                "tab_id": tab_id,
-                "ref": ref,
-                "timeout": timeout,
-            },
-        ),
-        ctx,
-        "page/hover",
-    )
+    json_mode = ctx.obj["json"]
+    payload: dict[str, Any] = {"browser_id": browser_id, "tab_id": tab_id}
+    if x is not None or y is not None:
+        if ref is not None:
+            _emit_error("Provide either --ref or -x/-y, not both", json_mode=json_mode)
+            raise typer.Exit(code=1)
+        if x is None or y is None:
+            _emit_error("Provide both -x and -y", json_mode=json_mode)
+            raise typer.Exit(code=1)
+        payload |= {"x": x, "y": y}
+    else:
+        if ref is None:
+            _emit_error("Provide --ref <ref> or -x <n> -y <n>", json_mode=json_mode)
+            raise typer.Exit(code=1)
+        payload |= {"ref": ref, "timeout": timeout}
+    _run_coro(_client(ctx).call("page/hover", payload), ctx, "page/hover")
 
 
 @page_app.command("upload")

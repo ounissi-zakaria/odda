@@ -50,6 +50,10 @@ _Avoid_: aria snapshot, accessibility tree, page snapshot, DOM dump
 A short-lived name (`eN`, or `f<frameSeq>eN` inside an iframe) for one element in a snapshot. The agent passes `eN` as a positional argument to `click`, `fill`, `hover`, and `upload` to identify the target; odda resolves it to the element via Playwright's `aria-ref` selector engine. A ref is valid as long as its element remains in the DOM; if the element is removed (SPA content swap, navigation), the action errors cleanly. Re-snapshot to discover refs for new elements; existing refs continue to work without re-snapshotting.
 _Avoid_: element reference, aria-ref, handle, snapshot ref, locator
 
+**Coordinate targeting**:
+The alternative to Ref for `click` and `hover`: the agent passes viewport coordinates (`-x`/`-y`, CSS pixels from the viewport's top-left) instead of a ref, and odda dispatches a raw trusted mouse event at that point — no element resolution, no actionability checks, no timeout. The event lands on whatever renders there (iframes included); clicking empty space succeeds as a no-op. Coordinates come from a screenshot or a `getBoundingClientRect` read. Use it when the a11y tree can't name the target: canvas, custom hit-testing, elements behind overlays, deliberate off-center clicks.
+_Avoid_: pixel targeting, mouse targeting, coord click, position click
+
 ## Dynamic analysis
 
 **Dynamic analysis**:

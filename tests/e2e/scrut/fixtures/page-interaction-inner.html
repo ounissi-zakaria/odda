@@ -4,9 +4,14 @@
 <body>
   <button id="iframe-btn">Iframe button</button>
   <div id="iframe-result">not clicked</div>
+
+  <button id="iframe-coord-btn" style="position:fixed;left:20px;top:100px;width:80px;height:40px">Iframe coord btn</button>
   <script>
     document.getElementById('iframe-btn').addEventListener('click', () => {
       document.getElementById('iframe-result').textContent = 'clicked in iframe';
+    });
+    document.getElementById('iframe-coord-btn').addEventListener('click', (e) => {
+      document.getElementById('iframe-result').textContent = 'coord in iframe @ ' + e.clientX + ',' + e.clientY;
     });
     window.__oddaPageIframeLoaded = true;
   </script>
