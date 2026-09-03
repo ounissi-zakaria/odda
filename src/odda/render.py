@@ -249,12 +249,10 @@ def render(result: Any, spec: Renderer) -> str:
 
 # Registry: command name -> renderer (callable or spec). Command names
 # match the JSON-RPC method names the CLI dispatches to (or the command's
-# own name for non-RPC commands like version/install). ``logs``
+# own name for non-RPC commands like version). ``logs``
 # is handled inline in cli.py (streaming) and deliberately has no entry.
 RENDERERS: dict[str, Renderer] = {
     "version": r_version,
-    "install": KvSpec(["harness", "plugin", "skill"]),
-    "init-chrome-profile": KvSpec(["chrome", "profile_dir", "status"]),
     "status": KvSpec(
         ["socket", "data_dir", "parent_pid", "proxy_url", "browser_count", "log_path"]
     ),

@@ -19,9 +19,9 @@ contract is the one pinned in ticket #03 (``.scratch/odda-mcp/issues/
 from __future__ import annotations
 
 import functools
-import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context  # noqa: TC002
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.resources import TextResource
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript, rpc
 from odda.browser import BrowserManager, BrowserOperationError
@@ -102,12 +103,11 @@ class OddaState:
 def resolve_data_dir() -> Path:
     """Resolve the data dir for this MCP process.
 
-    ``ODDA_DATA_DIR`` env var (harness-injected today, dropped with the
-    harness in ticket #07) wins; otherwise ``.odda/`` under the current
-    working directory. The directory is remembered, not created — it
-    appears lazily on first state write (ADR 0017).
+    ``.odda/`` under the current working directory (ADR 0017: the
+    directory is remembered, not created — it appears lazily on first
+    state write).
     """
-    return Path(os.environ.get("ODDA_DATA_DIR", Path(".odda").resolve())).resolve()
+    return Path(".odda").resolve()
 
 
 @asynccontextmanager
@@ -137,19 +137,66 @@ async def odda_lifespan(
 mcp_server = MCPServer[OddaState](
     "odda",
     version=__version__,
-    # description → serverInfo block in the initialize result: the short
-    # "what is this server" label. instructions → initialize.instructions:
-    # the detailed brief the agent reads at connect time.
+    # description → serverInfo block in the initialize result: the
+    # short "what is this server" label. instructions →
+    # initialize.instructions: the detailed orientation brief.
     description="Browser automation and HTTP traffic capture for agents.",
     lifespan=odda_lifespan,
-    # Full instructions are ticket #07's (docs-as-resources); the
-    # orientation pointer stays brief per the map's docs-surface
-    # decision (instructions = 2 lines, six concept docs as resources).
     instructions=(
-        "odda: browser automation + HTTP capture for agents. "
-        "Start with browser_open; read odda:// resources for concepts."
+        "odda drives Chrome and captures HTTP traffic through a MITM "
+        "proxy: open a browser, navigate, interact with pages by "
+        "snapshot+ref, and read captured flows from .odda/flows/. "
+        "Tools take explicit browser_id/tab_id ids from browser_open "
+        "and tabs_open. Read the odda:// resources (request-crafting, "
+        "flows, dynamic-analysis, userscripts, proxy-scripts, recipes) "
+        "for the concept references before first use."
     ),
 )
+
+
+# --- resources: concept docs (odda://<slug>) ---
+
+
+def _register_doc_resources() -> None:
+    """Register the six static ``odda://`` markdown resources.
+
+    The concept references agents read for orientation: request
+    crafting, flow capture, dynamic analysis, userscripts,
+    proxy-scripts, and worked recipes. Content lives in the
+    ``odda.docs`` package (``src/odda/docs/``); read at registration
+    time — these are server-instructions-scale documents, not lazily
+    generated state.
+    """
+    docs = {
+        "request-crafting": "Craft and send raw HTTP requests byte-for-byte.",
+        "flows": "Flow file layout and the flows.jsonl schema.",
+        "dynamic-analysis": "Wrap, logpoint, and coverage observation of JS execution.",
+        "userscripts": (
+            "Userscripts that auto-run at document_start; built-in dialog interceptor."
+        ),
+        "proxy-scripts": (
+            "mitmproxy addons at the proxy layer; format, scope, failure model."
+        ),
+        "recipes": "Worked examples composing the tools into full investigations.",
+    }
+    for slug, description in docs.items():
+        text = (
+            importlib_resources.files("odda.docs")
+            .joinpath(f"{slug}.md")
+            .read_text(encoding="utf-8")
+        )
+        mcp_server.add_resource(
+            TextResource(
+                uri=f"odda://{slug}",
+                name=slug,
+                description=description,
+                mime_type="text/markdown",
+                text=text,
+            )
+        )
+
+
+_register_doc_resources()
 
 
 # --- browser lifecycle ---
@@ -165,7 +212,12 @@ async def browser_open(
     """Open a new Chrome browser window with one blank tab.
 
     Returns browser_id and the initial tab_id used to target every
-    other tool. Headless by default.
+    other tool; the initial tab is ready immediately. Headless by
+    default (headless=False shows the window for debugging or
+    interactive use). All browser traffic routes through odda's HTTP
+    proxy and is captured as flows under .odda/flows/ — driving the
+    browser IS traffic capture; read flows via the odda://flows
+    resource.
     """
     return await ctx.request_context.lifespan_context.browser.open(headless=headless)
 
@@ -216,7 +268,12 @@ async def tabs_open(
 async def tabs_close(
     browser_id: int, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Close a tab in a browser."""
+    """Close a tab in a browser.
+
+    Closing the last tab leaves the browser open with zero tabs
+    (matching Chrome's behavior); the browser can still accept
+    tabs_open later. Close the whole browser with browser_close.
+    """
     return await ctx.request_context.lifespan_context.browser.close_tab(
         browser_id, tab_id
     )
@@ -238,8 +295,12 @@ async def navigate(
 ) -> dict[str, Any]:
     """Navigate an existing tab to a URL.
 
-    wait_until: one of commit, domcontentloaded, load, networkidle.
-    timeout: page.goto timeout in seconds (default 30).
+    To open a tab, use tabs_open. wait_until: one of commit,
+    domcontentloaded, load, networkidle (default load; pick
+    domcontentloaded for SPAs whose load event never fires). timeout:
+    page.goto timeout in seconds (default 30). Navigation failures
+    (network error, invalid URL, lifecycle-event timeout) error; the
+    timeout error names the wait_until event that failed.
     """
     if wait_until not in NAVIGATE_WAIT_UNTIL_EVENTS:
         raise rpc.JsonRpcError(
@@ -265,7 +326,19 @@ async def eval(
     *,
     ctx: Context[OddaState],
 ) -> Any:
-    """Execute JavaScript in the target tab; return the raw value."""
+    """Execute JavaScript in the target tab; return the raw value.
+
+    Pass an expression, not a return statement (return is illegal at
+    the top level — use an IIFE (()=>{ ... })() if you need
+    statements). Returned Promises are awaited automatically:
+    fetch(url).then(r => r.status) returns 200. Return a serializable
+    value from async expressions — bare fetch(url) returns {} because
+    the resolved Response is not JSON-serializable; chain
+    .then(r => r.text()) or similar. eval has no timeout — it runs
+    until the JS expression resolves, so a hung expression blocks the
+    call indefinitely; wrap long enumeration loops in a bounded
+    Promise.race if you need a deadline.
+    """
     return await ctx.request_context.lifespan_context.browser.eval_js(
         browser_id, tab_id, js
     )
@@ -281,7 +354,15 @@ async def wait_for(
     *,
     ctx: Context[OddaState],
 ) -> Any:
-    """Poll a JS expression until it's truthy or timeout in the target tab."""
+    """Poll a JS expression until it's truthy or timeout in the target tab.
+
+    Polling happens in-browser with no round-trips, in the main world
+    (sees page globals and userscript-injected helpers). A thrown
+    error inside the expression is treated as falsy and polling
+    continues — document.querySelector('#root').children.length
+    keeps polling while #root is still absent instead of crashing on
+    the null deref. timeout: seconds (default 30).
+    """
     return await ctx.request_context.lifespan_context.browser.wait_for(
         browser_id, tab_id, expression, timeout_ms=timeout * 1000
     )
@@ -316,8 +397,15 @@ async def page_snapshot(
 ) -> str:
     """Take an agent-readable snapshot of the page's accessibility tree.
 
-    Element refs (e.g. e2, f1e2) in the snapshot target page_click,
-    page_fill, page_hover, and page_upload.
+    The workflow: snapshot to discover element refs (eN, or f<frameSeq>eN
+    inside an iframe), then pass a ref to page_click/page_fill/
+    page_hover/page_upload; odda resolves it back to the element when
+    the action runs. Refs stay valid while the element remains in the
+    DOM — re-snapshot after a navigation or SPA swap; existing refs
+    keep working without re-snapshotting. This is the ref-driven
+    alternative to hand-written CSS selectors via eval, more robust on
+    minified SPAs. Prefer this over screenshot for finding elements
+    (text, cheap, carries refs); use screenshot for visual layout only.
     """
     return await ctx.request_context.lifespan_context.browser.page_snapshot(
         browser_id, tab_id
@@ -371,7 +459,14 @@ async def page_fill(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Fill the element identified by ref with value."""
+    """Fill the element identified by ref with value.
+
+    Clears the field first, then types. Works on text inputs,
+    textareas, contenteditable elements, checkboxes ("true"/"false"),
+    radios, and selects. The fill triggers input events (not change) —
+    frameworks listening for change must be triggered otherwise.
+    timeout: ref resolution + fill, seconds (default 5).
+    """
     return await ctx.request_context.lifespan_context.browser.page_fill(
         browser_id, tab_id, ref, value, timeout_ms=timeout * 1000
     )
@@ -423,7 +518,16 @@ async def page_upload(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Upload local files to the file input identified by ref."""
+    """Upload local files to the file input identified by ref.
+
+    Pass multiple paths in files for <input type="file" multiple>.
+    This sets the files on the input but does NOT submit the form —
+    click the form's submit button by ref separately to POST it. A
+    nameless file input does not appear in the snapshot: eval an
+    aria-label onto it, re-snapshot, then upload by the new ref (see
+    odda://recipes). timeout: ref resolution + upload, seconds
+    (default 5).
+    """
     return await ctx.request_context.lifespan_context.browser.page_upload(
         browser_id, tab_id, ref, files, timeout_ms=timeout * 1000
     )

@@ -1,10 +1,10 @@
 # Proxy and flow capture
 
-`odda proxy-url` — Return the HTTP proxy URL as plain text. Route HTTP clients through this URL to capture traffic.
+The `proxy_url` tool returns the HTTP proxy URL. Route HTTP clients through this URL to capture traffic.
 
-Captured flows are stored as read-only files under `.odda/flows/`. This is the reference for the flow file layout and `flows.jsonl` schema; see [SKILL.md](SKILL.md) for the quick-reference table and Targeting model.
+Captured flows are stored as read-only files under `.odda/flows/`. This is the reference for the flow file layout and `flows.jsonl` schema.
 
-**Tip:** headless Chrome emits background telemetry (safebrowsing, update checks, account pings) on `browser open`, producing 100+ flows before you navigate anywhere. Grep `flows.jsonl` for your target host to filter: `grep <host> .odda/flows/flows.jsonl`.
+**Tip:** headless Chrome emits background telemetry (safebrowsing, update checks, account pings) on `browser_open`, producing 100+ flows before you navigate anywhere. Grep `flows.jsonl` for your target host to filter: `grep <host> .odda/flows/flows.jsonl`.
 
 ## Flow file layout
 
@@ -39,9 +39,9 @@ One JSON object per line, in completion order:
 ```
 
 - `id` — zero-padded flow id matching the directory name; lets you re-sort by capture order with `sort`.
-- `scheme` / `port` — request scheme (`http`/`https`) and port. Populated for new captures and `odda request send` flows; absent on records written by older odda versions (treat as `https`/`443`).
+- `scheme` / `port` — request scheme (`http`/`https`) and port. Populated for new captures and `request_send` flows; absent on records written by older odda versions (treat as `https`/`443`).
 - `status_code` — `null` for errored flows (the `error` field holds the message instead).
-- `body_file` — path relative to `.odda`; read it as `read ".odda/$body_file"`. `null` when the body was excluded (images/video/audio/fonts) or empty. **Note:** the exclusion only applies to browser-captured flows. `odda request send` always stores the response body regardless of `Content-Type` — a hand-built request exists to see its body (e.g. a path-traversal file mislabeled `image/jpeg`), so `body_file` is non-null for any non-empty `request send` response.
+- `body_file` — path relative to `.odda`; read it as `read ".odda/$body_file"`. `null` when the body was excluded (images/video/audio/fonts) or empty. **Note:** the exclusion only applies to browser-captured flows. `request_send` always stores the response body regardless of `Content-Type` — a hand-built request exists to see its body (e.g. a path-traversal file mislabeled `image/jpeg`), so `body_file` is non-null for any non-empty `request_send` response.
 - `error` — `null` for completed flows; the error message for failed flows.
 
 ## Response bodies (decoding note)

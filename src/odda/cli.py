@@ -13,7 +13,6 @@ from typing import Any
 import typer
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, client, render
-from odda.harness.install import Harness, install_harness
 
 app = typer.Typer(
     name="odda",
@@ -248,23 +247,6 @@ def version(ctx: typer.Context) -> None:
     _run_value(
         {"version": __version__}, json_mode=ctx.obj["json"], render_key="version"
     )
-
-
-@app.command()
-def install(ctx: typer.Context, harness: Harness) -> None:
-    """Install the odda plugin and skill for a harness (opencode|pi|omp|claude)."""
-    json_mode = ctx.obj["json"]
-    try:
-        plugin_path, skill_path = install_harness(harness)
-        result = {
-            "harness": harness.value,
-            "plugin": str(plugin_path),
-            "skill": str(skill_path),
-        }
-    except Exception as exc:
-        _emit_error(str(exc), json_mode=json_mode)
-        raise typer.Exit(code=1) from exc
-    _run_value(result, json_mode=json_mode, render_key="install")
 
 
 @app.command("init-chrome-profile")
