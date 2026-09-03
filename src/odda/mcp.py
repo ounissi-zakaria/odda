@@ -39,19 +39,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
-def _state(ctx: Context[OddaState, None] | None) -> OddaState:
-    """Return the :class:`OddaState` the MCP lifespan yielded.
-
-    Raises:
-        RuntimeError: if no Context was injected (tool called outside a
-            request, e.g. direct invocation in tests).
-    """
-    if ctx is None:
-        msg = "no Context injected (tool called outside a request?)"
-        raise RuntimeError(msg)
-    return ctx.request_context.lifespan_context
-
-
 def odda_tool(fn):
     """Convert odda's anticipated errors to SDK ``ToolError``.
 
@@ -144,32 +131,31 @@ mcp_server = MCPServer[OddaState](
 async def browser_open(
     *,
     headless: bool = True,
-    ctx: Context[OddaState, None] | None = None,
+    ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Open a new Chrome browser window with one blank tab.
 
     Returns browser_id and the initial tab_id used to target every
     other tool. Headless by default.
     """
-    return await _state(ctx).browser.open(headless=headless)
+    return await ctx.request_context.lifespan_context.browser.open(headless=headless)
 
 
 @mcp_server.tool()
 @odda_tool
-async def browser_close(
-    browser_id: int, ctx: Context[OddaState, None] | None = None
-) -> dict[str, Any]:
+async def browser_close(browser_id: int, *, ctx: Context[OddaState]) -> dict[str, Any]:
     """Close a browser instance by id."""
-    return await _state(ctx).browser.close_instance(browser_id)
+    return await ctx.request_context.lifespan_context.browser.close_instance(browser_id)
 
 
 @mcp_server.tool()
 @odda_tool
 async def browser_list(
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> list[dict[str, Any]]:
     """List every tracked browser with its tab count."""
-    return _state(ctx).browser.list_instances()
+    return ctx.request_context.lifespan_context.browser.list_instances()
 
 
 # --- tab lifecycle ---
@@ -178,10 +164,10 @@ async def browser_list(
 @mcp_server.tool()
 @odda_tool
 async def tabs_list(
-    browser_id: int | None = None, ctx: Context[OddaState, None] | None = None
+    browser_id: int | None = None, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """List open tabs, optionally filtered to one browser."""
-    return await _state(ctx).browser.list_tabs(browser_id)
+    return await ctx.request_context.lifespan_context.browser.list_tabs(browser_id)
 
 
 @mcp_server.tool()
@@ -189,19 +175,22 @@ async def tabs_list(
 async def tabs_open(
     browser_id: int,
     url: str | None = None,
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Open a new tab in a browser, optionally navigating to a URL."""
-    return await _state(ctx).browser.open_tab(browser_id, url)
+    return await ctx.request_context.lifespan_context.browser.open_tab(browser_id, url)
 
 
 @mcp_server.tool()
 @odda_tool
 async def tabs_close(
-    browser_id: int, tab_id: int, ctx: Context[OddaState, None] | None = None
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Close a tab in a browser."""
-    return await _state(ctx).browser.close_tab(browser_id, tab_id)
+    return await ctx.request_context.lifespan_context.browser.close_tab(
+        browser_id, tab_id
+    )
 
 
 # --- page control ---
@@ -215,7 +204,8 @@ async def navigate(
     url: str,
     timeout: float = 30.0,
     wait_until: str = "load",
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Navigate an existing tab to a URL.
 
@@ -228,7 +218,7 @@ async def navigate(
             f"wait_until must be one of {', '.join(NAVIGATE_WAIT_UNTIL_EVENTS)}, "
             f"got {wait_until!r}",
         )
-    return await _state(ctx).browser.navigate(
+    return await ctx.request_context.lifespan_context.browser.navigate(
         browser_id,
         tab_id,
         url,
@@ -243,10 +233,13 @@ async def eval(
     browser_id: int,
     tab_id: int,
     js: str,
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> Any:
     """Execute JavaScript in the target tab; return the raw value."""
-    return await _state(ctx).browser.eval_js(browser_id, tab_id, js)
+    return await ctx.request_context.lifespan_context.browser.eval_js(
+        browser_id, tab_id, js
+    )
 
 
 @mcp_server.tool()
@@ -256,10 +249,11 @@ async def wait_for(
     tab_id: int,
     expression: str,
     timeout: float = 30.0,
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> Any:
     """Poll a JS expression until it's truthy or timeout in the target tab."""
-    return await _state(ctx).browser.wait_for(
+    return await ctx.request_context.lifespan_context.browser.wait_for(
         browser_id, tab_id, expression, timeout_ms=timeout * 1000
     )
 
@@ -270,14 +264,17 @@ async def screenshot(
     browser_id: int,
     tab_id: int,
     output: str | None = None,
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> str:
     """Capture a JPEG of the target tab's viewport.
 
     output: optional path to write the JPEG to; a temp file is
     generated when omitted. Returns the written path.
     """
-    return await _state(ctx).browser.screenshot(browser_id, tab_id, output)
+    return await ctx.request_context.lifespan_context.browser.screenshot(
+        browser_id, tab_id, output
+    )
 
 
 # --- page interaction (snapshot + ref-driven actions) ---
@@ -286,14 +283,16 @@ async def screenshot(
 @mcp_server.tool()
 @odda_tool
 async def page_snapshot(
-    browser_id: int, tab_id: int, ctx: Context[OddaState, None] | None = None
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
 ) -> str:
     """Take an agent-readable snapshot of the page's accessibility tree.
 
     Element refs (e.g. e2, f1e2) in the snapshot target page_click,
     page_fill, page_hover, and page_upload.
     """
-    return await _state(ctx).browser.page_snapshot(browser_id, tab_id)
+    return await ctx.request_context.lifespan_context.browser.page_snapshot(
+        browser_id, tab_id
+    )
 
 
 @mcp_server.tool()
@@ -305,7 +304,8 @@ async def page_click(  # noqa: PLR0913 — targeting + ref/coords union is the t
     x: float | None = None,
     y: float | None = None,
     timeout: float = 5.0,
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Click the element identified by ref, or at viewport coordinates.
 
@@ -313,7 +313,7 @@ async def page_click(  # noqa: PLR0913 — targeting + ref/coords union is the t
     x and y (raw trusted click); the two are mutually exclusive.
     timeout: ref mode only, seconds (default 5).
     """
-    browser = _state(ctx).browser
+    browser = ctx.request_context.lifespan_context.browser
     if x is not None or y is not None:
         if ref is not None:
             raise rpc.JsonRpcError(
@@ -339,10 +339,11 @@ async def page_fill(
     ref: str,
     value: str,
     timeout: float = 5.0,
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Fill the element identified by ref with value."""
-    return await _state(ctx).browser.page_fill(
+    return await ctx.request_context.lifespan_context.browser.page_fill(
         browser_id, tab_id, ref, value, timeout_ms=timeout * 1000
     )
 
@@ -356,14 +357,15 @@ async def page_hover(  # noqa: PLR0913 — targeting + ref/coords union is the t
     x: float | None = None,
     y: float | None = None,
     timeout: float = 5.0,
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Hover the element identified by ref, or at viewport coordinates.
 
     Provide either ref or both x and y; mutually exclusive.
     timeout: ref mode only, seconds (default 5).
     """
-    browser = _state(ctx).browser
+    browser = ctx.request_context.lifespan_context.browser
     if x is not None or y is not None:
         if ref is not None:
             raise rpc.JsonRpcError(
@@ -389,10 +391,11 @@ async def page_upload(
     ref: str,
     files: list[str],
     timeout: float = 5.0,
-    ctx: Context[OddaState, None] | None = None,
+    *,
+    ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Upload local files to the file input identified by ref."""
-    return await _state(ctx).browser.page_upload(
+    return await ctx.request_context.lifespan_context.browser.page_upload(
         browser_id, tab_id, ref, files, timeout_ms=timeout * 1000
     )
 
@@ -403,17 +406,19 @@ async def page_upload(
 @mcp_server.tool()
 @odda_tool
 async def event_listeners(
-    browser_id: int, tab_id: int, ctx: Context[OddaState, None] | None = None
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """List JavaScript event listeners on window and document in the target tab."""
-    return await _state(ctx).browser.list_event_listeners(browser_id, tab_id)
+    return await ctx.request_context.lifespan_context.browser.list_event_listeners(
+        browser_id, tab_id
+    )
 
 
 @mcp_server.tool()
 @odda_tool
-async def status(ctx: Context[OddaState, None] | None = None) -> dict[str, Any]:
+async def status(*, ctx: Context[OddaState]) -> dict[str, Any]:
     """Show odda status: data dir, proxy URL, browser count."""
-    state = _state(ctx)
+    state = ctx.request_context.lifespan_context
     return {
         "data_dir": str(resolve_data_dir()),
         "proxy_url": state.proxy.proxy_url,
@@ -430,9 +435,9 @@ async def version() -> dict[str, Any]:
 
 @mcp_server.tool()
 @odda_tool
-async def proxy_url(ctx: Context[OddaState, None] | None = None) -> str:
+async def proxy_url(*, ctx: Context[OddaState]) -> str:
     """Return the HTTP proxy URL."""
-    return _state(ctx).proxy.proxy_url
+    return ctx.request_context.lifespan_context.proxy.proxy_url
 
 
 def main() -> None:
