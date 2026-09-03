@@ -26,7 +26,10 @@ from typing import TYPE_CHECKING, Any
 
 # Context must be imported at runtime: the SDK resolves tool
 # annotations via get_type_hints at add_tool time, so a
-# TYPE_CHECKING-only import breaks Context-kwarg detection.
+# TYPE_CHECKING-only import breaks Context-kwarg detection. TC002
+# survives ``flake8-type-checking.runtime-evaluated-decorators`` here
+# because ruff ignores that setting under PEP 563
+# (``from __future__ import annotations``); verified against ruff 0.15.17.
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context  # noqa: TC002
 from mcp.server.mcpserver.exceptions import ToolError
