@@ -9,6 +9,7 @@ dependencies = [
     "mitmproxy>=11.0.2",
     "patchright==1.62.1",
     "h2>=4.0.0",
+    "mcp==2.1.1",
 ]
 
 [project.scripts]
