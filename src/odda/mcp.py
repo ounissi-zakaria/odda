@@ -1,4 +1,4 @@
-"""MCP server: stdio surface exposing odda's browser-domain tools.
+"""MCP server: stdio surface exposing odda's tools.
 
 ``odda mcp`` boots this module's :data:`mcp_server` as the *only* odda
 process — the MCP lifespan replaces ``OddaServer`` as the owner of the
@@ -10,8 +10,9 @@ contract is the one pinned in ticket #03 (``.scratch/odda-mcp/issues/
 - explicit required ``browser_id`` / ``tab_id`` params (no positional);
 - pure natural return types — ``dict`` passes through, ``list``/``str``
   get the SDK's ``{"result": ...}`` wrap, ``Any`` is text-only;
-- one ``@odda_tool`` decorator converts ``BrowserOperationError`` and
-  ``JsonRpcError`` to ``ToolError`` (message verbatim, code discarded);
+- one ``@odda_tool`` decorator converts ``BrowserOperationError``,
+  ``JsonRpcError``, and the request/userscript/proxy-script libraries'
+  ``ValueError``s to ``ToolError`` (message verbatim, code discarded);
   anything else stays an SDK crash logged to stderr.
 """
 
@@ -37,6 +38,19 @@ from mcp.server.mcpserver.exceptions import ToolError
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, rpc
 from odda.browser import BrowserManager, BrowserOperationError
 from odda.proxy import ProxyServer
+from odda.request import (
+    clone as clone_request,
+    new as new_request,
+    send as send_request,
+    send_pipeline as send_request_pipeline,
+    send_repeat as send_request_repeat,
+)
+
+# Two or more names selects the multi-name pipeline mode (ADR-0019);
+# repeat >= 2 selects the concurrent-send mode (ADR-0020) — the same
+# arity thresholds the CLI's flag combination enforced.
+_PIPELINE_MIN_NAMES = 2
+_REPEAT_MIN = 2
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -46,12 +60,16 @@ def odda_tool(fn):
     """Convert odda's anticipated errors to SDK ``ToolError``.
 
     ``BrowserOperationError`` (library messages: tab not found, ref did
-    not resolve, closed during …) and ``JsonRpcError`` (handler
-    validation: source is empty, ref-or-coords conflicts) both become
-    ``ToolError`` with the message verbatim — without this the model
-    sees a content-free crash and loses every self-correction message.
-    Everything else stays a crash: the SDK's ``UnexpectedToolError``
-    path, traceback to stderr, per the map's log decision.
+    not resolve, closed during …), ``JsonRpcError`` (handler validation:
+    source is empty, ref-or-coords conflicts), and ``ValueError`` (the
+    request/userscript/proxy-script libraries' anticipated validation:
+    name collisions, not-found, empty request file, pre-emptive
+    pipeline/repeat rejections — messages the old JSON-RPC dispatch
+    surfaced via its catch-all) all become ``ToolError`` with the
+    message verbatim — without this the model sees a content-free
+    crash and loses every self-correction message. Everything else
+    stays a crash: the SDK's ``UnexpectedToolError`` path, traceback
+    to stderr, per the map's log decision.
     """
 
     @functools.wraps(fn)
@@ -61,6 +79,8 @@ def odda_tool(fn):
         except BrowserOperationError as exc:
             raise ToolError(str(exc)) from exc
         except rpc.JsonRpcError as exc:
+            raise ToolError(str(exc)) from exc
+        except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
     return wrapper
@@ -440,6 +460,144 @@ async def status(*, ctx: Context[OddaState]) -> dict[str, Any]:
 async def version() -> dict[str, Any]:
     """Return the odda version (no state needed)."""
     return {"version": __version__}
+
+
+# --- request crafting (raw HTTP) ---
+
+
+@mcp_server.tool()
+@odda_tool
+async def request_clone(
+    flow_id: str,
+    name: str,
+    *,
+    force: bool = False,
+    ctx: Context[OddaState],  # noqa: ARG001
+) -> dict[str, Any]:
+    """Clone a captured flow's request into an editable request.
+
+    Copies the flow's request file and meta sidecar into the editable
+    requests dir under ``name``. The stored request becomes editable;
+    the Host header stays verbatim (may intentionally differ from the
+    TCP destination for vhost/host-header tests).
+    """
+    return clone_request(flow_id, name, force=force)
+
+
+@mcp_server.tool()
+@odda_tool
+async def request_new(  # noqa: PLR0913 — the tool mirrors request new's full flag surface
+    name: str,
+    host: str,
+    protocol: str = "https",
+    port: int | None = None,
+    line_terminator: list[int] | None = None,
+    *,
+    force: bool = False,
+    ctx: Context[OddaState],  # noqa: ARG001
+) -> dict[str, Any]:
+    r"""Create a new empty editable request.
+
+    The agent edits ``<data_dir>/requests/<name>/request`` on disk
+    (raw HTTP bytes — the file is the wire bytes for HTTP/1.1), then
+    sends it with request_send.
+
+    Args:
+        name: Editable request name.
+        host: Target host (TCP destination; the Host header in the
+            request file goes on the wire verbatim and may differ).
+        protocol: ``http`` or ``https`` (default ``https``).
+        port: Target port (default 80 for http, 443 for https).
+        line_terminator: Byte sequence the request parser splits header
+            lines on, as a list of byte ints (default ``\r\n``). H2-only:
+            for H2→H1 downgrade smuggling where a literal CRLF must live
+            inside an H2 header value (e.g. ``:path``), set to ``\n``
+            (``[10]``) so the parser splits on LF, preserving CR in
+            values. Ignored for HTTP/1.1 request files (wire-faithful).
+        force: Overwrite an existing request of the same name.
+        ctx: SDK request context (unused; the requests dir is derived
+            from the data dir the lifespan set).
+    """
+    lt_bytes = bytes(line_terminator) if line_terminator is not None else b"\r\n"
+    return new_request(
+        name,
+        host=host,
+        protocol=protocol,
+        port=port,
+        line_terminator=lt_bytes,
+        force=force,
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the tool's contract
+    name: str | None = None,
+    names: list[str] | None = None,
+    repeat: int | None = None,
+    timeout: float = 30.0,
+    *,
+    fix_content_length: bool = False,
+    insecure: bool = False,
+    pipelining: bool = False,
+    ctx: Context[OddaState],  # noqa: ARG001
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """Send editable request(s) and record each response as a flow.
+
+    Three modes, exactly as the CLI's ``--name`` arity selected:
+
+    - single (``name``): frozen single-shot — one request, one flow
+      record (a dict). Errors are recorded as error flows (status_code
+      null + error message), not tool errors.
+    - pipeline (``names``, two or more): one HTTP/1.1 connection
+      (sequential keep-alive, or ``pipelining`` for send-all-then-read-
+      all) for smuggling response-queue poisoning / victim consumption;
+      or all-HTTP/2 for concurrent stream-multiplex (multi-endpoint
+      race). Returns a list of flow records in send order.
+    - repeat (``repeat`` >= 2 with single ``name``): N concurrent
+      copies — the race / limit-overrun path (H2 stream-multiplex with
+      last-byte single-packet, H1 parallel connections). Returns a
+      list, one flow per copy.
+
+    See ADR-0019/0020/0021 (docs/adr/) for the semantics this port
+    honors verbatim: two-phase durability, mid-sequence abort policy,
+    per-stream error isolation, the one-request-one-response flow
+    model, and the H2-only line-terminator constraint.
+    """
+    if repeat is not None and names is not None:
+        raise ToolError(
+            "--repeat is single-name only; use --repeat with one --name, "
+            "or multi-name without --repeat (the combo is ambiguous)"
+        )
+    if repeat is not None and pipelining:
+        raise ToolError(
+            "--repeat is concurrent; --pipelining is H1 multi-name "
+            "sequential — they cannot be combined"
+        )
+    if names is not None and len(names) >= _PIPELINE_MIN_NAMES:
+        return await send_request_pipeline(
+            names,
+            fix_content_length=fix_content_length,
+            timeout=timeout,
+            insecure=insecure,
+            pipelining=pipelining,
+        )
+    if repeat is not None and repeat >= _REPEAT_MIN:
+        return await send_request_repeat(
+            name,
+            repeat,
+            fix_content_length=fix_content_length,
+            timeout=timeout,
+            insecure=insecure,
+        )
+    if name is None:
+        raise ToolError("Provide name (single or repeat) or names (pipeline)")
+    return await send_request(
+        name,
+        fix_content_length=fix_content_length,
+        timeout=timeout,
+        insecure=insecure,
+    )
 
 
 @mcp_server.tool()
