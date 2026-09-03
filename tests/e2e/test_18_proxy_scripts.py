@@ -292,14 +292,16 @@ async def test_boot_with_broken_script_does_not_kill_session(
     script_dir.mkdir(parents=True)
     (script_dir / "script.py").write_text(PS_BROKEN)
 
-    async with fixture_site(["index.html"]) as fx:
+    async with (
+        fixture_site(["index.html"]) as fx,
         # Fresh session on the same data dir: the broken script's exec
         # failure logs ERROR during lifespan boot — the session must
         # survive it and the proxy must serve.
-        async with odda_session() as h:
-            r = await h.call("proxy_script_list", {})
-            assert "broken" in {s["name"] for s in r}
+        odda_session() as h,
+    ):
+        r = await h.call("proxy_script_list", {})
+        assert "broken" in {s["name"] for s in r}
 
-            opener = await _opener(h)
-            hdrs = await _fetch(opener, f"{fx.base}/?marker=ps-broken-boot")
-            assert hdrs.get("content-type") == "text/html"
+        opener = await _opener(h)
+        hdrs = await _fetch(opener, f"{fx.base}/?marker=ps-broken-boot")
+        assert hdrs.get("content-type") == "text/html"

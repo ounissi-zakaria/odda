@@ -14,7 +14,7 @@ via the `h2` library (already a runtime dep of odda/mitmproxy).
 Usage:
     h2_cookie_client.py <proxy_url> <target_host> <target_port> <path>
 
-<proxy_url> is the value from `odda proxy-url` (e.g. ``http://127.0.0.1:PORT``),
+<proxy_url> is the value from the `proxy_url` tool (e.g. ``http://127.0.0.1:PORT``),
 parsed with urllib so the shell need not split host/port.
 
 CONNECTs through the HTTP proxy, then opens an h2 connection to

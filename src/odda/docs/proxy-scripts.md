@@ -27,8 +27,8 @@ The standard mitmproxy hooks apply: `request`, `response`, `error`, `load`, `run
 
 ## Storage and scope
 
-- **Storage.** Source is persisted under `.odda/proxy-scripts/<name>/script.py` and re-added on server boot, so an agent's proxy-script survives an odda server restart (new session, machine reboot).
-- **Scope is global**, not per-browser. The proxy is one shared instance across all browsers, so a proxy-script sees **every** flow from every browser through the odda server. This differs from userscripts (per-browser). The cost is that an agent's proxy-script sees other agents' traffic through the same server — acceptable for a power-user feature installed deliberately on the shared proxy.
+- **Storage.** Source is persisted under `.odda/proxy-scripts/<name>/script.py` and re-added when the odda session boots, so an agent's proxy-script survives a session restart (new session, machine reboot).
+- **Scope is global within the session**, not per-browser. The proxy is one shared instance across all browsers in the session, so a proxy-script sees **every** flow from every browser in that session. This differs from userscripts (per-browser). Because each agent session runs its own odda process, other agents' sessions are not affected; a proxy-script only touches this session's traffic.
 - **`name` is odda's key.** `proxy_script_install` refuses without `force` if the name is taken (same semantics as `request_clone`/`request_new`). With `force`, odda removes the existing live instance first, then loads and adds the new source.
 
 ## Capture honesty (chain order)
@@ -37,7 +37,7 @@ Captured `.odda/flows/<id>/request` files record what the client sent; a proxy-s
 
 ## Failure model
 
-- **Load failure** (syntax error, import error) at install or boot: the install is rejected (or, at boot, the proxy-script is skipped) and the error is logged to the server's stderr log. One bad proxy-script never blocks the server — the rest of the chain comes up.
+- **Load failure** (syntax error, import error) at install or boot: the install is rejected (or, at boot, the proxy-script is skipped) and the error is logged to the session's stderr log. One bad proxy-script never blocks the session — the rest of the chain comes up.
 - **Runtime hook error**: the exception is logged and the proxy continues. The flow proceeds (or fails gracefully depending on where in the pipeline the error happened). Discover errors in the stderr log. `proxy_script_list` shows no error state — the addon is still loaded, it just threw once.
 - **Options.** A proxy-script can register its own options (full mitmproxy parity) — namespace your option names to avoid collisions with odda's own options or other proxy-scripts.
 

@@ -143,7 +143,7 @@ if (!window.__oddaStack) {
   };
 }
 // Records aggregate to the top frame's __oddaWrap when accessible
-// (same-origin iframes), so `odda wrap dump` reading the main frame
+// (same-origin iframes), so `wrap_dump` reading the main frame
 // sees records from all same-origin frames. Cross-origin iframes
 // can't reach window.top, so they keep their own __oddaWrap (the
 // wrap still runs there; the agent reads those records by evaluating

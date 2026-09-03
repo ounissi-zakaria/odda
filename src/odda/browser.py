@@ -182,8 +182,8 @@ def init_chrome_profile() -> dict[str, Any]:
 class BrowserOperationError(Exception):
     """Raised when a browser/tab operation fails for a targetable reason.
 
-    Carries a short message that surfaces to the CLI as a JSON-RPC
-    INVALID_PARAMS error. Used for unknown browser/tab ids, mismatched
+    Carries a short message that surfaces to the agent as a tool
+    error. Used for unknown browser/tab ids, mismatched
     pairs, target-closed-during-op, goto failures, and screenshot
     failures.
     """
@@ -490,8 +490,9 @@ class BrowserInstance:
             msg = str(exc)
             if "timeout" in msg.lower() or "Timeout" in type(exc).__name__:
                 hint = (
-                    " For SPAs that don't fire `load`, use `odda wait-for"
-                    ' "<expr>"` after navigate to poll for a condition.'
+                    " For SPAs that don't fire `load`, use the `wait_for`"
+                    " tool with a JS expression after navigate to poll"
+                    " for a condition."
                 )
                 raise BrowserOperationError(
                     f"Failed to navigate: {msg} (wait-until `{wait_until}`){hint}"
@@ -1114,7 +1115,7 @@ class BrowserManager:
     def list_instances(self) -> list[dict]:
         """List open browser instances with tab counts.
 
-        Backs the ``browser/list`` JSON-RPC method and the server's
+        Backs the ``browser_list`` tool and the session's
         shutdown sweep. Returns ``[{browser_id, tab_count}]`` with
         ``tab_count`` as ``len(_tabs)`` (raw — may include pages whose
         underlying Chrome has died if no close event fired).
@@ -1419,7 +1420,7 @@ class BrowserManager:
     ) -> dict[str, Any]:
         """Install a wrap (call or access) into the browser's scope and reload.
 
-        Validates that the target tab exists (so a stale ``--tab-id``
+        Validates that the target tab exists (so a stale ``tab_id``
         errors cleanly), installs the wrap as a named userscript via
         ``install_fn`` into the given browser's scope, and reloads that
         browser's extension. The wrap takes effect on the next
@@ -1454,8 +1455,8 @@ class BrowserManager:
         """List installed wraps for the given browser.
 
         Wraps are stored on disk as named userscripts scoped to the
-        given browser (per ADR-0010). The ``--tab-id`` is validated
-        for targeting consistency with the other wrap commands but
+        given browser (per ADR-0010). The ``tab_id`` is validated
+        for targeting consistency with the other wrap tools but
         does not filter the list.
 
         Returns:

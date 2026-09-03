@@ -5,7 +5,7 @@ immediately without reading or writing anything. This models a server
 that accepts the connection then drops it — the read side hits EOF
 before any response headers arrive.
 
-Used to verify that single-shot ``odda request send`` (which shares the
+Used to verify that single-shot ``request_send`` (which shares the
 response-header reader with the multi-name pipeline) records a
 descriptive error flow (``status_code: null`` + ``error`` naming the
 close) instead of the ambiguous ``status_code: 0, error: null``

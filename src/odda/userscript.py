@@ -9,10 +9,10 @@ browser gets its own Chrome extension at
 userscripts shipped with odda. The extension is loaded via CDP
 ``Extensions.loadUnpacked`` and runs at ``document_start`` in the
 ``MAIN`` world, so ``window`` modifications are visible to the page and
-to ``odda eval``.
+to ``eval``.
 
 Per ADR-0010, the scope is per-browser: a userscript installed on
-browser 1 does not reach browser 2. The `--browser-id` on
+browser 1 does not reach browser 2. The ``browser_id`` on
 install/remove is the scope key, not just a reload trigger.
 """
 

@@ -3,10 +3,10 @@
 __version__ = "0.42.0"
 
 #: Playwright ``page.goto`` lifecycle events accepted by navigate, in firing
-#: order. The single source of truth shared across the browser module (used by
-#: the server for validation), the JSON-RPC handler, and the CLI (used to build
-#: the ``--wait-until`` help text). Lives here so the CLI can import it without
-#: pulling in the patchright-backed ``odda.browser`` module.
+#: order. The single source of truth for the MCP server's ``navigate``
+#: param validation and error message; the browser layer passes the value
+#: through to Playwright. Lives here so importing it stays lightweight —
+#: no pull-in of the patchright-backed ``odda.browser`` module.
 NAVIGATE_WAIT_UNTIL_EVENTS: tuple[str, ...] = (
     "commit",
     "domcontentloaded",

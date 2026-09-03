@@ -63,7 +63,7 @@ if (!window.__oddaSerialize) {
 if (!window.__oddaLogpointPush) {
   window.__oddaLogpointPush = function(rec) {
     // Aggregate to the top frame when accessible (same-origin iframes)
-    // so `odda logpoint dump` on the main tab sees records from all
+    // so `logpoint_dump` on the main tab sees records from all
     // same-origin frames. Cross-origin iframes keep their own array.
     try {
       var top = window.top;

@@ -1,4 +1,4 @@
-"""Close-after-first fixture server for `--pipelining` abort tests.
+"""Close-after-first fixture server for `pipelining` abort tests.
 
 A minimal raw HTTP/1.1 server that, for each accepted TCP connection,
 reads exactly one request (until the empty header-terminator line),
@@ -6,7 +6,7 @@ writes back one ``200 OK`` response carrying ``Connection: close`` and
 the query-string-requested body, then half-closes the write side and
 drains any pipelined follow-up bytes the client wrote behind the first
 request before fully closing. This faithfully models the real-world
-smuggling-target behavior that ``--pipelining`` is built for — the
+smuggling-target behavior that ``pipelining`` is built for — the
 server answers the first request and tears down the connection, so the
 pipelined follow-ups never get a response — while closing cleanly (FIN,
 not RST) so the first response is always delivered to the client.
@@ -87,7 +87,7 @@ def _drain_remaining(conn: socket.socket) -> None:
     close delivers a FIN, which preserves already-sent data.
 
     The drain blocks briefly (bounded by ``_DRAIN_TIMEOUT``) rather than
-    polling non-blockingly: in ``--pipelining`` mode the client writes all
+    polling non-blockingly: in ``pipelining`` mode the client writes all
     requests up front, but some bytes may still be in flight when the
     server reaches this point, so a non-blocking read can miss them and
     leave the RST race open. A short bounded wait lets the in-flight bytes
