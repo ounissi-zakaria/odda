@@ -136,6 +136,7 @@ mcp_server = MCPServer[OddaState](
 
 
 @mcp_server.tool()
+@odda_tool
 async def browser_open(
     *,
     headless: bool = True,
