@@ -1,18 +1,16 @@
 # AGENTS.md
 
-`odda` is a Python CLI tool for browser automation and HTTP traffic capture.
+`odda` is a Python package for browser automation and HTTP traffic capture, exposed as a stdio MCP server.
 
-- Server/client model: `odda server` runs in the background; `odda <command>` talks to it over a Unix socket via JSON-RPC.
-- The OpenCode plugin starts the server and injects `ODDA_SOCKET` + `ODDA_DATA_DIR` into shell env.
-- Proxy state, browser state, and captured flows all live in the server process.
-- Response bodies and `flows.jsonl` are stored in `.odda/` (or the configured data dir).
+- MCP is the surface: `odda mcp` is the *only* odda process. The MCP server's lifespan owns the proxy, the browser manager, and the flow store; the harness spawns one process per agent session.
+- The remaining CLI subcommands are helpers: `odda mcp` (the server), `odda version`, and `odda init-chrome-profile` (interactive, human-run — configures the base profile Chrome sessions are seeded from).
+- Response bodies and `flows.jsonl` are stored in `.odda/` under the MCP process's working directory.
 
 ## Build / run
 
 ```bash
 uv venv --python 3.14
 uv pip install -e ".[dev]"
-odda install opencode
 ```
 
 Use `.venv/bin/python` and `.venv/bin/ruff`. Avoid `pip` directly unless `uv` is unavailable.
@@ -40,27 +38,20 @@ E2E tests run inside a Docker container (built from `tests/e2e/Dockerfile`) that
 
 ## Key files
 
-- `src/odda/cli.py` — Typer CLI commands.
-- `src/odda/server.py` — JSON-RPC server and request handlers.
-- `src/odda/client.py` — JSON-RPC client.
+- `src/odda/mcp.py` — the MCP server: stdio entrypoint, lifespan, tool handlers (one tool per capability), and the `odda://` concept-doc resources.
+- `src/odda/cli.py` — the three-command CLI (`mcp`, `version`, `init-chrome-profile`).
 - `src/odda/browser.py` — patchright/Playwright browser automation.
 - `src/odda/chrome_args.py` — Redeclared Chrome launch flags (the patchright `chromiumSwitches` mirror + m150 model-store suppression); see the drift audit note below.
 - `src/odda/proxy.py` — mitmproxy wrapper.
 - `src/odda/flowstore.py` — File-based flow storage (flows.jsonl + per-flow dirs).
-- `src/odda/harness/opencode/plugin.js` — OpenCode plugin.
-- `src/odda/harness/pi/plugin-pi.ts` — pi extension (process.env inheritance).
-- `src/odda/harness/omp/plugin-omp.ts` — omp extension (per-call `tool_call` env injection).
-- `src/odda/harness/claude/start.py` — Claude Code `SessionStart` hook (starts the odda server, outliving the hook via reparenting — not detached into a new session — and bound to `$CLAUDE_PID` via `--parent-pid`; writes `ODDA_SOCKET`/`ODDA_DATA_DIR`/`ODDA_LOG` into `$CLAUDE_ENV_FILE`); shipped as `scripts/start.py` inside the plugin bundle that `odda install claude` writes to `~/.claude/skills/odda/`.
-- `src/odda/harness/install.py` — Harness install dispatcher (`odda install <opencode|pi|omp|claude>`).
-- `src/odda/harness/skill/SKILL.md` — Agent skill documentation (shared across harnesses).
+- `src/odda/docs/` — the six concept docs served as `odda://` markdown resources.
 
 ## Conventions
 
 - Python 3.14+ with `from __future__ import annotations`.
-- CLI commands stay thin; logic belongs in server/library modules.
-- CLI output defaults to human-readable text; the global `--json` flag opts into structured output (stable by convention; the parse target for scripts). Errors print as `Error: <message>` on stderr with a non-zero exit code in text mode (`{"error": ...}` on stdout in `--json` mode).
-- If you add, remove, or change CLI commands/options, update `src/odda/harness/skill/SKILL.md` and run `odda install opencode` so agents see the current tool surface. Text renderers live in `src/odda/render.py` — add one for any new command whose result a human or agent will read.
-- Skill docs (`SKILL.md` and linked `*.md`) describe behavior, not implementation — keep ADR refs, internal class/module/library/CDP API names, exact on-disk modes, and other internals out of them.
+- The CLI stays thin; automation logic belongs in library modules (`browser.py`, `proxy.py`, `request/`, ...) and is exposed as MCP tools in `mcp.py` — one `@mcp_server.tool()` per capability, handlers ported verbatim from the library layer.
+- Tool results are pure natural types (`dict` passes through, `list`/`str` get the SDK's `{"result": ...}` wrap, `Any` is text-only); anticipated errors (`BrowserOperationError`, `ToolParamError`, `ValueError`) convert to `ToolError` with the message verbatim via `@odda_tool`.
+- The concept docs in `src/odda/docs/` describe behavior, not implementation — keep ADR refs, internal class/module/library/CDP API names, exact on-disk modes, and other internals out of them.
 - When incrementing the version, update **both** `pyproject.toml` and `src/odda/__init__.py` (`__version__`), then run `uv lock` so the lockfile stays in sync. The version lives in three places: `pyproject.toml`, `src/odda/__init__.py`, and `uv.lock`.
 - **`patchright` is pinned to an exact version** (`patchright==<x.y.z>` in `pyproject.toml`). On a bump, audit `src/odda/chrome_args.py` against the new `chromiumSwitches` block in the installed driver's `coreBundle.js` (search `init_chromiumSwitches`): diff `_DISABLED_FEATURES` against the driver's `disabledFeatures` array and `_CHROMIUM_SWITCHES` against the driver's desktop `chromiumSwitches()` resolution (the driver's `_innerDefaultArgs` calls it with no options — the `android: true` branch that drops `--disable-sync` only fires on the Android path, not `launch_persistent_context`). Confirm two deliberate exclusions stay absent: `--password-store=basic` and `--use-mock-keychain` (real system keychain so seeded cookies persist). Confirm `--disable-blink-features=AutomationControlled` (stealth) stays present — no e2e doc checks `navigator.webdriver`, so the pin + this note are the only guards against a silent stealth regression.
 

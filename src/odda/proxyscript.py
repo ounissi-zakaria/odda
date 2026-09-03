@@ -21,8 +21,8 @@ mitmproxy's own ``ScriptLoader.configure``.
 
 A failing exec (syntax error, import error) is logged and the install is
 rejected — one bad proxy-script never blocks the server. Runtime hook
-errors are swallowed by mitmproxy's ``safecall()`` and surface via
-``odda logs``.
+errors are swallowed by mitmproxy's ``safecall()`` and surface via the
+server process's stderr.
 """
 
 from __future__ import annotations
@@ -165,9 +165,9 @@ class ProxyScriptManager:
 
         Disk is the source of truth for ``list`` (matches userscripts).
         A proxy-script whose exec failed at boot is on disk yet not
-        live; the agent discovers that via ``odda logs`` (runtime errors
-        surface there per ADR-0018), not via a flag here — list carries
-        no error state, mirroring userscript's list.
+        live; the agent discovers that via the server process's stderr
+        (runtime errors surface there per ADR-0018), not via a flag
+        here — list carries no error state, mirroring userscript's list.
         """
         return list_scripts()
 

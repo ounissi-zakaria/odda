@@ -1,6 +1,6 @@
 # pi + omp plugins: two extension sources, per-harness skill dirs, one install command
 
-Status: superseded by ADR 0024 (one source, `process.env` inheritance).
+Status: superseded by ADR 0024 (one source, `process.env` inheritance). The whole plugin surface was later deleted by the MCP migration (v0.42.0): harnesses spawn `odda mcp` from their own MCP config; no plugin, skill, or install command ships.
 
 pi (earendil-works/pi) and omp (can1357/oh-my-pi, "omp.sh") are the same
 harness family: omp is a fork of pi-mono by Mario Zechner, rewritten and

@@ -1,6 +1,6 @@
 # omp plugin: per-call env injection via `tool_call` input mutation, separate from pi
 
-Status: accepted (supersedes ADR 0024's one-source decision for the plugin; the per-harness skill-dir decision stands)
+Status: accepted (supersedes ADR 0024's one-source decision for the plugin; the per-harness skill-dir decision stands). The whole plugin surface was later deleted by the MCP migration (v0.42.0): omp inherits MCP servers from IDE configs (or registers via its own config), spawning `odda mcp`; there is no socket and nothing to inject.
 
 ADR 0024 shipped one extension source (`plugin-pi.ts`) for both pi and omp,
 injecting `ODDA_*` via `process.env` inheritance: the plugin writes the vars

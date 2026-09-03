@@ -11,8 +11,8 @@ contract is the one pinned in ticket #03 (``.scratch/odda-mcp/issues/
 - pure natural return types — ``dict`` passes through, ``list``/``str``
   get the SDK's ``{"result": ...}`` wrap, ``Any`` is text-only;
 - one ``@odda_tool`` decorator converts ``BrowserOperationError``,
-  ``JsonRpcError``, and the request/userscript/proxy-script libraries'
-  ``ValueError``s to ``ToolError`` (message verbatim, code discarded);
+  ``ToolParamError``, and the request/userscript/proxy-script
+  libraries' ``ValueError``s to ``ToolError`` (message verbatim);
   anything else stays an SDK crash logged to stderr.
 """
 
@@ -36,7 +36,7 @@ from mcp.server.mcpserver.context import Context  # noqa: TC002
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resources import TextResource
 
-from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript, rpc
+from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
 from odda.browser import BrowserManager, BrowserOperationError
 from odda.proxy import ProxyServer
 from odda.request import (
@@ -53,6 +53,22 @@ from odda.request import (
 _PIPELINE_MIN_NAMES = 2
 _REPEAT_MIN = 2
 
+
+class ToolParamError(Exception):
+    """Handler-level validation error (a bad tool argument combination).
+
+    The successor of the JSON-RPC layer's INVALID_PARAMS: the tool
+    itself is the surface now, so handler-side validation raises this
+    instead of ``rpc.JsonRpcError``. :func:`odda_tool` converts it to
+    the SDK's ``ToolError`` with the message verbatim.
+    """
+
+    def __init__(self, message: str) -> None:
+        """Initialize with a short human-readable message."""
+        super().__init__(message)
+        self.message = message
+
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -61,27 +77,23 @@ def odda_tool(fn):
     """Convert odda's anticipated errors to SDK ``ToolError``.
 
     ``BrowserOperationError`` (library messages: tab not found, ref did
-    not resolve, closed during …), ``JsonRpcError`` (handler validation:
-    source is empty, ref-or-coords conflicts), and ``ValueError`` (the
-    request/userscript/proxy-script libraries' anticipated validation:
-    name collisions, not-found, empty request file, pre-emptive
-    pipeline/repeat rejections — messages the old JSON-RPC dispatch
-    surfaced via its catch-all) all become ``ToolError`` with the
-    message verbatim — without this the model sees a content-free
-    crash and loses every self-correction message. Everything else
-    stays a crash: the SDK's ``UnexpectedToolError`` path, traceback
-    to stderr, per the map's log decision.
+    not resolve, closed during …), ``ToolParamError`` (handler
+    validation: source is empty, ref-or-coords conflicts), and
+    ``ValueError`` (the request/userscript/proxy-script libraries'
+    anticipated validation: name collisions, not-found, empty request
+    file, pre-emptive pipeline/repeat rejections — messages the old
+    JSON-RPC dispatch surfaced via its catch-all) all become
+    ``ToolError`` with the message verbatim — without this the model
+    sees a content-free crash and loses every self-correction message.
+    Everything else stays a crash: the SDK's ``UnexpectedToolError``
+    path, traceback to stderr, per the map's log decision.
     """
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         try:
             return await fn(*args, **kwargs)
-        except BrowserOperationError as exc:
-            raise ToolError(str(exc)) from exc
-        except rpc.JsonRpcError as exc:
-            raise ToolError(str(exc)) from exc
-        except ValueError as exc:
+        except (BrowserOperationError, ToolParamError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
     return wrapper
@@ -89,12 +101,7 @@ def odda_tool(fn):
 
 @dataclass
 class OddaState:
-    """What the MCP lifespan owns — the trio ``OddaServer`` owned today.
-
-    The data dir is not state here: ``flowstore.set_data_dir`` is a
-    module-global setter, called once in the lifespan before any tool
-    can run.
-    """
+    """What the MCP lifespan owns: proxy, browser manager, flowstore dir."""
 
     proxy: ProxyServer
     browser: BrowserManager
@@ -303,10 +310,9 @@ async def navigate(
     timeout error names the wait_until event that failed.
     """
     if wait_until not in NAVIGATE_WAIT_UNTIL_EVENTS:
-        raise rpc.JsonRpcError(
-            rpc.INVALID_PARAMS,
+        raise ToolParamError(
             f"wait_until must be one of {', '.join(NAVIGATE_WAIT_UNTIL_EVENTS)}, "
-            f"got {wait_until!r}",
+            f"got {wait_until!r}"
         )
     return await ctx.request_context.lifespan_context.browser.navigate(
         browser_id,
@@ -433,18 +439,12 @@ async def page_click(  # noqa: PLR0913 — targeting + ref/coords union is the t
     browser = ctx.request_context.lifespan_context.browser
     if x is not None or y is not None:
         if ref is not None:
-            raise rpc.JsonRpcError(
-                rpc.INVALID_PARAMS, "Provide either x/y or ref, not both"
-            )
+            raise ToolParamError("Provide either x/y or ref, not both")
         if x is None or y is None:
-            raise rpc.JsonRpcError(
-                rpc.INVALID_PARAMS, "Provide both x and y for coordinate mode"
-            )
+            raise ToolParamError("Provide both x and y for coordinate mode")
         return await browser.page_click_coords(browser_id, tab_id, x=x, y=y)
     if ref is None:
-        raise rpc.JsonRpcError(
-            rpc.INVALID_PARAMS, "Provide either ref or x/y coordinates"
-        )
+        raise ToolParamError("Provide either ref or x/y coordinates")
     return await browser.page_click(browser_id, tab_id, ref, timeout_ms=timeout * 1000)
 
 
@@ -492,18 +492,12 @@ async def page_hover(  # noqa: PLR0913 — targeting + ref/coords union is the t
     browser = ctx.request_context.lifespan_context.browser
     if x is not None or y is not None:
         if ref is not None:
-            raise rpc.JsonRpcError(
-                rpc.INVALID_PARAMS, "Provide either x/y or ref, not both"
-            )
+            raise ToolParamError("Provide either x/y or ref, not both")
         if x is None or y is None:
-            raise rpc.JsonRpcError(
-                rpc.INVALID_PARAMS, "Provide both x and y for coordinate mode"
-            )
+            raise ToolParamError("Provide both x and y for coordinate mode")
         return await browser.page_hover_coords(browser_id, tab_id, x=x, y=y)
     if ref is None:
-        raise rpc.JsonRpcError(
-            rpc.INVALID_PARAMS, "Provide either ref or x/y coordinates"
-        )
+        raise ToolParamError("Provide either ref or x/y coordinates")
     return await browser.page_hover(browser_id, tab_id, ref, timeout_ms=timeout * 1000)
 
 
@@ -943,17 +937,13 @@ def _read_install_source(file: str | None, source: str | None, what: str) -> str
     a missing file must read as odda's message, not an SDK crash.
     """
     if file is not None and source is not None:
-        raise rpc.JsonRpcError(
-            rpc.INVALID_PARAMS, "Provide either file or source, not both"
-        )
+        raise ToolParamError("Provide either file or source, not both")
     if file is None and source is None:
-        raise rpc.JsonRpcError(
-            rpc.INVALID_PARAMS, f"Provide file <path> or source <{what}>"
-        )
+        raise ToolParamError(f"Provide file <path> or source <{what}>")
     if file is not None:
         path = Path(file)
         if not path.is_file():
-            raise rpc.JsonRpcError(rpc.INVALID_PARAMS, f"File not found: {file}")
+            raise ToolParamError(f"File not found: {file}")
         return path.read_text(encoding="utf-8")
     return source  # type: ignore[return-value]
 
@@ -980,7 +970,7 @@ async def userscript_install(
     """
     js = _read_install_source(file, source, "js")
     if not js.strip():
-        raise rpc.JsonRpcError(rpc.INVALID_PARAMS, "source is empty")
+        raise ToolParamError("source is empty")
     return await ctx.request_context.lifespan_context.browser.install_userscript(
         browser_id, name, js
     )
@@ -1031,11 +1021,10 @@ async def proxy_script_install(
     """
     py = _read_install_source(file, source, "py")
     if not py.strip():
-        raise rpc.JsonRpcError(rpc.INVALID_PARAMS, "source is empty")
+        raise ToolParamError("source is empty")
     if not force and proxyscript.name_exists(name):
-        raise rpc.JsonRpcError(
-            rpc.INVALID_PARAMS,
-            f"Proxy-script '{name}' already installed. Use force to overwrite.",
+        raise ToolParamError(
+            f"Proxy-script '{name}' already installed. Use force to overwrite."
         )
     return ctx.request_context.lifespan_context.proxy.install_script(name, py)
 

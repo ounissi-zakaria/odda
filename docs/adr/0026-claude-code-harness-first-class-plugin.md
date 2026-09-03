@@ -1,6 +1,6 @@
 # Claude Code harness ships as a first-class plugin bundle
 
-Status: accepted (reverses ADR 0025's deferral of the first-class-plugin option; 0025's core "CLI + skill, not MCP" decision stands).
+Status: accepted (reverses ADR 0025's deferral of the first-class-plugin option; 0025's core "CLI + skill, not MCP" decision stands). The whole plugin bundle was later deleted by the MCP migration (v0.42.0): Claude Code registers `odda mcp` as a standard MCP server from its own config; no plugin, hook, or install command ships.
 
 ADR 0025 chose CLI + skill (not MCP) for the Claude Code harness and deferred the first-class plugin + marketplace option as "a new packaging surface diverging from `odda install` parity." Reading the actual Claude Code plugin docs reversed that deferral: the first-class plugin model is the better fit for a distributable tool, and it removes the most intrusive part of the original install — mutating the user's global `~/.claude/settings.json`.
 

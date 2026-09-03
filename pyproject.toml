@@ -1,11 +1,10 @@
 [project]
 name = "odda"
-version = "0.41.0"
-description = "Browser automation and HTTP traffic capture CLI for AI agents"
+version = "0.42.0"
+description = "Browser automation and HTTP traffic capture for AI agents (MCP server)"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "typer>=0.15.0",
     "mitmproxy>=11.0.2",
     "patchright==1.62.1",
     "h2>=4.0.0",
@@ -110,17 +109,15 @@ combine-as-imports = true
 split-on-trailing-comma = false
 
 [tool.ruff.lint.per-file-ignores]
-"src/odda/cli.py" = ["B008", "FBT001", "FBT003", "PLR0913", "PLC0415"]
+"src/odda/cli.py" = ["PLC0415"]
 "src/odda/flowstore.py" = ["PLW0603", "PLR0913"]
-"src/odda/server.py" = ["TRY301"]
 "src/odda/request/*.py" = ["PLR0913", "PLR2004", "C901", "PLR0912", "PLR0915", "TC003"]
 "src/odda/wrap.py" = ["E501"]
 "src/odda/logpoint.py" = ["E501", "PLR0913"]
-"src/odda/render.py" = ["D103", "PERF401", "E501"]
-"tests/e2e/conftest.py" = ["D107", "D403", "D205", "D209", "D202", "D402", "PLC0415", "S101", "S603", "S607", "SLF001", "SIM300", "E501", "E741", "TC003", "RUF100", "W292"]
 # F401's odda_session flagging is the import-shadow pattern (each test's
 # fixture parameter redefines the imported factory; ruff can't model
 # pytest fixtures) — covered by the F811 ignore; modules use it in-body.
+"tests/e2e/conftest.py" = ["D107", "D403", "D205", "D209", "D202", "D402", "PLC0415", "S101", "S603", "S607", "SLF001", "SIM300", "E501", "E741", "TC003", "RUF100", "W292"]
 "tests/e2e/test_*.py" = ["S101", "PLR2004", "E501", "E741", "D415", "D403", "D205", "D209", "PLC0415", "RUF100", "RUF003", "RUF059", "SIM300", "W292", "INP001", "S105", "S311", "F811", "F401", "ARG001", "D301", "W605", "TC003"]
 "tests/e2e/fixtures/dyn_asgi.py" = ["INP001", "ARG001", "S108"]
 "tests/e2e/fixtures/echo_path_h2server.py" = ["INP001", "S110"]

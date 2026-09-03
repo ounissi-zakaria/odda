@@ -1,7 +1,8 @@
 # CLI commands are flag-only — positional arguments are removed
 
+Status: the CLI surface this governed was deleted by the MCP migration (v0.42.0) — the flag-only convention carries over to MCP tool parameters (named, never positional) in `odda mcp`.
+
 All odda CLI commands accept their inputs as named flags only. The four
-commands that previously took a positional argument (`navigate <url>`,
 `eval <js>`, `browser close <id>`, `wrap remove <name>`, plus the
 `page click/fill/hover/upload <ref>` family, `request clone <flow-id>`,
 `request send <name>`, `userscript remove <name>`, `logpoint remove <id>`)

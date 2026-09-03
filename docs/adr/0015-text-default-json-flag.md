@@ -1,5 +1,7 @@
 # CLI defaults to text output; `--json` opts into structured output
 
+Status: the CLI output surface this governed was deleted by the MCP migration (v0.42.0) — tool results are natural types over MCP; there is no `--json` flag and no renderer.
+
 All odda CLI commands print human-readable text by default and accept
 a global `--json` flag to emit structured JSON instead. Text output is
 rendered by hand-written per-command formatters (tables for lists,

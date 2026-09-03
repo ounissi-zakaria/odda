@@ -17,7 +17,7 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
     """browser_open → navigate → eval → screenshot → browser_close, all real."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         r = await h.call("version", {})
-        assert r["version"] == "0.41.0"
+        assert r["version"] == "0.42.0"
 
         r = await h.call("status", {})
         assert r["browser_count"] == 0

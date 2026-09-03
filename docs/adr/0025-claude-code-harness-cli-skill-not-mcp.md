@@ -1,6 +1,6 @@
 # Claude Code harness ships CLI + skill, not MCP tools
 
-Status: the "first-class plugin — Deferred" option below was reversed by ADR 0026 (the harness now ships as a self-contained plugin bundle). The core "CLI + skill, not MCP" decision stands.
+Status: the "first-class plugin — Deferred" option below was reversed by ADR 0026 (the harness then shipped as a self-contained plugin bundle). The core "CLI + skill, not MCP" decision was later reversed by the MCP migration (v0.42.0): odda is now a stdio MCP server (`odda mcp`) and the plugin/skill/harness-install surface is deleted — the MCP-tools option rejected below is the one that shipped.
 
 Claude Code offers a first-class MCP tool surface and a plugin/marketplace model that the other harnesses (OpenCode, pi, omp) do not. We chose to integrate Claude Code the same way as the others — the agent drives the `odda` CLI from the Bash tool, a `SessionStart` hook starts the server and writes `ODDA_SOCKET`/`ODDA_DATA_DIR`/`ODDA_LOG` into `$CLAUDE_ENV_FILE` (which Claude Code sources as a preamble before every Bash command), and the shared skill installs to `~/.claude/skills/odda/` — rather than exposing odda as typed MCP tools. The reason is cross-harness parity and reuse: one shared skill (reused verbatim), one CLI-first mental model across all four harnesses, and no new `odda mcp` core surface to build and maintain. Claude Code's only divergence is the env-injection vehicle (`$CLAUDE_ENV_FILE` instead of a per-shell-call hook), which is a one-hook difference, not a new surface.
 

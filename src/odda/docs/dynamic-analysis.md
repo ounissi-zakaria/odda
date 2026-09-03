@@ -144,7 +144,7 @@ So the workflow is: `coverage_start` → trigger → (optional `coverage_snapsho
 
 ### Coverage lifecycle and scope (distinctive)
 
-- **Per-tab.** Coverage state is per-tab: starting on one tab does not affect another. Multiple agents sharing one odda server do not disturb each other's recordings.
+- **Per-tab.** Coverage state is per-tab: starting on one tab does not affect another. Tabs in the same browser session are independent recordings.
 - **Navigation-persistent.** The recording survives main-frame navigation. The recording window is `[coverage_start, coverage_stop]` regardless of how many navigations happen inside it. This enables the primary workflow: `coverage_start` → `navigate` (to trigger the behavior under investigation) → `coverage_snapshot`/`coverage_stop`.
 - **Counts merge across loads.** Counts for the same script URL sum across navigations; different URLs get separate entries. To slice per-load, `coverage_snapshot` before the navigate and `coverage_snapshot` after, and subtract.
 - **Does not survive tab close.** Closing a tab clears its coverage state.

@@ -22,8 +22,11 @@ async def test_stdio_subprocess_round_trip(tmp_path: Path) -> None:
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "odda.mcp"],
-        cwd=str(Path(__file__).resolve().parents[2]),
-        env={**os.environ, "ODDA_DATA_DIR": str(tmp_path / ".odda")},
+        # cwd pins the data dir: resolve_data_dir() is cwd-`.odda`-relative
+        # (ODDA_DATA_DIR died with the CLI — ticket #07). tmp_path isolates
+        # the subprocess's flows/browsers from the repo's own .odda/.
+        cwd=str(tmp_path),
+        env={**os.environ},
     )
     async with Client(params) as client:
         tools = await client.list_tools()

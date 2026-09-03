@@ -1,6 +1,6 @@
 # Env injection: `spawnHook` on pi, `event.input.env` on omp — two mechanisms, two files
 
-Status: superseded by ADR 0024 (`process.env` inheritance, one mechanism, one file).
+Status: superseded by ADR 0024 (`process.env` inheritance, one mechanism, one file). The whole env-injection problem was later deleted by the MCP migration (v0.42.0): harnesses spawn `odda mcp` from their own MCP config; there is no socket and nothing to inject.
 
 The pi/omp extension must make `ODDA_SOCKET`, `ODDA_DATA_DIR`, and
 `ODDA_LOG` available to the agent's `odda` shell invocations. OpenCode has
