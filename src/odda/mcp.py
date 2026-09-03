@@ -127,12 +127,25 @@ async def odda_lifespan(
     same ownership order ``OddaServer.run`` uses — ``set_data_dir`` →
     ``ProxyServer()`` → ``BrowserManager(proxy=…)`` — minus the Unix
     socket, signal handlers, and parent watch that die with the CLI.
-    Proxy-script restore on boot is deferred to ticket #12.
+    Proxy-scripts are restored from disk before the yield (ticket #12):
+    the yield is the boot barrier — ``Server.run`` enters the lifespan
+    before driving the message loop (mcp 2.1.1 lowlevel server.py:
+    ``async with self.lifespan(...)`` precedes ``serve_dual_era_loop``),
+    and the in-process ``Client(server)`` path enters the lifespan the
+    same way before its dispatcher exists (mcp/client/client.py
+    ``_connect_inproc``). So no ``tools/call`` can arrive mid-restore:
+    restore runs to completion inside the synchronous startup block,
+    before the first frame is even read.
     """
     data_dir = resolve_data_dir()
     flowstore.set_data_dir(data_dir)
     proxy = ProxyServer()
     browser = BrowserManager(proxy=proxy)
+    # After BrowserManager, mirroring OddaServer.run's order: after
+    # set_data_dir so the manager sees the right .odda path, after
+    # ProxyServer so the DumpMaster addon chain is ready. A failing
+    # proxy-script is logged and skipped, never blocking boot.
+    proxy.restore_scripts_on_boot()
     try:
         yield OddaState(proxy=proxy, browser=browser)
     finally:

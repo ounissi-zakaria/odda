@@ -7,8 +7,8 @@ install (file + source modes), persistence under
 ``data_dir/proxy-scripts/<name>/script.py``, live-chain firing on real
 traffic, remove semantics, validation errors verbatim, capture honesty
 (FlowFileAddon ahead of user scripts), runtime hook errors, and the
-boot-restore contract (strict xfail: ticket #12 defers restore to the
-MCP lifespan).
+boot-restore contract (proxy-scripts re-added on MCP lifespan boot —
+ticket #12).
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ PS_MINIMAL = "def response(flow):\n    pass\n"
 PS_ADDHEADER = (
     'def response(flow):\n    flow.response.headers["x-odda-proxy-script"] = "fired"\n'
 )
+PS_BROKEN = "this is not python {{{"
 PS_REPLACED = (
     "def response(flow):\n"
     '    flow.response.headers["x-odda-proxy-script"] = "replaced"\n'
@@ -58,22 +59,6 @@ async def _fetch(opener, url: str) -> dict[str, str]:
             return {k.lower(): v for k, v in resp.headers.items()}
 
     return await asyncio.to_thread(_open)
-
-
-async def _settle() -> None:
-    """Let the mitmproxy master finish its startup checkpoints.
-
-    DumpMaster arms mitmproxy's ErrorCheck addon during ``run()``; an
-    ERROR-level log (proxy-script exec failure, a raising hook) landing
-    before the final startup checkpoint makes the master ``sys.exit(1)``
-    ("Error logged during startup"). Yielding the loop a bounded number
-    of times lets the already-running ``run()`` task pass its final
-    ``shutdown_if_errored`` (which uninstalls the handler) before the
-    test fires an error-producing call. Without this the same tests
-    race the startup window and fail nondeterministically.
-    """
-    for _ in range(20):
-        await asyncio.sleep(0)
 
 
 async def test_install_file_persists_source(odda_session, tmp_path) -> None:
@@ -203,7 +188,6 @@ async def test_exec_failure_errors(odda_session, tmp_path) -> None:
     bad = tmp_path / "ps_bad.py"
     bad.write_text("this is not python {{{")
     async with odda_session() as h:
-        await _settle()
         err = await h.call_error(
             "proxy_script_install", {"name": "bad", "file": str(bad), "force": True}
         )
@@ -222,7 +206,6 @@ async def test_runtime_hook_error_does_not_crash_proxy(odda_session, tmp_path) -
     ps = tmp_path / "ps_raise.py"
     ps.write_text(PS_RAISER)
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
-        await _settle()
         await h.call("proxy_script_install", {"name": "raiser", "file": str(ps)})
         proxy = await h.call("proxy_url", {})
 
@@ -263,13 +246,6 @@ async def test_capture_honesty_flowfile_ahead(odda_session, tmp_path) -> None:
         assert b"x-odda-injected" not in req.lower()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ticket #12: proxy-script restore on MCP lifespan boot is deferred; "
-        "this test flips to green when it lands"
-    ),
-)
 async def test_boot_restore_readds_persisted_script(odda_session, tmp_path) -> None:
     """A persisted proxy-script is re-added on server boot (ticket #12).
 
@@ -293,3 +269,37 @@ async def test_boot_restore_readds_persisted_script(odda_session, tmp_path) -> N
             opener = await _opener(h)
             hdrs = await _fetch(opener, f"{fx.base}/?marker=ps-restored")
             assert hdrs.get("x-odda-restored") == "yes"
+
+
+async def test_boot_with_broken_script_does_not_kill_session(
+    odda_session, tmp_path
+) -> None:
+    """A persisted proxy-script that fails to exec is skipped, not fatal.
+
+    The boot contract says "logged and skipped, never blocking boot".
+    This pins the harder half: mitmproxy's ErrorCheck would normally
+    sys.exit(1) the process on an ERROR logged during its startup
+    checkpoints; odda disarms it (library embedding, agent session),
+    so the session boots, lists the script as persisted, and serves
+    traffic through the proxy.
+    """
+    from tests.e2e.conftest import fixture_site
+
+    # Seed the data dir the way a previous session would leave it: a
+    # persisted script whose exec fails. (A live install would error
+    # and persist nothing, so write the file directly.)
+    script_dir = tmp_path / ".odda" / "proxy-scripts" / "broken"
+    script_dir.mkdir(parents=True)
+    (script_dir / "script.py").write_text(PS_BROKEN)
+
+    async with fixture_site(["index.html"]) as fx:
+        # Fresh session on the same data dir: the broken script's exec
+        # failure logs ERROR during lifespan boot — the session must
+        # survive it and the proxy must serve.
+        async with odda_session() as h:
+            r = await h.call("proxy_script_list", {})
+            assert "broken" in {s["name"] for s in r}
+
+            opener = await _opener(h)
+            hdrs = await _fetch(opener, f"{fx.base}/?marker=ps-broken-boot")
+            assert hdrs.get("content-type") == "text/html"
