@@ -117,9 +117,14 @@ async def odda_lifespan(
 mcp_server = MCPServer[OddaState](
     "odda",
     version=__version__,
+    # description → serverInfo block in the initialize result: the short
+    # "what is this server" label. instructions → initialize.instructions:
+    # the detailed brief the agent reads at connect time.
+    description="Browser automation and HTTP traffic capture for agents.",
     lifespan=odda_lifespan,
-    # Full instructions are ticket #07's (docs-as-resources); two lines
-    # for now per the map's docs-surface decision.
+    # Full instructions are ticket #07's (docs-as-resources); the
+    # orientation pointer stays brief per the map's docs-surface
+    # decision (instructions = 2 lines, six concept docs as resources).
     instructions=(
         "odda: browser automation + HTTP capture for agents. "
         "Start with browser_open; read odda:// resources for concepts."
