@@ -19,8 +19,10 @@ odda = "odda.cli:main"
 dev = [
     "ruff>=0.15.11",
     "hypercorn>=0.18.0",
+    "pytest>=9.0",
+    "pytest-asyncio>=1.0",
+    "pytest-xdist>=3.6",
 ]
-
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -115,10 +117,15 @@ split-on-trailing-comma = false
 "src/odda/wrap.py" = ["E501"]
 "src/odda/logpoint.py" = ["E501", "PLR0913"]
 "src/odda/render.py" = ["D103", "PERF401", "E501"]
-"tests/e2e/scrut/fixtures/dyn_asgi.py" = ["INP001", "ARG001", "S108"]
-"tests/e2e/scrut/fixtures/echo_path_h2server.py" = ["INP001", "S110"]
-"tests/e2e/scrut/fixtures/ws_header_h2server.py" = ["INP001", "S110"]
-"tests/e2e/scrut/fixtures/h2_cookie_client.py" = ["INP001"]
-"tests/e2e/scrut/fixtures/slow_load_server.py" = ["INP001"]
-"tests/e2e/scrut/fixtures/close_after_first_server.py" = ["INP001", "S110"]
-"tests/e2e/scrut/fixtures/close_without_response_server.py" = ["INP001", "S110"]
+"tests/e2e/conftest.py" = ["D107", "D403", "D205", "D209", "D202", "D402", "PLC0415", "S101", "S603", "S607", "SLF001", "SIM300", "E501", "E741", "TC003", "RUF100", "W292"]
+# F401's odda_session flagging is the import-shadow pattern (each test's
+# fixture parameter redefines the imported factory; ruff can't model
+# pytest fixtures) — covered by the F811 ignore; modules use it in-body.
+"tests/e2e/test_*.py" = ["S101", "PLR2004", "E501", "E741", "D415", "D403", "D205", "D209", "PLC0415", "RUF100", "RUF003", "RUF059", "SIM300", "W292", "INP001", "S105", "S311", "F811", "F401", "ARG001", "D301", "W605", "TC003"]
+"tests/e2e/fixtures/dyn_asgi.py" = ["INP001", "ARG001", "S108"]
+"tests/e2e/fixtures/echo_path_h2server.py" = ["INP001", "S110"]
+"tests/e2e/fixtures/ws_header_h2server.py" = ["INP001", "S110"]
+"tests/e2e/fixtures/h2_cookie_client.py" = ["INP001"]
+"tests/e2e/fixtures/slow_load_server.py" = ["INP001"]
+"tests/e2e/fixtures/close_after_first_server.py" = ["INP001", "S110"]
+"tests/e2e/fixtures/close_without_response_server.py" = ["INP001", "S110"]

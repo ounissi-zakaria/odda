@@ -4,5 +4,6 @@
 !src/
 !tests/
 !pyproject.toml
+!pytest.ini
 !uv.lock
 !README.md

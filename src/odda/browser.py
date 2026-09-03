@@ -533,6 +533,11 @@ class BrowserInstance:
                 raise BrowserOperationError(
                     f"Tab {tab_id} closed during wait-for."
                 ) from exc
+            if "timeout" in str(exc).lower() or "Timeout" in type(exc).__name__:
+                raise BrowserOperationError(
+                    f"Timeout after {timeout_ms}ms waiting for expression to "
+                    "become truthy"
+                ) from exc
             raise
         try:
             return await handle.json_value()

@@ -116,8 +116,13 @@ def set_data_dir(path: Path | str) -> None:
     Args:
         path: Directory path.
     """
-    global DATA_DIR
+    global DATA_DIR, _writer
     DATA_DIR = Path(path)
+    # The writer snapshots the flows dir at creation; a new data dir
+    # invalidates it (the MCP surface can host many sessions in one
+    # process — each lifespan re-points the data dir). It re-creates on
+    # next use, re-seeding the flow id counter from the new location.
+    _writer = None
 
 
 def _flows_dir() -> Path:

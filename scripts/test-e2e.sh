@@ -3,20 +3,20 @@
 # Always rebuilds the image (Docker layer cache makes this fast when nothing changed).
 #
 # Usage: ./scripts/test-e2e.sh [-j N] [TEST...]
-#   -j N     Run N test documents in parallel (default: 4).
-#            Each `scrut test <file>` runs in its own $PWD with its own
-#            odda server and auto-picked fixture port, so parallel docs
-#            never collide. Use -j 1 for sequential, -j 0 for unlimited.
-#            4 is the measured sweet spot: Chrome is CPU/memory heavy,
-#            so parallelism beyond ~4 stops helping on an 8-core box.
+#   -j N     Run N pytest-xdist workers (default: 4). Each worker runs its
+#            test modules sequentially with per-test tmp dirs, MCP sessions,
+#            Chrome instances, and auto-picked fixture ports, so parallel
+#            workers never collide. 4 is the measured sweet spot: Chrome is
+#            CPU/memory heavy, so parallelism beyond ~4 stops helping on an
+#            8-core box.
 #   TEST     One or more test files to run instead of the full suite.
-#            Each resolves to a file under tests/e2e/scrut/: a full path
-#            (tests/e2e/scrut/02-userscripts.md), a bare filename
-#            (02-userscripts.md), or a prefix (02 -> 02-userscripts.md).
-#            With no TEST args, runs every numbered doc in parallel.
+#            Each resolves to a file under tests/e2e/: a full path
+#            (tests/e2e/test_01_browser.py), a bare filename
+#            (test_01_browser.py), or a number prefix (01 -> test_01_browser.py).
+#            With no TEST args, runs every module.
 #            Typical agent workflow: run the one file you changed first
-#            (./scripts/test-e2e.sh 02), then the full suite to confirm
-#            nothing else broke (./scripts/test-e2e.sh).
+#            (./scripts/test-e2e.sh 01), then the full suite to confirm
+#            nothing else broke.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -39,34 +39,26 @@ if ! [[ "$JOBS" =~ ^[0-9]+$ ]]; then
   echo "error: -j requires a non-negative integer, got '$JOBS'" >&2
   exit 1
 fi
-TESTS=""
+
+PYTEST_ARGS=(tests/e2e -n "$JOBS" -q)
 if [ "$#" -gt 0 ]; then
+  SELECTED=()
   for arg in "$@"; do
-    # Accept full paths, bare filenames, or prefixes (02 -> 02-userscripts.md).
-    arg="${arg#tests/e2e/scrut/}"
-    # Try exact match first, then prefix glob. The glob also covers the
-    # case where the arg is a bare filename (02-userscripts.md*.md -> itself).
+    # Accept full paths, bare filenames, or number prefixes (01 ->
+    # test_01_browser.py): try the exact file, then test_<arg>*.py.
+    arg="${arg#tests/e2e/}"
     matches=""
-    [ -f "tests/e2e/scrut/$arg" ] && matches="tests/e2e/scrut/$arg"
+    [ -f "tests/e2e/$arg" ] && matches="tests/e2e/$arg"
     if [ -z "$matches" ]; then
-      matches=$(ls tests/e2e/scrut/"$arg"*.md 2>/dev/null | sort -u) || true
+      matches=$(ls tests/e2e/test_"$arg"*.py 2>/dev/null | sort -u) || true
     fi
     if [ -z "$matches" ]; then
-      echo "error: no test file matches '$arg' in tests/e2e/scrut/" >&2
+      echo "error: no test file matches '$arg' in tests/e2e/" >&2
       exit 1
     fi
-    TESTS="$TESTS $matches"
+    SELECTED+=($matches)
   done
+  PYTEST_ARGS=("${SELECTED[@]}")
 fi
 
-# Quote the test list safely for the inner shell; fall back to the glob
-# so the default (no args) runs every numbered doc.
-if [ -n "$TESTS" ]; then
-  TEST_FILES="printf '%s\n' $TESTS"
-else
-  TEST_FILES='ls tests/e2e/scrut/[0-9]*.md'
-fi
-
-docker run --rm "$IMAGE_TAG" bash -c "
-  $TEST_FILES | xargs -n1 -P $JOBS scrut test
-"
+docker run --rm "$IMAGE_TAG" pytest "${PYTEST_ARGS[@]}"
