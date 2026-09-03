@@ -15,7 +15,7 @@ _Avoid_: server instance, odda server, daemon
 ## Storage locations
 
 **Data dir**:
-`.odda/` under the MCP process's working directory — holds persisted project state: `flows/`, `requests/`, `browsers/`. Created lazily on the first state-producing call (browser open, request clone, etc.), not when the session starts. Absent until odda is actually used; read-only calls (`status`, `version`, `proxy_url`) never create it.
+`.odda/` under the MCP process's working directory — holds persisted project state: `flows/`, `requests/`, `browsers/`. Created lazily on the first state-producing call (browser open, request clone, etc.), not when the session starts. Absent until odda is actually used; read-only calls (`version`, `proxy_url`) never create it.
 _Avoid_: project dir, state dir, .odda dir
 
 ## Page interaction
@@ -93,16 +93,12 @@ A pytest module under `tests/e2e/` (`test_NN_<slug>.py`, one per former scrut do
 _Avoid_: test file, test script, test document
 
 **Test container**:
-A Docker image, built from `python:3.14-slim` + Google Chrome, that provides the complete environment for running the test suite. Contains `odda` installed on `$PATH`, Chrome, and all system tools the suite needs. Runs as a non-root user.
+A Docker image, built from `python:3.14-slim` + Google Chrome, kept as the seed for a future CI runner — not part of the documented workflow. The suite itself runs on the host against the host's Chrome (already required for usage).
 _Avoid_: test image, test box
 
 **Per-test session**:
 An MCP session entered inside a single test's body (in-process `Client` over the server object), owning one Chrome, one proxy, and one tmp data dir. Torn down at the test's end. No session state crosses test boundaries.
 _Avoid_: shared session, module fixture, per-doc server
-
-**Stdio leg**:
-The one test module that exercises a real `python -m odda.mcp` subprocess over stdio, exactly as a harness spawns it — pinning the transport wire without duplicating behavior coverage.
-_Avoid_: transport test, subprocess test
 
 **Fixture server**:
 A local server bound to `127.0.0.1` on an auto-picked port, started by a test as a real subprocess to provide a URL for browser navigation or proxy capture. Variants: a static file server, the dyn server, and raw-socket script servers. Torn down at the test's end.

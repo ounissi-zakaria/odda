@@ -1,4 +1,11 @@
 # Run e2e tests inside a Docker container
+Status: superseded as the documented runner — the suite now runs on the host
+(the MCP migration removed the shared-server/socket model whose isolation this
+defended), and `scripts/test-e2e.sh` is deleted (its prefix-selection and
+parallelism are native pytest now: `pytest <file>` selection, `-n 4` default in
+`pytest.ini` addopts). `tests/e2e/Dockerfile` is kept as the seed image for a
+future CI runner.
+
 
 The e2e suite runs inside a Docker image built from `python:3.14-slim` + Google Chrome,
 invoked via `scripts/test-e2e.sh`. This isolates the test odda from the developer's

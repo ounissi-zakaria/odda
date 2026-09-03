@@ -3,11 +3,11 @@
 Port of scrut 12-page-interaction.md. The snapshot is text (a
 YAML-ish a11y tree) with ``[ref=eN]`` tags (``[ref=f<frameSeq>eN]``
 inside iframes). Refs drive click/fill/hover/upload; click/hover
-also accept viewport coordinates as a raw trusted event. The
-CLI-only ``page fill --file`` / ``eval --file`` conveniences died
-with the CLI (value is a plain string); the behavioral contracts
-(event types, clears-first, stale-ref timing, iframe refs) are the
-ones asserted here.
+also accept viewport coordinates as a raw trusted event. ``fill``
+``value`` xor ``file`` is back on the MCP surface (file reads the
+payload from a server-side path); the behavioral contracts (event
+types, clears-first, stale-ref timing, iframe refs) are the ones
+asserted here.
 """
 
 from __future__ import annotations
@@ -218,19 +218,53 @@ async def test_page_fill_hover_upload_and_stale_ref(
         out = await h.eval(bid, tid, "document.getElementById('text-input').value")
         assert out == "world"
 
-        # Multiline value passed directly (the CLI's --file convenience
-        # died; value is a plain string) — newlines survive verbatim.
+        # Multiline payload from a file (value xor file is back): the
+        # file's exact bytes, newlines included, land in the textarea.
         aref = _pluck_ref(snap, "Paste here")
         payload = "<b>line1</b>\n<i>line2</i>\n<p>line3</p>"
+        payload_file = tmp_path / "fill-payload.html"
+        payload_file.write_text(payload)
         r = await h.call(
             "page_fill",
-            {"browser_id": bid, "tab_id": tid, "ref": aref, "value": payload},
+            {
+                "browser_id": bid,
+                "tab_id": tid,
+                "ref": aref,
+                "file": str(payload_file),
+            },
         )
         assert r["status"] == "filled" and r["ref"] == aref
         out = await h.eval(
             bid, tid, "JSON.stringify(document.getElementById('area-input').value)"
         )
         assert json.loads(out) == payload
+
+        # Both / neither / missing file: param-name messages.
+        err = await h.call_error(
+            "page_fill",
+            {
+                "browser_id": bid,
+                "tab_id": tid,
+                "ref": aref,
+                "value": "x",
+                "file": str(payload_file),
+            },
+        )
+        assert err == "Provide either value or file, not both"
+        err = await h.call_error(
+            "page_fill", {"browser_id": bid, "tab_id": tid, "ref": aref}
+        )
+        assert err == "Provide value <string> or file <path>"
+        err = await h.call_error(
+            "page_fill",
+            {
+                "browser_id": bid,
+                "tab_id": tid,
+                "ref": aref,
+                "file": str(tmp_path / "no-such.html"),
+            },
+        )
+        assert err.startswith("File not found:")
 
         # Hover the ref: mouseenter fires.
         href = _pluck_ref(snap, "Hover me")

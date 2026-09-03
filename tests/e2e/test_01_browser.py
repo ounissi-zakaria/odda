@@ -1,10 +1,10 @@
 """Port of scrut 01-browser.md: browser, tabs, navigation, eval, screenshot,
 event-listeners, wait-for.
 
-Dropped as CLI-only dead surface (per the port briefing): ``eval --file``
-(inline/file conflict + missing-file rejections) and the ``browser open
---help``/``--headless`` help-text pins. Everything else asserts on the
-structured tool results.
+``eval``'s file mode is back (brought back on the MCP surface: js xor
+file, param-name messages). Dropped as CLI-only dead surface (per the
+port briefing): the ``browser open --help``/``--headless`` help-text
+pins. Everything else asserts on the structured tool results.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 from tests.e2e.conftest import fixture_site
 
 
-async def test_browser_list_rows_and_status_tracking(odda_session) -> None:
+async def test_browser_list_rows_and_closing(odda_session) -> None:
     """browser_list returns one {browser_id, tab_count} row per browser; a
     second browser gets id 2, and closing it restores single-browser state."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
@@ -36,16 +36,8 @@ async def test_browser_list_rows_and_status_tracking(odda_session) -> None:
         await h.call("browser_close", {"browser_id": 2})
         assert await h.call("browser_list", {}) == [{"browser_id": 1, "tab_count": 1}]
 
-        # status.browser_count and browser_list's row count both derive
-        # from BrowserManager._instances, so they cannot drift.
-        r = await h.call("status", {})
-        assert r["browser_count"] == 1
-        assert len(await h.call("browser_list", {})) == r["browser_count"]
-
         await h.call("browser_close", {"browser_id": 1})
         assert await h.call("browser_list", {}) == []
-        r = await h.call("status", {})
-        assert r["browser_count"] == 0
 
 
 async def test_eval_runs_js_and_renders_values(odda_session) -> None:
@@ -66,6 +58,38 @@ async def test_eval_runs_js_and_renders_values(odda_session) -> None:
         text = await h.eval(bid, tid, "({a: 1})")
         assert json.loads(text) == {"a": 1}
         assert '"a": 1' in text
+
+
+async def test_eval_file_mode_and_validation(odda_session, tmp_path) -> None:
+    """eval js xor file: file reads a multi-line script from a server-side
+    path; both/neither combos and a missing file error with param-name
+    messages."""
+    async with odda_session() as h, fixture_site(["index.html"]) as fx:
+        bid, tid = await h.open_browser(f"{fx.base}/")
+
+        # file mode: multi-line IIFE, executed verbatim.
+        script = tmp_path / "probe.js"
+        script.write_text("(function () {\n  return 6 * 7;\n})()")
+        r = await h.call(
+            "eval", {"browser_id": bid, "tab_id": tid, "file": str(script)}
+        )
+        assert str(r).strip() == "42"
+
+        # both / neither / missing file.
+        err = await h.call_error(
+            "eval",
+            {"browser_id": bid, "tab_id": tid, "js": "1", "file": str(script)},
+        )
+        assert err == "Provide either js or file, not both"
+        err = await h.call_error("eval", {"browser_id": bid, "tab_id": tid})
+        assert err == "Provide js <code> or file <path>"
+        err = await h.call_error(
+            "eval",
+            {"browser_id": bid, "tab_id": tid, "file": str(tmp_path / "no-such.js")},
+        )
+        assert err.startswith("File not found:")
+
+        await h.call("browser_close", {"browser_id": bid})
 
 
 async def test_screenshot_default_and_output_path(odda_session, tmp_path) -> None:

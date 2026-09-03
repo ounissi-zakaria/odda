@@ -18,7 +18,7 @@
 uv tool install git+https://github.com/ounissi-zakaria/odda.git
 ```
 
-This installs the `odda` command (an MCP server plus two helper subcommands). Then register the server with your harness — one MCP config entry, and every odda capability becomes typed tools your agent can call.
+This installs the `odda` command (an MCP server plus one helper subcommand, with `--version` for the version probe). Then register the server with your harness — one MCP config entry, and every odda capability becomes typed tools your agent can call.
 
 ### Harness configuration
 
@@ -129,6 +129,6 @@ See the `odda://request-crafting` resource for framing details.
 ## How it works
 
 - `odda mcp` is the **only** odda process: a stdio MCP server whose lifespan owns the proxy, the browser manager, and the flow storage. Your harness spawns it per agent session; closing the session tears everything down.
-- The remaining CLI subcommands are helpers, not the automation surface: `odda version`, and `odda init-chrome-profile` (interactive, human-run).
+- The remaining CLI surface is helpers, not the automation surface: `odda init-chrome-profile` (interactive, human-run) and `odda --version`/`-V`.
 - Project state lives in `.odda/` under the MCP process's working directory: `flows/`, `requests/`, `browsers/`. It's created lazily on the first state-producing call, not when the server boots.
 - Errors from tools are odda's messages verbatim (as tool errors); unanticipated crashes log their traceback to the server's stderr, which the harness captures.

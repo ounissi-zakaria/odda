@@ -1107,11 +1107,6 @@ class BrowserManager:
         self._next_id: int = 1
         self.proxy = proxy
 
-    @property
-    def browser_count(self) -> int:
-        """Return the number of open browser instances."""
-        return len(self._instances)
-
     def list_instances(self) -> list[dict]:
         """List open browser instances with tab counts.
 

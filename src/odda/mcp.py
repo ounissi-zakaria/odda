@@ -336,12 +336,25 @@ async def navigate(
     )
 
 
+def _read_payload_file(file: str) -> str:
+    """Read a literal-vs-file payload: validate existence, read as UTF-8.
+
+    The exclusivity/required check lives in the caller (its param names
+    differ per tool); this is just the shared file leg.
+    """
+    path = Path(file)
+    if not path.is_file():
+        raise ToolParamError(f"File not found: {file}")
+    return path.read_text(encoding="utf-8")
+
+
 @mcp_server.tool()
 @odda_tool
 async def eval(
     browser_id: int,
     tab_id: int,
-    js: str,
+    js: str | None = None,
+    file: str | None = None,
     *,
     ctx: Context[OddaState],
 ) -> Any:
@@ -357,7 +370,17 @@ async def eval(
     until the JS expression resolves, so a hung expression blocks the
     call indefinitely; wrap long enumeration loops in a bounded
     Promise.race if you need a deadline.
+
+    js xor file: pass the code inline as js, or file to read a
+    multi-line script from a server-side path (avoids embedding a
+    large payload in the call; mutually exclusive).
     """
+    if js is not None and file is not None:
+        raise ToolParamError("Provide either js or file, not both")
+    if js is None and file is None:
+        raise ToolParamError("Provide js <code> or file <path>")
+    if file is not None:
+        js = _read_payload_file(file)
     return await ctx.request_context.lifespan_context.browser.eval_js(
         browser_id, tab_id, js
     )
@@ -463,11 +486,12 @@ async def page_click(  # noqa: PLR0913 — targeting + ref/coords union is the t
 
 @mcp_server.tool()
 @odda_tool
-async def page_fill(
+async def page_fill(  # noqa: PLR0913 — value xor file is the tool's contract
     browser_id: int,
     tab_id: int,
     ref: str,
-    value: str,
+    value: str | None = None,
+    file: str | None = None,
     timeout: float = 5.0,
     *,
     ctx: Context[OddaState],
@@ -478,8 +502,16 @@ async def page_fill(
     textareas, contenteditable elements, checkboxes ("true"/"false"),
     radios, and selects. The fill triggers input events (not change) —
     frameworks listening for change must be triggered otherwise.
+    value xor file: file reads the payload from a server-side path,
+    preserving newlines (mutually exclusive with the inline value).
     timeout: ref resolution + fill, seconds (default 5).
     """
+    if value is not None and file is not None:
+        raise ToolParamError("Provide either value or file, not both")
+    if value is None and file is None:
+        raise ToolParamError("Provide value <string> or file <path>")
+    if file is not None:
+        value = _read_payload_file(file)
     return await ctx.request_context.lifespan_context.browser.page_fill(
         browser_id, tab_id, ref, value, timeout_ms=timeout * 1000
     )
@@ -552,18 +584,6 @@ async def event_listeners(
     return await ctx.request_context.lifespan_context.browser.list_event_listeners(
         browser_id, tab_id
     )
-
-
-@mcp_server.tool()
-@odda_tool
-async def status(*, ctx: Context[OddaState]) -> dict[str, Any]:
-    """Show odda status: data dir, proxy URL, browser count."""
-    state = ctx.request_context.lifespan_context
-    return {
-        "data_dir": str(resolve_data_dir()),
-        "proxy_url": state.proxy.proxy_url,
-        "browser_count": state.browser.browser_count,
-    }
 
 
 @mcp_server.tool()
@@ -954,10 +974,7 @@ def _read_install_source(file: str | None, source: str | None, what: str) -> str
     if file is None and source is None:
         raise ToolParamError(f"Provide file <path> or source <{what}>")
     if file is not None:
-        path = Path(file)
-        if not path.is_file():
-            raise ToolParamError(f"File not found: {file}")
-        return path.read_text(encoding="utf-8")
+        return _read_payload_file(file)
     return source  # type: ignore[return-value]
 
 
