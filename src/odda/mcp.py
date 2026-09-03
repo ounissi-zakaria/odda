@@ -35,7 +35,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context  # noqa: TC002
 from mcp.server.mcpserver.exceptions import ToolError
 
-from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, rpc
+from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript, rpc
 from odda.browser import BrowserManager, BrowserOperationError
 from odda.proxy import ProxyServer
 from odda.request import (
@@ -566,12 +566,12 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
     """
     if repeat is not None and names is not None:
         raise ToolError(
-            "--repeat is single-name only; use --repeat with one --name, "
-            "or multi-name without --repeat (the combo is ambiguous)"
+            "repeat is single-name only; use repeat with one name, "
+            "or names (multi-name) without repeat (the combo is ambiguous)"
         )
     if repeat is not None and pipelining:
         raise ToolError(
-            "--repeat is concurrent; --pipelining is H1 multi-name "
+            "repeat is concurrent; pipelining is H1 multi-name "
             "sequential — they cannot be combined"
         )
     if names is not None and len(names) >= _PIPELINE_MIN_NAMES:
@@ -605,6 +605,349 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
 async def proxy_url(*, ctx: Context[OddaState]) -> str:
     """Return the HTTP proxy URL."""
     return ctx.request_context.lifespan_context.proxy.proxy_url
+
+
+# --- dynamic analysis: coverage ---
+
+
+@mcp_server.tool()
+@odda_tool
+async def coverage_start(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Enable precise block-level coverage on the target tab.
+
+    Per-tab; the recording window spans navigations (ADR-0005): flag,
+    accumulator, and CDP Profiler all survive a navigate, so the
+    workflow is start → navigate → snapshot/stop. Zero-hit blocks are
+    included (the negative space is as informative as the positive).
+    """
+    return await ctx.request_context.lifespan_context.browser.coverage_start(
+        browser_id, tab_id
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def coverage_snapshot(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Read per-block hit counts on the target tab without stopping.
+
+    Returns the delta since the previous take (or since start). Nested
+    records: scripts → functions → ranges, each range a block with a
+    hit count.
+    """
+    return await ctx.request_context.lifespan_context.browser.coverage_snapshot(
+        browser_id, tab_id
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def coverage_stop(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Take a final coverage snapshot and stop recording on the target tab.
+
+    Returns the cumulative counts for the whole window (the sum of
+    every take since start, including prior snapshots).
+    """
+    return await ctx.request_context.lifespan_context.browser.coverage_stop(
+        browser_id, tab_id
+    )
+
+
+# --- dynamic analysis: wraps ---
+
+
+@mcp_server.tool()
+@odda_tool
+async def wrap_calls_add(
+    browser_id: int, tab_id: int, name: str, expr: str, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Install a call wrap on a named function.
+
+    The wrap is a generated userscript: it takes effect on the next
+    navigation (document_start), reaching all frames. Each call is
+    recorded with receiver, arguments, return value, and call stack.
+    Leaf-only (ADR-0003): callbacks passed as arguments are recorded
+    as opaque refs, not themselves wrapped. Records wipe on navigation
+    (ADR-0004); the installation persists (per browser, ADR-0010).
+    """
+    return await ctx.request_context.lifespan_context.browser.wrap_calls_add(
+        browser_id, tab_id, name, expr
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def wrap_access_add(
+    browser_id: int, tab_id: int, name: str, expr: str, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Install an access wrap on a property accessor.
+
+    Records every get/set of the property with the receiver, the
+    value written (args[0] on a set), and the call stack. Same
+    userscript-backed lifecycle as wrap_calls_add: effective next
+    navigation, all frames, records wiped on navigation.
+    """
+    return await ctx.request_context.lifespan_context.browser.wrap_access_add(
+        browser_id, tab_id, name, expr
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def wrap_list(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
+    """List installed wraps (name, type, expr) for the browser."""
+    return await ctx.request_context.lifespan_context.browser.wrap_list(
+        browser_id, tab_id
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def wrap_remove(
+    browser_id: int, tab_id: int, name: str, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Remove a wrap's userscript and reload the extension.
+
+    The wrap stops recording on future navigations; already-recorded
+    entries in the dump array are unaffected.
+    """
+    return await ctx.request_context.lifespan_context.browser.wrap_remove(
+        browser_id, tab_id, name
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def wrap_dump(
+    browser_id: int, tab_id: int, name: str | None = None, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
+    """Read the per-tab wrap record array.
+
+    Each record: wrap name, type (call/access), args, ret, this,
+    stack. Function values in args/ret are opaque refs {type:
+    "function", name, source}; large or cyclic values are truncated.
+    Use name to filter to one wrap's records.
+    """
+    return await ctx.request_context.lifespan_context.browser.wrap_dump(
+        browser_id, tab_id, name
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def wrap_clear(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Zero the per-tab wrap record array without navigating."""
+    return await ctx.request_context.lifespan_context.browser.wrap_clear(
+        browser_id, tab_id
+    )
+
+
+# --- dynamic analysis: logpoints ---
+
+
+@mcp_server.tool()
+@odda_tool
+async def logpoint_add(  # noqa: PLR0913 — targeting + url/line/col/expr is the tool's contract
+    browser_id: int,
+    tab_id: int,
+    url: str,
+    line: int,
+    col: int,
+    expr: str,
+    *,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Plant a non-pausing logpoint at a source location.
+
+    A CDP breakpoint evaluates expr in the paused-then-immediately-
+    resumed frame's scope at each hit and records the result; the
+    page never pauses. line and col are 0-based (minified code packs
+    many statements per line, so the column picks the statement).
+    Persists until explicitly removed; re-binds on navigation; does
+    not survive tab close (per-tab-session, ADR-0004).
+    """
+    return await ctx.request_context.lifespan_context.browser.logpoint_add(
+        browser_id, tab_id, url, line, col, expr
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def logpoint_list(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
+    """List planted logpoints on the target tab."""
+    return await ctx.request_context.lifespan_context.browser.logpoint_list(
+        browser_id, tab_id
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def logpoint_remove(
+    browser_id: int, tab_id: int, lp_id: str, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Remove a logpoint's CDP breakpoint and registry entry."""
+    return await ctx.request_context.lifespan_context.browser.logpoint_remove(
+        browser_id, tab_id, lp_id
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def logpoint_dump(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
+    """Read the per-tab logpoint record array.
+
+    Each record: logpoint id, url, line, col, value (or null when the
+    expression threw), error (null on success). Records accumulate
+    across hits within one page load and wipe on navigation.
+    """
+    return await ctx.request_context.lifespan_context.browser.logpoint_dump(
+        browser_id, tab_id
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def logpoint_clear(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Zero the per-tab logpoint record array without navigating."""
+    return await ctx.request_context.lifespan_context.browser.logpoint_clear(
+        browser_id, tab_id
+    )
+
+
+# --- dynamic analysis: userscripts ---
+
+
+def _read_install_source(file: str | None, source: str | None, what: str) -> str:
+    """Resolve an install payload's source: file xor inline, both validated.
+
+    The CLI's flag checks move here — the tool is the surface now and
+    a missing file must read as odda's message, not an SDK crash.
+    """
+    if file is not None and source is not None:
+        raise rpc.JsonRpcError(
+            rpc.INVALID_PARAMS, "Provide either file or source, not both"
+        )
+    if file is None and source is None:
+        raise rpc.JsonRpcError(
+            rpc.INVALID_PARAMS, f"Provide file <path> or source <{what}>"
+        )
+    if file is not None:
+        path = Path(file)
+        if not path.is_file():
+            raise rpc.JsonRpcError(rpc.INVALID_PARAMS, f"File not found: {file}")
+        return path.read_text(encoding="utf-8")
+    return source  # type: ignore[return-value]
+
+
+@mcp_server.tool()
+@odda_tool
+async def userscript_install(
+    browser_id: int,
+    name: str,
+    file: str | None = None,
+    source: str | None = None,
+    *,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Install a userscript into the given browser's scope.
+
+    Runs at document_start in the main world on every page, before
+    the page's own scripts; reaches all frames. Overwrites any
+    existing userscript of the same name. The browser's extension
+    reloads; already-loaded tabs are not re-injected (re-navigate to
+    apply). Scope is per-browser (ADR-0010): a userscript on browser 1
+    does not reach browser 2. Either file (read by the server) or
+    inline source, not both.
+    """
+    js = _read_install_source(file, source, "js")
+    if not js.strip():
+        raise rpc.JsonRpcError(rpc.INVALID_PARAMS, "source is empty")
+    return await ctx.request_context.lifespan_context.browser.install_userscript(
+        browser_id, name, js
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def userscript_list(
+    browser_id: int, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
+    """List installed userscripts for one browser (name, size)."""
+    return ctx.request_context.lifespan_context.browser.list_userscripts(browser_id)
+
+
+@mcp_server.tool()
+@odda_tool
+async def userscript_remove(
+    browser_id: int, name: str, *, ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Remove a userscript from the given browser's scope and reload its extension."""
+    return await ctx.request_context.lifespan_context.browser.remove_userscript(
+        browser_id, name
+    )
+
+
+# --- dynamic analysis: proxy-scripts ---
+
+
+@mcp_server.tool()
+@odda_tool
+async def proxy_script_install(
+    name: str,
+    file: str | None = None,
+    source: str | None = None,
+    *,
+    force: bool = False,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Install a proxy-script (mitmproxy addon) from a file or inline source.
+
+    The source is a mitmproxy ``-s`` script: its module namespace is
+    the addon (top-level request/response/load/running/... hooks, or
+    an ``addons = [...]`` list). odda execs it in this server process,
+    so it has full process privileges. Overwrite is gated by force.
+    Persisted under ``<data_dir>/proxy-scripts/<name>/script.py`` and
+    re-added on server boot. Scope is global: one proxy shared across
+    all browsers (ADR-0018).
+    """
+    py = _read_install_source(file, source, "py")
+    if not py.strip():
+        raise rpc.JsonRpcError(rpc.INVALID_PARAMS, "source is empty")
+    if not force and proxyscript.name_exists(name):
+        raise rpc.JsonRpcError(
+            rpc.INVALID_PARAMS,
+            f"Proxy-script '{name}' already installed. Use force to overwrite.",
+        )
+    return ctx.request_context.lifespan_context.proxy.install_script(name, py)
+
+
+@mcp_server.tool()
+@odda_tool
+async def proxy_script_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
+    """List installed proxy-scripts (from disk, annotated with live state)."""
+    return ctx.request_context.lifespan_context.proxy.list_scripts()
+
+
+@mcp_server.tool()
+@odda_tool
+async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
+    """Remove a proxy-script: live instance + on-disk source."""
+    return ctx.request_context.lifespan_context.proxy.remove_script(name)
 
 
 def main() -> None:
