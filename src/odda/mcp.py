@@ -675,7 +675,7 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Send editable request(s) and record each response as a flow.
 
-    Three modes, exactly as the CLI's ``--name`` arity selected:
+    Three modes, selected by argument arity:
 
     - single (``name``): frozen single-shot — one request, one flow
       record (a dict). Errors are recorded as error flows (status_code
@@ -690,10 +690,8 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
       last-byte single-packet, H1 parallel connections). Returns a
       list, one flow per copy.
 
-    See ADR-0019/0020/0021 (docs/adr/) for the semantics this port
-    honors verbatim: two-phase durability, mid-sequence abort policy,
-    per-stream error isolation, the one-request-one-response flow
-    model, and the H2-only line-terminator constraint.
+    See the ``odda://request-crafting`` resource for the full send
+    semantics (pipeline modes, error flows, line-terminator).
     """
     if repeat is not None and names is not None:
         raise ToolError(
@@ -748,10 +746,10 @@ async def coverage_start(
 ) -> dict[str, Any]:
     """Enable precise block-level coverage on the target tab.
 
-    Per-tab; the recording window spans navigations (ADR-0005): flag,
-    accumulator, and CDP Profiler all survive a navigate, so the
-    workflow is start → navigate → snapshot/stop. Zero-hit blocks are
-    included (the negative space is as informative as the positive).
+    Per-tab; the recording window spans navigations: flag, accumulator,
+    and CDP Profiler all survive a navigate, so the workflow is
+    start → navigate → snapshot/stop. Zero-hit blocks are included (the
+    negative space is as informative as the positive).
     """
     return await ctx.request_context.lifespan_context.browser.coverage_start(
         browser_id, tab_id
@@ -802,9 +800,9 @@ async def wrap_calls_add(
     The wrap is a generated userscript: it takes effect on the next
     navigation (document_start), reaching all frames. Each call is
     recorded with receiver, arguments, return value, and call stack.
-    Leaf-only (ADR-0003): callbacks passed as arguments are recorded
-    as opaque refs, not themselves wrapped. Records wipe on navigation
-    (ADR-0004); the installation persists (per browser, ADR-0010).
+    Leaf-only: callbacks passed as arguments are recorded as opaque
+    refs, not themselves wrapped. Records wipe on navigation; the
+    installation persists (per browser).
     """
     return await ctx.request_context.lifespan_context.browser.wrap_calls_add(
         browser_id, tab_id, name, expr
@@ -904,7 +902,7 @@ async def logpoint_add(  # noqa: PLR0913 — targeting + url/line/col/expr is th
     page never pauses. line and col are 0-based (minified code packs
     many statements per line, so the column picks the statement).
     Persists until explicitly removed; re-binds on navigation; does
-    not survive tab close (per-tab-session, ADR-0004).
+    not survive tab close (per-tab-session).
     """
     return await ctx.request_context.lifespan_context.browser.logpoint_add(
         browser_id, tab_id, url, line, col, expr
@@ -994,7 +992,7 @@ async def userscript_install(
     the page's own scripts; reaches all frames. Overwrites any
     existing userscript of the same name. The browser's extension
     reloads; already-loaded tabs are not re-injected (re-navigate to
-    apply). Scope is per-browser (ADR-0010): a userscript on browser 1
+    apply). Scope is per-browser: a userscript on browser 1
     does not reach browser 2. Either file (read by the server) or
     inline source, not both.
     """
@@ -1047,7 +1045,7 @@ async def proxy_script_install(
     so it has full process privileges. Overwrite is gated by force.
     Persisted under ``<data_dir>/proxy-scripts/<name>/script.py`` and
     re-added on server boot. Scope is global: one proxy shared across
-    all browsers (ADR-0018).
+    all browsers.
     """
     py = _read_install_source(file, source, "py")
     if not py.strip():
