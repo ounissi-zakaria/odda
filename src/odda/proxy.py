@@ -38,6 +38,18 @@ class ProxyServer:
         # See docs/adr/0007-proxy-ssl-insecure.md.
         self.options.ssl_insecure = True
         self.m = DumpMaster(self.options, with_termlog=False, with_dumper=False)
+        # DumpMaster ships mitmproxy's ErrorCheck addon: any ERROR-level
+        # log record during its startup checkpoints sys.exit(1)s the
+        # process. That is CLI UX (a human watching a console); odda is a
+        # library embedding DumpMaster, and the MCP process is an agent's
+        # session — a broken persisted proxy-script (logged, then skipped
+        # per its contract) or any stray startup ERROR must not kill the
+        # session. Disarm it: out of the addon chain (no checkpoints) and
+        # its global log handler uninstalled.
+        errorcheck = self.m.addons.get("errorcheck")
+        if errorcheck is not None:
+            self.m.addons.remove(errorcheck)
+            errorcheck.finish()
         # Real-world servers send non-conformant HTTP/2 header values (e.g.
         # ` IE=Edge`); the h2 library rejects those and mitmproxy 502s. Skip
         # inbound header validation to accept them. Set after DumpMaster

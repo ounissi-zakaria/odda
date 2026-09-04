@@ -10,7 +10,7 @@ roughly 2-5% of runs even at `-j1`. The failures were upstream latency
 jitter, not a proxy or code bug.
 
 We replaced the remote dependency with a local dyn server: a ~15-line
-ASGI app (`tests/e2e/scrut/fixtures/dyn_asgi.py`) serving the same
+ASGI app (`tests/e2e/fixtures/dyn_asgi.py`) serving the same
 dynamic-response contract, run under [hypercorn](https://hypercorn.readthedocs.io/)
 (a dev dependency) which speaks HTTP/1.1 and HTTP/2 over TLS via ALPN.
 The cert is self-signed and generated at launch. This eliminates the

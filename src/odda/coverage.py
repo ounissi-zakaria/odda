@@ -1,6 +1,6 @@
 """Block-level code coverage via the CDP Profiler domain.
 
-Wraps the four CDP ``Profiler`` calls used by ``odda coverage``:
+Wraps the four CDP ``Profiler`` calls used by the coverage tools:
 
 - ``Profiler.enable`` — turn on the Profiler domain (required before
   any other Profiler command).
@@ -12,8 +12,8 @@ Wraps the four CDP ``Profiler`` calls used by ``odda coverage``:
   the delta since the previous take, not a cumulative total.
 - ``Profiler.stop`` — end the recording window.
 
-Because ``takePreciseCoverage`` returns deltas, ``odda coverage``
-accumulates counts server-side so ``stop`` can return the cumulative
+Because ``takePreciseCoverage`` returns deltas, the coverage tools
+accumulate counts session-side so ``stop`` can return the cumulative
 counts for the whole recording window (per the PRD: "Coverage returns
 raw counts for the recording window; the agent slices as needed").
 ``snapshot`` returns the raw delta since the previous take, so the

@@ -1,6 +1,6 @@
 # odda
 
-`odda` is a toolkit for agent-driven web security research — Burp Suite and DevTools, composable from bash. It gives an AI agent a real Chrome it can drive and observe, a transparent mitmproxy that writes every flow to disk, and a raw-HTTP send path for smuggling and race conditions. Every command prints text both you and the agent can read.
+`odda` is a toolkit for agent-driven web security research, composable from a single MCP server. It gives an AI agent a real Chrome it can drive and observe, a transparent mitmproxy that writes every flow to disk, and a raw-HTTP send path for smuggling and race conditions.
 
 - **Drive Chrome** — open, navigate, run JS, screenshot, and interact with the page by accessibility-tree refs.
 - **Capture every flow** — a transparent proxy writes every request/response to disk, including media bodies browser capture drops.
@@ -16,10 +16,52 @@
 
 ```bash
 uv tool install git+https://github.com/ounissi-zakaria/odda.git
-odda install opencode   # or: odda install pi | odda install omp | odda install claude
 ```
 
-The first command installs the `odda` CLI globally. The second copies the plugin + skill into your harness's config directory (`~/.config/opencode/`, `~/.pi/agent/`, `~/.omp/agent/`, or `~/.claude/skills/odda/`) so an AI agent session auto-starts the odda server and learns the command surface. For Claude Code, `odda install claude` writes a self-contained first-class plugin bundle (a `.claude-plugin/plugin.json` manifest plus a `SessionStart` hook and the shared skill) that Claude Code auto-loads from `~/.claude/skills/` — no marketplace and `~/.claude/settings.json` is never touched.
+This installs the `odda` command (an MCP server plus one helper subcommand, with `--version` for the version probe). Then register the server with your harness — one MCP config entry, and every odda capability becomes typed tools your agent can call.
+
+### Harness configuration
+
+All configs spawn the same stdio server: `odda mcp`. One MCP process = one odda session with its own Chrome, proxy, and `.odda/` data dir (created lazily under the process's working directory on first use).
+
+**Claude Code** — project `.mcp.json` (or `~/.claude.json` under `mcpServers`):
+
+```json
+{
+  "mcpServers": {
+    "odda": {
+      "command": "odda",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**OpenCode** — `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "odda": {
+      "type": "local",
+      "command": ["odda", "mcp"]
+    }
+  }
+}
+```
+
+**pi** — install the MCP adapter once (`pi install npm:pi-mcp-adapter`), then add to project `.mcp.json` (same `mcpServers` shape as Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "odda": {
+      "command": "odda",
+      "args": ["mcp"]
+    }
+  }
+}
+```
 
 ### Chrome profile (one-time)
 
@@ -29,43 +71,22 @@ To give odda's isolated browser sessions a base profile (cookies, extensions, pr
 odda init-chrome-profile
 ```
 
-This opens a visible Chrome window pointed at odda's base profile directory. Log in, install extensions, and set preferences as you want them; close the window when done. odda copies this profile into each isolated browser session opened by `odda browser open`. Skip this step to start from a clean profile each time.
+This opens a visible Chrome window pointed at odda's base profile directory. Log in, install extensions, and set preferences as you want them; close the window when done. odda copies this profile into each isolated browser session opened by `browser_open`. Skip this step to start from a clean profile each time.
 
 ## Usage
 
-From inside an OpenCode (or pi / omp / Claude Code) session, the plugin starts the server and injects `ODDA_SOCKET` / `ODDA_DATA_DIR` for you. A typical loop:
+Agents drive odda through the MCP tools (`browser_open`, `navigate`, `page_snapshot`, `request_send`, ...). IDs are integers, monotonic within a session, and never reused; every browser/tab tool takes explicit `browser_id` / `tab_id` parameters.
 
-```bash
-odda browser open                              # returns {browser_id, tab_id}
-odda navigate --url https://example.com --browser-id 1 --tab-id 1
-odda screenshot --browser-id 1 --tab-id 1      # writes a JPEG
-odda eval --js "document.title" --browser-id 1 --tab-id 1
+A typical session:
+
+```
+browser_open          → {browser_id, tab_id}
+navigate              → tab loads https://target.example/
+read .odda/flows/flows.jsonl     → every request/response captured on disk
+request_clone + request_send           → the Burp Repeater loop, as tools
 ```
 
-Every browser/tab command takes an explicit `--browser-id` and tab-scoped commands also take `--tab-id`. IDs are integers, monotonic, and never reused, so multiple agents can share one odda server without racing on a shared cursor.
-
-### Replay and modify a captured request
-
-All browser traffic is routed through odda's proxy and captured as flows under `.odda/flows/<id>/`. Clone one, edit the raw bytes, and resend it — the core "Burp Repeater" loop, from bash:
-
-```bash
-odda browser open
-odda navigate --url https://target.example/ --browser-id 1 --tab-id 1
-# Find the captured flow's id in the index:
-rg target.example .odda/flows/flows.jsonl | tail -1
-odda request clone --flow-id <flow-id> --name admin
-# Have the agent edit .odda/requests/admin/request with its edit tool —
-# set Host: localhost (keep CRLF line endings; heredocs emit \n and fail on the wire):
-#   GET /admin HTTP/1.1\r\n
-#   Host: localhost\r\n
-#   Cookie: session=...\r\n
-#   \r\n
-odda request send --name admin                  # records the response as a new flow
-# Read the response body:
-cat .odda/flows/<new-id>/response_body.*
-```
-
-To run without a harness, start the server manually: `odda server --socket /tmp/odda.sock --data-dir ./.odda --parent-pid $$`, then export `ODDA_SOCKET=/tmp/odda.sock` before the client commands.
+All captured traffic is stored under `.odda/flows/<id>/` — request bytes, response body, headers, timing — plus the append-only `flows.jsonl` index. Grep the index to find flows; read `.odda/flows/<id>/response_body.*` for the body (including image/video/audio/font Content-Types that browser capture drops).
 
 ## Features
 
@@ -73,21 +94,14 @@ To run without a harness, start the server manually: `odda server --socket /tmp/
 
 A real Chrome (via patchright/Playwright), headless by default:
 
-- **Open / navigate / eval / screenshot / wait-for** — drive the browser and run JS in the page.
-- **Ref-driven page interaction** — `page snapshot` returns the accessibility tree with `[ref=eN]` tags; pass the ref to `page click` / `fill` / `hover` / `upload`. `click` and `hover` also accept viewport coordinates (`-x`/`-y`) as a raw trusted event for targets the a11y tree can't name. Cross-iframe is transparent.
+- **Open / navigate / eval / wait-for / screenshot** — drive the browser and run JS in the page.
+- **Ref-driven page interaction** — `page_snapshot` returns the accessibility tree with `[ref=eN]` tags; pass the ref to `page_click` / `page_fill` / `page_hover` / `page_upload`. `page_click` and `page_hover` also accept viewport coordinates as a raw trusted event for targets the a11y tree can't name. Cross-iframe is transparent.
 - **Per-browser userscripts** — JS that auto-runs at `document_start` on every navigation, before the page's own scripts.
 - **Dialog interceptor** — `alert` / `confirm` / `prompt` / `print` proceed by default and are recorded for inspection.
 
 ### Capture every flow
 
-A transparent mitmproxy sits between Chrome and the network; driving the browser *is* traffic capture:
-
-- Every request/response is saved under `.odda/flows/<id>/` — request bytes, response body, headers, timing.
-- `flows.jsonl` is the append-only index; grep it to find flows by host, method, or path.
-- Response bodies are stored as files — including image, video, audio, and font Content-Types that browser capture drops.
-- Read the body directly: `.odda/flows/<id>/response_body.*`.
-
-See the in-repo [FLOWS.md](src/odda/harness/skill/FLOWS.md) for the file layout and schema.
+A transparent mitmproxy sits between Chrome and the network; driving the browser *is* traffic capture. Every request/response is saved under `.odda/flows/<id>/`; the index is `.odda/flows/flows.jsonl`. See the `odda://docs/flows` resource for the file layout and schema.
 
 ### Observe JS in progress
 
@@ -97,25 +111,24 @@ Three lenses, chosen by what you know:
 - **Logpoint** — plant a non-pausing observation at a source `url` + `line` + `col`; the expression is evaluated in the paused frame's scope, so it reads locals by name.
 - **Coverage** — record which code blocks execute across one or more navigations; start, trigger behavior, snapshot or stop.
 
-Wrap and Logpoint records wipe on navigation — dump before navigating again. See [DYNAMIC-ANALYSIS.md](src/odda/harness/skill/DYNAMIC-ANALYSIS.md) for the full surface, and [recipes/dom-data-flow-tracing.md](src/odda/harness/skill/recipes/dom-data-flow-tracing.md) for a worked example tracing untrusted DOM data to a sink.
+Wrap and Logpoint records wipe on navigation — dump before navigating again. The `odda://docs/dynamic-analysis` resource documents the full surface; `odda://docs/recipes` has a worked example tracing untrusted DOM data to a sink.
 
 ### Craft raw HTTP
 
-Byte-faithful raw HTTP sends, bypassing the browser — the Burp Repeater model, scriptable:
+Byte-faithful raw HTTP sends, bypassing the browser — the Burp Repeater model, as tools:
 
 - **Wire-verbatim HTTP/1.1** — the request file *is* the wire; nothing is re-framed.
-- **HTTP/2 frame-source** — the request file is parsed into H2 frames; a custom `--line-terminator` lets a literal CRLF live inside an H2 pseudo-header for downgrade smuggling.
-- **Clone or craft** — `request clone --flow-id` copies a captured flow's exact bytes; `request new` starts an empty file.
-- **Multi-name pipeline** — repeat `--name` to send several requests on one connection (H1 keep-alive, or H2 concurrent stream-multiplex) for same-connection attacks.
-- **Concurrent send** — `--repeat N` fires N copies of one request concurrently for race conditions and limit-overrun attacks.
-- **`--fix-content-length`** — recompute Content-Length after body edits.
+- **HTTP/2 frame-source** — the request file is parsed into H2 frames; a custom line terminator lets a literal CRLF live inside an H2 pseudo-header for downgrade smuggling.
+- **Clone or craft** — `request_clone` copies a captured flow's exact bytes; `request_new` starts an empty file.
+- **Multi-name pipeline** — pass several names to send several requests on one connection (H1 keep-alive, or H2 concurrent stream-multiplex) for same-connection attacks.
+- **Concurrent send** — `repeat` fires N copies of one request concurrently for race conditions and limit-overrun attacks.
+- **`fix_content_length`** — recompute Content-Length after body edits.
 
-See [REQUEST.md](src/odda/harness/skill/REQUEST.md) for framing details and [recipes/race-conditions.md](src/odda/harness/skill/recipes/race-conditions.md) for a worked race.
+See the `odda://docs/request-crafting` resource for framing details.
 
 ## How it works
 
-- odda runs a **background server** (`odda server`) that holds the proxy, the browser instances, and the captured-flow state in one process.
-- The **CLI** commands talk to it over a Unix socket via JSON-RPC — every `odda <command>` is one short-lived client call.
-- A **harness plugin** (OpenCode / pi / omp / Claude Code) starts the server at session load and injects `ODDA_SOCKET` + `ODDA_DATA_DIR` into every shell the agent runs, so you almost never run `odda server` yourself.
-
-Project state lives in `.odda/` in the working directory: `flows/`, `requests/`, `browsers/`. It's created lazily on the first state-producing command, not when the server boots.
+- `odda mcp` is the **only** odda process: a stdio MCP server whose lifespan owns the proxy, the browser manager, and the flow storage. Your harness spawns it per agent session; closing the session tears everything down.
+- The remaining CLI surface is helpers, not the automation surface: `odda init-chrome-profile` (interactive, human-run) and `odda --version`/`-V`.
+- Project state lives in `.odda/` under the MCP process's working directory: `flows/`, `requests/`, `browsers/`. It's created lazily on the first state-producing call, not when the server boots.
+- Errors from tools are odda's messages verbatim (as tool errors); unanticipated crashes log their traceback to the server's stderr, which the harness captures.

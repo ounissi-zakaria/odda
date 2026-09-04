@@ -374,9 +374,9 @@ async def send_pipeline(
 
     if is_h2_all and pipelining:
         msg = (
-            "--pipelining is HTTP/1.1 multi-name only (send-all-then-read-all "
+            "pipelining is HTTP/1.1 multi-name only (send-all-then-read-all "
             "sequential); HTTP/2 multi-name is already concurrent "
-            "stream-multiplex — drop --pipelining for H2"
+            "stream-multiplex — drop pipelining for H2"
         )
         raise ValueError(msg)
 
@@ -559,8 +559,8 @@ async def send_repeat(
     Pre-emptive rejections (before the socket opens):
 
     - ``repeat`` < 2 → error (use single-name ``send`` for one request).
-    - ``--pipelining`` is rejected (``--repeat`` is concurrent;
-      ``--pipelining`` is H1 multi-name sequential).
+    - ``pipelining`` is rejected (``repeat`` is concurrent;
+      ``pipelining`` is H1 multi-name sequential).
 
     Error policy (ADR-0020): per-stream errors are isolated (one stream's
     failure does not abort the others); a connection-level error (H2
@@ -581,8 +581,8 @@ async def send_repeat(
     """
     if repeat < 2:
         msg = (
-            f"--repeat must be >= 2 (got {repeat}); for a single request "
-            "use `request send --name <name>` without --repeat"
+            f"repeat must be >= 2 (got {repeat}); for a single request "
+            "use `request_send` with one name and no repeat"
         )
         raise ValueError(msg)
 

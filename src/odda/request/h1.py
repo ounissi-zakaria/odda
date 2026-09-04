@@ -73,7 +73,7 @@ async def _read_until_headers_end(
         # plain TCP socket, or ``ssl.SSLError`` over a TLS connection (e.g.
         # an unexpected close mid-handshake/mid-read) — rather than a clean
         # EOF (``IncompleteReadError``). This happens most often under load
-        # in the ``--pipelining`` write-all path: the server reads request
+        # in the ``pipelining`` write-all path: the server reads request
         # 1, responds, and closes while the client is still writing/draining
         # the pipelined follow-ups, so the reader observes a reset before
         # any headers. ``asyncio.LimitOverrunError`` is a ``ValueError``,

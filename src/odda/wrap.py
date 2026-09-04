@@ -36,7 +36,8 @@ if TYPE_CHECKING:
 
 WRAP_USERSCRIPT_PREFIX = "__odda-wrap__"
 
-# Serialization limits (implementation details; documented in SKILL.md).
+# Serialization limits (implementation details; documented in the
+# odda://docs/dynamic-analysis resource).
 _MAX_DEPTH = 5
 _MAX_ARRAY = 100
 _MAX_OBJECT_KEYS = 50
@@ -142,7 +143,7 @@ if (!window.__oddaStack) {
   };
 }
 // Records aggregate to the top frame's __oddaWrap when accessible
-// (same-origin iframes), so `odda wrap dump` reading the main frame
+// (same-origin iframes), so `wrap_dump` reading the main frame
 // sees records from all same-origin frames. Cross-origin iframes
 // can't reach window.top, so they keep their own __oddaWrap (the
 // wrap still runs there; the agent reads those records by evaluating

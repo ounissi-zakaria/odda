@@ -1,9 +1,12 @@
+# e2e seed image: Chrome + all system deps for the suite. The documented
+# runner is host pytest (`pytest tests/e2e -n 4`); this image is kept as the
+# ready-made environment for a future CI runner.
 FROM python:3.14-slim
 
 # System deps: curl for install scripts, gnupg for Chrome repo signing,
-# procps for pkill/pgrep used in test teardown
+# openssl for the e2e suite's self-signed fixture certs
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl gnupg procps \
+    curl gnupg openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Google Chrome from Google's apt repo
@@ -19,11 +22,6 @@ RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && cp /root/.local/bin/uv /usr/local/bin/uv
 
-# scrut (official install script, latest version)
-RUN curl --proto '=https' --tlsv1.2 -sSf \
-    https://facebookincubator.github.io/scrut/install.sh \
-    | sh -s -- -p /usr/local/bin
-
 # Non-root user for Chrome
 RUN useradd -m -s /bin/bash odda \
     && mkdir -p /app && chown odda:odda /app
@@ -31,7 +29,7 @@ RUN useradd -m -s /bin/bash odda \
 WORKDIR /app
 
 # Deps layer: copy manifest + lockfile, create venv (cached when only source changes)
-COPY --chown=odda:odda pyproject.toml uv.lock ./
+COPY --chown=odda:odda pyproject.toml uv.lock pytest.ini ./
 USER odda
 RUN uv venv
 
@@ -43,4 +41,4 @@ RUN uv pip install --no-cache -e ".[dev]"
 
 ENV PATH="/app/.venv/bin:${PATH}"
 
-CMD ["scrut", "test", "tests/e2e/scrut/"]
+CMD ["pytest", "tests/e2e", "-n", "4", "-q"]

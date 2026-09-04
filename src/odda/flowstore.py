@@ -116,8 +116,13 @@ def set_data_dir(path: Path | str) -> None:
     Args:
         path: Directory path.
     """
-    global DATA_DIR
+    global DATA_DIR, _writer
     DATA_DIR = Path(path)
+    # The writer snapshots the flows dir at creation; a new data dir
+    # invalidates it (the MCP surface can host many sessions in one
+    # process — each lifespan re-points the data dir). It re-creates on
+    # next use, re-seeding the flow id counter from the new location.
+    _writer = None
 
 
 def _flows_dir() -> Path:
@@ -264,7 +269,7 @@ class FlowRecordWriter:
     """Shared flow-record writer for mitmproxy addons and the request sender.
 
     Owns a single monotonic counter so concurrent flow allocation (mitmproxy
-    capture vs ``odda request send``) avoids racing on already-claimed ids.
+    capture vs ``request_send``) avoids racing on already-claimed ids.
     Uniqueness is still guaranteed by ``mkdir``; the counter only minimizes
     retries.
     """
@@ -363,7 +368,7 @@ class FlowRecordWriter:
                 milliseconds, or ``None``.
             keep_body: If True, store the body even when ``content_type`` is
                 in the excluded set (images/video/audio/fonts). Used by
-                ``odda request send`` (which always passes True) where the
+                ``request_send`` (which always passes True) where the
                 body is the payload the caller asked for; the
                 browser-capture addon path never sets this.
 
