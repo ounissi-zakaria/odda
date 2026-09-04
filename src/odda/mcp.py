@@ -167,7 +167,8 @@ mcp_server = MCPServer[OddaState](
         "and raw request crafting. Use when driving Chrome, capturing "
         "flows, observing JS execution, or hand-building HTTP "
         "requests.\n"
-        "All traffic that goes through proxy (including browser traffic) is captured as flows under .odda/flows/. "
+        "All traffic that goes through proxy (including browser "
+        "traffic) is captured as flows under .odda/flows/. "
         "Concept references: odda://docs/* resources."
     ),
 )
