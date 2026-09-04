@@ -232,12 +232,9 @@ async def browser_open(
     """Open a new Chrome browser window with one blank tab.
 
     Returns browser_id and the initial tab_id used to target every
-    other tool; the initial tab is ready immediately. Headless by
-    default (headless=False shows the window for debugging or
-    interactive use). All browser traffic routes through odda's HTTP
-    proxy and is captured as flow files under .odda/flows/ — driving
-    the browser IS traffic capture. The odda://docs/flows resource
-    documents that file layout and the flows.jsonl schema.
+    other tool. All browser traffic is captured as flows under
+    .odda/flows/ — driving the browser is traffic capture (see
+    odda://docs/flows).
     """
     return await ctx.request_context.lifespan_context.browser.open(headless=headless)
 
@@ -290,9 +287,8 @@ async def tabs_close(
 ) -> dict[str, Any]:
     """Close a tab in a browser.
 
-    Closing the last tab leaves the browser open with zero tabs
-    (matching Chrome's behavior); the browser can still accept
-    tabs_open later. Close the whole browser with browser_close.
+    Closing the last tab leaves the browser open with zero tabs;
+    use browser_close to close the browser itself.
     """
     return await ctx.request_context.lifespan_context.browser.close_tab(
         browser_id, tab_id
@@ -313,14 +309,11 @@ async def navigate(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Navigate an existing tab to a URL.
+    """Navigate an existing tab to a URL (to open a new tab, use tabs_open).
 
-    To open a tab, use tabs_open. wait_until: one of commit,
-    domcontentloaded, load, networkidle (default load; pick
-    domcontentloaded for SPAs whose load event never fires). timeout:
-    page.goto timeout in seconds (default 30). Navigation failures
-    (network error, invalid URL, lifecycle-event timeout) error; the
-    timeout error names the wait_until event that failed.
+    wait_until: one of commit, domcontentloaded, load, networkidle —
+    pick domcontentloaded for SPAs whose load event never fires. On
+    timeout the error names the wait_until event that failed.
     """
     if wait_until not in NAVIGATE_WAIT_UNTIL_EVENTS:
         raise ToolParamError(
@@ -360,20 +353,14 @@ async def eval(
 ) -> Any:
     """Execute JavaScript in the target tab; return the raw value.
 
-    Pass an expression, not a return statement (return is illegal at
-    the top level — use an IIFE (()=>{ ... })() if you need
-    statements). Returned Promises are awaited automatically:
-    fetch(url).then(r => r.status) returns 200. Return a serializable
-    value from async expressions — bare fetch(url) returns {} because
-    the resolved Response is not JSON-serializable; chain
-    .then(r => r.text()) or similar. eval has no timeout — it runs
-    until the JS expression resolves, so a hung expression blocks the
-    call indefinitely; wrap long enumeration loops in a bounded
-    Promise.race if you need a deadline.
-
-    js xor file: pass the code inline as js, or file to read a
-    multi-line script from a server-side path (avoids embedding a
-    large payload in the call; mutually exclusive).
+    Pass an expression, not a return statement — use an IIFE
+    (() => { ... })() for statements. Returned Promises are awaited
+    (fetch(url).then(r => r.status) returns 200); return a
+    serializable value — bare fetch(url) returns {} (Response isn't
+    JSON-serializable; chain .then(r => r.text())). No timeout: a
+    hung expression blocks the call — wrap long loops in a bounded
+    Promise.race. Pass the code inline as js, or a server-side
+    path in file (mutually exclusive).
     """
     if js is not None and file is not None:
         raise ToolParamError("Provide either js or file, not both")
@@ -398,12 +385,10 @@ async def wait_for(
 ) -> Any:
     """Poll a JS expression until it's truthy or timeout in the target tab.
 
-    Polling happens in-browser with no round-trips, in the main world
-    (sees page globals and userscript-injected helpers). A thrown
-    error inside the expression is treated as falsy and polling
-    continues — document.querySelector('#root').children.length
-    keeps polling while #root is still absent instead of crashing on
-    the null deref. timeout: seconds (default 30).
+    Polls in-browser in the main world. A thrown error counts as
+    falsy and polling continues — document.querySelector('#root')
+    .children.length keeps polling while #root is absent instead of
+    crashing on the null deref.
     """
     return await ctx.request_context.lifespan_context.browser.wait_for(
         browser_id, tab_id, expression, timeout_ms=timeout * 1000
@@ -421,8 +406,8 @@ async def screenshot(
 ) -> str:
     """Capture a JPEG of the target tab's viewport.
 
-    output: optional path to write the JPEG to; a temp file is
-    generated when omitted. Returns the written path.
+    output: optional path to write the JPEG to (a temp file when
+    omitted). Returns the written path.
     """
     return await ctx.request_context.lifespan_context.browser.screenshot(
         browser_id, tab_id, output
@@ -439,15 +424,12 @@ async def page_snapshot(
 ) -> str:
     """Take an agent-readable snapshot of the page's accessibility tree.
 
-    The workflow: snapshot to discover element refs (eN, or f<frameSeq>eN
-    inside an iframe), then pass a ref to page_click/page_fill/
-    page_hover/page_upload; odda resolves it back to the element when
-    the action runs. Refs stay valid while the element remains in the
-    DOM — re-snapshot after a navigation or SPA swap; existing refs
-    keep working without re-snapshotting. This is the ref-driven
-    alternative to hand-written CSS selectors via eval, more robust on
-    minified SPAs. Prefer this over screenshot for finding elements
-    (text, cheap, carries refs); use screenshot for visual layout only.
+    Snapshot to discover element refs (eN; f<frameSeq>eN inside an
+    iframe), then pass a ref to page_click/page_fill/page_hover/
+    page_upload. Refs resolve against the live DOM at action time,
+    so they survive DOM mutations; take a fresh snapshot after a
+    navigation. Prefer this over screenshot for finding elements;
+    use screenshot for visual layout.
     """
     return await ctx.request_context.lifespan_context.browser.page_snapshot(
         browser_id, tab_id
@@ -468,9 +450,9 @@ async def page_click(  # noqa: PLR0913 — targeting + ref/coords union is the t
 ) -> dict[str, Any]:
     """Click the element identified by ref, or at viewport coordinates.
 
-    Provide either ref (element click, waits for actionability) or both
-    x and y (raw trusted click); the two are mutually exclusive.
-    timeout: ref mode only, seconds (default 5).
+    Either ref (waits for the element to be actionable) or both x
+    and y (raw trusted click), never both. timeout applies to ref
+    mode only.
     """
     browser = ctx.request_context.lifespan_context.browser
     if x is not None or y is not None:
@@ -498,13 +480,11 @@ async def page_fill(  # noqa: PLR0913 — value xor file is the tool's contract
 ) -> dict[str, Any]:
     """Fill the element identified by ref with value.
 
-    Clears the field first, then types. Works on text inputs,
-    textareas, contenteditable elements, checkboxes ("true"/"false"),
-    radios, and selects. The fill triggers input events (not change) —
-    frameworks listening for change must be triggered otherwise.
-    value xor file: file reads the payload from a server-side path,
-    preserving newlines (mutually exclusive with the inline value).
-    timeout: ref resolution + fill, seconds (default 5).
+    Clears the field first. Works on text inputs, textareas,
+    contenteditable, checkboxes ("true"/"false"), radios, and
+    selects. Fires input events, not change — trigger change
+    listeners separately. Pass value inline, or a server-side path
+    in file preserving newlines (mutually exclusive).
     """
     if value is not None and file is not None:
         raise ToolParamError("Provide either value or file, not both")
@@ -531,8 +511,8 @@ async def page_hover(  # noqa: PLR0913 — targeting + ref/coords union is the t
 ) -> dict[str, Any]:
     """Hover the element identified by ref, or at viewport coordinates.
 
-    Provide either ref or both x and y; mutually exclusive.
-    timeout: ref mode only, seconds (default 5).
+    Either ref or both x and y, never both. timeout applies to ref
+    mode only.
     """
     browser = ctx.request_context.lifespan_context.browser
     if x is not None or y is not None:
@@ -559,13 +539,10 @@ async def page_upload(
 ) -> dict[str, Any]:
     """Upload local files to the file input identified by ref.
 
-    Pass multiple paths in files for <input type="file" multiple>.
-    This sets the files on the input but does NOT submit the form —
-    click the form's submit button by ref separately to POST it. A
-    nameless file input does not appear in the snapshot: eval an
-    aria-label onto it, re-snapshot, then upload by the new ref (see
-    odda://docs/recipes). timeout: ref resolution + upload, seconds
-    (default 5).
+    Does NOT submit the form — click the submit button separately.
+    A nameless file input doesn't appear in the snapshot: eval an
+    aria-label onto it, re-snapshot, then upload by the new ref
+    (odda://docs/recipes).
     """
     return await ctx.request_context.lifespan_context.browser.page_upload(
         browser_id, tab_id, ref, files, timeout_ms=timeout * 1000
@@ -589,7 +566,7 @@ async def event_listeners(
 @mcp_server.tool()
 @odda_tool
 async def version() -> dict[str, Any]:
-    """Return the odda version (no state needed)."""
+    """Return the odda version."""
     return {"version": __version__}
 
 
@@ -607,10 +584,8 @@ async def request_clone(
 ) -> dict[str, Any]:
     """Clone a captured flow's request into an editable request.
 
-    Copies the flow's request file and meta sidecar into the editable
-    requests dir under ``name``. The stored request becomes editable;
-    the Host header stays verbatim (may intentionally differ from the
-    TCP destination for vhost/host-header tests).
+    The copy lives at .odda/requests/<name>/request — edit it,
+    then send with request_send.
     """
     return clone_request(flow_id, name, force=force)
 
@@ -627,27 +602,13 @@ async def request_new(  # noqa: PLR0913 — the tool mirrors request new's full 
     force: bool = False,
     ctx: Context[OddaState],  # noqa: ARG001
 ) -> dict[str, Any]:
-    r"""Create a new empty editable request.
+    """Create a new empty editable request.
 
-    The agent edits ``<data_dir>/requests/<name>/request`` on disk
-    (raw HTTP bytes — the file is the wire bytes for HTTP/1.1), then
-    sends it with request_send.
-
-    Args:
-        name: Editable request name.
-        host: Target host (TCP destination; the Host header in the
-            request file goes on the wire verbatim and may differ).
-        protocol: ``http`` or ``https`` (default ``https``).
-        port: Target port (default 80 for http, 443 for https).
-        line_terminator: Byte sequence the request parser splits header
-            lines on, as a list of byte ints (default ``\r\n``). H2-only:
-            for H2→H1 downgrade smuggling where a literal CRLF must live
-            inside an H2 header value (e.g. ``:path``), set to ``\n``
-            (``[10]``) so the parser splits on LF, preserving CR in
-            values. Ignored for HTTP/1.1 request files (wire-faithful).
-        force: Overwrite an existing request of the same name.
-        ctx: SDK request context (unused; the requests dir is derived
-            from the data dir the lifespan set).
+    Creates .odda/requests/<name>/request (raw HTTP bytes — the
+    wire bytes for HTTP/1.1) plus a meta.json sidecar; fill the
+    request file, then send with request_send. See
+    odda://docs/request-crafting for the file format and the
+    line_terminator option.
     """
     lt_bytes = bytes(line_terminator) if line_terminator is not None else b"\r\n"
     return new_request(
@@ -675,23 +636,14 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Send editable request(s) and record each response as a flow.
 
-    Three modes, selected by argument arity:
-
-    - single (``name``): frozen single-shot — one request, one flow
-      record (a dict). Errors are recorded as error flows (status_code
-      null + error message), not tool errors.
-    - pipeline (``names``, two or more): one HTTP/1.1 connection
-      (sequential keep-alive, or ``pipelining`` for send-all-then-read-
-      all) for smuggling response-queue poisoning / victim consumption;
-      or all-HTTP/2 for concurrent stream-multiplex (multi-endpoint
-      race). Returns a list of flow records in send order.
-    - repeat (``repeat`` >= 2 with single ``name``): N concurrent
-      copies — the race / limit-overrun path (H2 stream-multiplex with
-      last-byte single-packet, H1 parallel connections). Returns a
-      list, one flow per copy.
-
-    See the ``odda://docs/request-crafting`` resource for the full send
-    semantics (pipeline modes, error flows, line-terminator).
+    Modes by argument: single name → one flow record (a dict);
+    names (two or more) → all sent on one connection, a list of
+    records in send order (H1: sequential keep-alive, or
+    ``pipelining`` for send-all-then-read-all; H2: concurrent
+    streams); repeat >= 2 with a single name → N concurrent
+    copies, one flow each. Errors are recorded as error flows
+    (status_code null + error message), not tool errors. See
+    odda://docs/request-crafting for the full semantics.
     """
     if repeat is not None and names is not None:
         raise ToolError(
@@ -744,12 +696,10 @@ async def proxy_url(*, ctx: Context[OddaState]) -> str:
 async def coverage_start(
     browser_id: int, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Enable precise block-level coverage on the target tab.
+    """Enable block-level coverage on the target tab.
 
-    Per-tab; the recording window spans navigations: flag, accumulator,
-    and CDP Profiler all survive a navigate, so the workflow is
-    start → navigate → snapshot/stop. Zero-hit blocks are included (the
-    negative space is as informative as the positive).
+    Per-tab and spans navigations: the workflow is start →
+    navigate → snapshot/stop. Zero-hit blocks are included.
     """
     return await ctx.request_context.lifespan_context.browser.coverage_start(
         browser_id, tab_id
@@ -763,9 +713,8 @@ async def coverage_snapshot(
 ) -> dict[str, Any]:
     """Read per-block hit counts on the target tab without stopping.
 
-    Returns the delta since the previous take (or since start). Nested
-    records: scripts → functions → ranges, each range a block with a
-    hit count.
+    Returns the delta since the previous take (or since start);
+    records nest scripts → functions → ranges.
     """
     return await ctx.request_context.lifespan_context.browser.coverage_snapshot(
         browser_id, tab_id
@@ -777,10 +726,10 @@ async def coverage_snapshot(
 async def coverage_stop(
     browser_id: int, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Take a final coverage snapshot and stop recording on the target tab.
+    """Take a final coverage snapshot and stop recording.
 
-    Returns the cumulative counts for the whole window (the sum of
-    every take since start, including prior snapshots).
+    Returns the cumulative counts for the whole window (the sum
+    of every take since start, including prior snapshots).
     """
     return await ctx.request_context.lifespan_context.browser.coverage_stop(
         browser_id, tab_id
@@ -797,12 +746,10 @@ async def wrap_calls_add(
 ) -> dict[str, Any]:
     """Install a call wrap on a named function.
 
-    The wrap is a generated userscript: it takes effect on the next
-    navigation (document_start), reaching all frames. Each call is
-    recorded with receiver, arguments, return value, and call stack.
-    Leaf-only: callbacks passed as arguments are recorded as opaque
-    refs, not themselves wrapped. Records wipe on navigation; the
-    installation persists (per browser).
+    Takes effect on the next navigation (already-loaded tabs are
+    not re-injected). Leaf-only: callbacks passed as arguments are
+    not wrapped. Records wipe on navigation; the installation
+    persists per browser.
     """
     return await ctx.request_context.lifespan_context.browser.wrap_calls_add(
         browser_id, tab_id, name, expr
@@ -816,10 +763,9 @@ async def wrap_access_add(
 ) -> dict[str, Any]:
     """Install an access wrap on a property accessor.
 
-    Records every get/set of the property with the receiver, the
-    value written (args[0] on a set), and the call stack. Same
-    userscript-backed lifecycle as wrap_calls_add: effective next
-    navigation, all frames, records wiped on navigation.
+    Records every get/set with receiver, value, and stack. Same
+    lifecycle as wrap_calls_add: effective next navigation,
+    records wipe on navigation.
     """
     return await ctx.request_context.lifespan_context.browser.wrap_access_add(
         browser_id, tab_id, name, expr
@@ -842,10 +788,9 @@ async def wrap_list(
 async def wrap_remove(
     browser_id: int, tab_id: int, name: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Remove a wrap's userscript and reload the extension.
+    """Remove a wrap; it stops recording on future navigations.
 
-    The wrap stops recording on future navigations; already-recorded
-    entries in the dump array are unaffected.
+    Already-recorded entries are unaffected.
     """
     return await ctx.request_context.lifespan_context.browser.wrap_remove(
         browser_id, tab_id, name
@@ -859,10 +804,9 @@ async def wrap_dump(
 ) -> list[dict[str, Any]]:
     """Read the per-tab wrap record array.
 
-    Each record: wrap name, type (call/access), args, ret, this,
-    stack. Function values in args/ret are opaque refs {type:
-    "function", name, source}; large or cyclic values are truncated.
-    Use name to filter to one wrap's records.
+    Each record: wrap name, type (call/access), this, args, ret,
+    stack; functions and large/cyclic values are serialized
+    compactly. Pass name to filter to one wrap's records.
     """
     return await ctx.request_context.lifespan_context.browser.wrap_dump(
         browser_id, tab_id, name
@@ -897,12 +841,10 @@ async def logpoint_add(  # noqa: PLR0913 — targeting + url/line/col/expr is th
 ) -> dict[str, Any]:
     """Plant a non-pausing logpoint at a source location.
 
-    A CDP breakpoint evaluates expr in the paused-then-immediately-
-    resumed frame's scope at each hit and records the result; the
-    page never pauses. line and col are 0-based (minified code packs
-    many statements per line, so the column picks the statement).
-    Persists until explicitly removed; re-binds on navigation; does
-    not survive tab close (per-tab-session).
+    Each hit evaluates expr in the frame's scope (locals are
+    readable) and records the result; the page never pauses. line
+    and col are 0-based. Persists until removed, re-binds on
+    navigation, dies with the tab.
     """
     return await ctx.request_context.lifespan_context.browser.logpoint_add(
         browser_id, tab_id, url, line, col, expr
@@ -925,7 +867,7 @@ async def logpoint_list(
 async def logpoint_remove(
     browser_id: int, tab_id: int, lp_id: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Remove a logpoint's CDP breakpoint and registry entry."""
+    """Remove a planted logpoint by its id."""
     return await ctx.request_context.lifespan_context.browser.logpoint_remove(
         browser_id, tab_id, lp_id
     )
@@ -938,9 +880,8 @@ async def logpoint_dump(
 ) -> list[dict[str, Any]]:
     """Read the per-tab logpoint record array.
 
-    Each record: logpoint id, url, line, col, value (or null when the
-    expression threw), error (null on success). Records accumulate
-    across hits within one page load and wipe on navigation.
+    Each record: logpoint id, url, line, col, value (null when the
+    expression threw), error. Wipes on navigation.
     """
     return await ctx.request_context.lifespan_context.browser.logpoint_dump(
         browser_id, tab_id
@@ -988,13 +929,11 @@ async def userscript_install(
 ) -> dict[str, Any]:
     """Install a userscript into the given browser's scope.
 
-    Runs at document_start in the main world on every page, before
-    the page's own scripts; reaches all frames. Overwrites any
-    existing userscript of the same name. The browser's extension
-    reloads; already-loaded tabs are not re-injected (re-navigate to
-    apply). Scope is per-browser: a userscript on browser 1
-    does not reach browser 2. Either file (read by the server) or
-    inline source, not both.
+    Runs at document_start in the main world before the page's
+    own scripts, in every tab and frame of the browser. Scope is
+    per-browser; a same-name install overwrites. Takes effect on
+    new navigations (already-loaded tabs are not re-injected).
+    Pass file or source, not both.
     """
     js = _read_install_source(file, source, "js")
     if not js.strip():
@@ -1018,7 +957,7 @@ async def userscript_list(
 async def userscript_remove(
     browser_id: int, name: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Remove a userscript from the given browser's scope and reload its extension."""
+    """Remove a userscript; it stops running on new navigations."""
     return await ctx.request_context.lifespan_context.browser.remove_userscript(
         browser_id, name
     )
@@ -1037,15 +976,12 @@ async def proxy_script_install(
     force: bool = False,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Install a proxy-script (mitmproxy addon) from a file or inline source.
+    """Install a proxy-script (mitmproxy ``-s`` addon) from file or source.
 
-    The source is a mitmproxy ``-s`` script: its module namespace is
-    the addon (top-level request/response/load/running/... hooks, or
-    an ``addons = [...]`` list). odda execs it in this server process,
-    so it has full process privileges. Overwrite is gated by force.
-    Persisted under ``<data_dir>/proxy-scripts/<name>/script.py`` and
-    re-added on server boot. Scope is global: one proxy shared across
-    all browsers.
+    Runs with full server-process privileges. Overwriting an
+    existing name requires force. Persisted and re-added on boot;
+    scope is global (one proxy shared across all browsers). See
+    odda://docs/proxy-scripts for the format.
     """
     py = _read_install_source(file, source, "py")
     if not py.strip():
