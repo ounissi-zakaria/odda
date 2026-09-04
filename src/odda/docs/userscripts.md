@@ -1,6 +1,6 @@
 # Userscripts
 
-The `userscript_*` tools manage JavaScript helpers that auto-run at `document_start` on every navigation, before the page's own scripts, in the main world. Install a helper once and it runs before the page's own scripts on every `navigate` and `tabs_open`. Useful for both browser automation (inject helpers) and dynamic analysis (Wraps are userscripts — see `odda://dynamic-analysis`). This is the reference for storage internals and built-in defaults.
+The `userscript_*` tools manage JavaScript helpers that auto-run at `document_start` on every navigation, before the page's own scripts, in the main world. Install a helper once and it runs before the page's own scripts on every `navigate` and `tabs_open`. Useful for both browser automation (inject helpers) and dynamic analysis (Wraps are userscripts — see `odda://docs/dynamic-analysis`). This is the reference for storage internals and built-in defaults.
 
 ## Tools
 

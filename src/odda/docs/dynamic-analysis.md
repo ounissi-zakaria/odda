@@ -13,7 +13,7 @@ All tools in this file are tab-scoped: every call takes `browser_id` and `tab_id
 Applies to Wrap and Logpoint (Coverage is navigation-persistent — see its section below).
 
 - **Records wipe on navigation.** Records from the previous page load are gone after a navigate. **Dump before navigating again** or the records are lost.
-- **Scope: main frame and same-origin iframes.** Both Wrap and Logpoint reach the main frame and same-origin iframes. Wrap **also** reaches cross-origin iframes (records stay in the iframe's context — read them by evaluating in the iframe); Logpoint **does not** reach cross-origin iframes. Neither reaches worker contexts (web workers, service workers). Installations are per-browser (see `odda://userscripts`).
+- **Scope: main frame and same-origin iframes.** Both Wrap and Logpoint reach the main frame and same-origin iframes. Wrap **also** reaches cross-origin iframes (records stay in the iframe's context — read them by evaluating in the iframe); Logpoint **does not** reach cross-origin iframes. Neither reaches worker contexts (web workers, service workers). Installations are per-browser (see `odda://docs/userscripts`).
 - `wrap_remove` / `logpoint_remove` on an unknown name/id errors.
 
 ## Shared: command shape

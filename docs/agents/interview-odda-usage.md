@@ -22,7 +22,7 @@ Things that succeeded but behaved differently from your mental model — default
 
 ## 4. Docs & resources
 - Was there anything you couldn't find in the docs and had to discover by trial and error?
-- Did you read the `odda://` resources (`flows`, `request-crafting`, `dynamic-analysis`, `userscripts`, `proxy-scripts`, `recipes`)? If yes, were they accurate? If no — did you know they existed?
+- Did you read the `odda://docs/` resources (`flows`, `request-crafting`, `dynamic-analysis`, `userscripts`, `proxy-scripts`, `recipes`)? If yes, were they accurate? If no — did you know they existed?
 - Anything documented that was wrong, stale, or contradicted by actual behavior?
 - Anything you only understood *after* failing once? (the failure that taught you is the signal we want)
 

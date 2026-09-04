@@ -1,6 +1,6 @@
 # Recipes
 
-Worked examples composing odda's tools into full investigations. Each recipe names the tools it uses; the per-concept references live in the other `odda://` resources (`odda://request-crafting`, `odda://flows`, `odda://dynamic-analysis`, `odda://userscripts`, `odda://proxy-scripts`).
+Worked examples composing odda's tools into full investigations. Each recipe names the tools it uses; the per-concept references live in the other `odda://docs/` resources (`odda://docs/request-crafting`, `odda://docs/flows`, `odda://docs/dynamic-analysis`, `odda://docs/userscripts`, `odda://docs/proxy-scripts`).
 
 ## Recipe: DOM data-flow tracing (source to sink)
 

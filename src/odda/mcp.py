@@ -167,18 +167,18 @@ mcp_server = MCPServer[OddaState](
         "proxy: open a browser, navigate, interact with pages by "
         "snapshot+ref, and read captured flows from .odda/flows/. "
         "Tools take explicit browser_id/tab_id ids from browser_open "
-        "and tabs_open. Read the odda:// resources (request-crafting, "
-        "flows, dynamic-analysis, userscripts, proxy-scripts, recipes) "
-        "for the concept references before first use."
+        "and tabs_open. Read the odda://docs/ resources (request-"
+        "crafting, flows, dynamic-analysis, userscripts, proxy-scripts, "
+        "recipes) for the concept references."
     ),
 )
 
 
-# --- resources: concept docs (odda://<slug>) ---
+# --- resources: concept docs (odda://docs/<slug>) ---
 
 
 def _register_doc_resources() -> None:
-    """Register the six static ``odda://`` markdown resources.
+    """Register the six static ``odda://docs/<slug>`` markdown resources.
 
     The concept references agents read for orientation: request
     crafting, flow capture, dynamic analysis, userscripts,
@@ -207,7 +207,7 @@ def _register_doc_resources() -> None:
         )
         mcp_server.add_resource(
             TextResource(
-                uri=f"odda://{slug}",
+                uri=f"odda://docs/{slug}",
                 name=slug,
                 description=description,
                 mime_type="text/markdown",
@@ -235,9 +235,9 @@ async def browser_open(
     other tool; the initial tab is ready immediately. Headless by
     default (headless=False shows the window for debugging or
     interactive use). All browser traffic routes through odda's HTTP
-    proxy and is captured as flows under .odda/flows/ — driving the
-    browser IS traffic capture; read flows via the odda://flows
-    resource.
+    proxy and is captured as flow files under .odda/flows/ — driving
+    the browser IS traffic capture. The odda://docs/flows resource
+    documents that file layout and the flows.jsonl schema.
     """
     return await ctx.request_context.lifespan_context.browser.open(headless=headless)
 
@@ -564,7 +564,7 @@ async def page_upload(
     click the form's submit button by ref separately to POST it. A
     nameless file input does not appear in the snapshot: eval an
     aria-label onto it, re-snapshot, then upload by the new ref (see
-    odda://recipes). timeout: ref resolution + upload, seconds
+    odda://docs/recipes). timeout: ref resolution + upload, seconds
     (default 5).
     """
     return await ctx.request_context.lifespan_context.browser.page_upload(
@@ -690,7 +690,7 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
       last-byte single-packet, H1 parallel connections). Returns a
       list, one flow per copy.
 
-    See the ``odda://request-crafting`` resource for the full send
+    See the ``odda://docs/request-crafting`` resource for the full send
     semantics (pipeline modes, error flows, line-terminator).
     """
     if repeat is not None and names is not None:

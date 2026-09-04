@@ -1,1 +1,1 @@
-"""Static concept docs served as ``odda://`` MCP resources."""
+"""Static concept docs served as ``odda://docs/<slug>`` MCP resources."""

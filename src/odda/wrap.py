@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 WRAP_USERSCRIPT_PREFIX = "__odda-wrap__"
 
 # Serialization limits (implementation details; documented in the
-# odda://dynamic-analysis resource).
+# odda://docs/dynamic-analysis resource).
 _MAX_DEPTH = 5
 _MAX_ARRAY = 100
 _MAX_OBJECT_KEYS = 50
