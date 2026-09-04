@@ -13,10 +13,11 @@ A new `request pipeline` command was considered and rejected in favor of
 extending `send`. The trade-off: a separate command keeps `send`'s output
 contract literally frozen and isolates the multi-send loop's error policy in
 its own code path, but multi-name `send` is more discoverable — one command
-that "does more when you give it more" — which is the property ADR-0009
-optimized for. The contract-stability cost is paid additively, not as a break:
-single-name output is frozen; the multi-name list shape is a new output mode
-opted into by passing a second `--name` (which no existing consumer does).
+that "does more when you give it more", the named-args self-documenting
+property that survives in `request_send`'s named params. The contract-stability
+cost is paid additively, not as a break: single-name output is frozen; the
+multi-name list shape is a new output mode opted into by passing a second
+`--name` (which no existing consumer does).
 
 ## Behavior
 

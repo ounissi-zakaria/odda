@@ -1,3 +1,6 @@
+# e2e seed image: Chrome + all system deps for the suite. The documented
+# runner is host pytest (`pytest tests/e2e -n 4`); this image is kept as the
+# ready-made environment for a future CI runner.
 FROM python:3.14-slim
 
 # System deps: curl for install scripts, gnupg for Chrome repo signing,
