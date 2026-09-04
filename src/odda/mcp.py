@@ -163,13 +163,12 @@ mcp_server = MCPServer[OddaState](
     description="Browser automation and HTTP traffic capture for agents.",
     lifespan=odda_lifespan,
     instructions=(
-        "odda drives Chrome and captures HTTP traffic through a MITM "
-        "proxy: open a browser, navigate, interact with pages by "
-        "snapshot+ref, and read captured flows from .odda/flows/. "
-        "Tools take explicit browser_id/tab_id ids from browser_open "
-        "and tabs_open. Read the odda://docs/ resources (request-"
-        "crafting, flows, dynamic-analysis, userscripts, proxy-scripts, "
-        "recipes) for the concept references."
+        "Browser automation, HTTP traffic capture, dynamic analysis, "
+        "and raw request crafting. Use when driving Chrome, capturing "
+        "flows, observing JS execution, or hand-building HTTP "
+        "requests.\n"
+        "All traffic that goes through proxy (including browser traffic) is captured as flows under .odda/flows/. "
+        "Concept references: odda://docs/* resources."
     ),
 )
 
