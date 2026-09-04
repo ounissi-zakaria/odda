@@ -36,6 +36,12 @@ PS_RAISER = 'def response(flow):\n    raise RuntimeError("ps-boom")\n'
 PS_INJECT = (
     'def request(flow):\n    flow.request.headers["x-odda-injected"] = "upstream"\n'
 )
+PS_ECHO = (
+    "def response(flow):\n"
+    '    flow.response.headers["x-odda-echo"] = flow.request.headers.get(\n'
+    '        "x-odda-injected", "missing"\n'
+    "    )\n"
+)
 PS_RESTORE = (
     'def response(flow):\n    flow.response.headers["x-odda-restored"] = "yes"\n'
 )
@@ -231,11 +237,16 @@ async def test_capture_honesty_flowfile_ahead(odda_session, tmp_path) -> None:
 
     A request hook injecting a header mutates what goes upstream, but the
     captured flow's request file must NOT contain it (ADR-0018 ordering).
+    A response-hook echo script then proves the injection really reached
+    upstream: ``request`` hooks fire before ``response`` hooks, so when the
+    echo script runs, ``flow.request.headers`` carries the injection.
     """
     from tests.e2e.conftest import fixture_site
 
     ps = tmp_path / "ps_inject.py"
     ps.write_text(PS_INJECT)
+    ps_echo = tmp_path / "ps_echo.py"
+    ps_echo.write_text(PS_ECHO)
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         await h.call("proxy_script_install", {"name": "injector", "file": str(ps)})
         opener = await _opener(h)
@@ -244,6 +255,14 @@ async def test_capture_honesty_flowfile_ahead(odda_session, tmp_path) -> None:
         rec = await h.wait_flow("ps-capture-honesty")
         req = (h.data_dir / "flows" / rec["id"] / "request").read_bytes()
         assert b"x-odda-injected" not in req.lower()
+
+        # The mutation did reach the upstream: the echo script (a response
+        # hook, so after the request hook) copies flow.request's injected
+        # header onto the response. "upstream" (not "missing") proves the
+        # injection was live on the request that went upstream.
+        await h.call("proxy_script_install", {"name": "echo", "file": str(ps_echo)})
+        hdrs = await _fetch(opener, f"{fx.base}/?marker=ps-echo")
+        assert hdrs.get("x-odda-echo") == "upstream"
 
 
 async def test_boot_restore_readds_persisted_script(odda_session, tmp_path) -> None:
