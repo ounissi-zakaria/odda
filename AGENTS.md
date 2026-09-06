@@ -36,16 +36,6 @@ The suite runs on the host (Chrome on `PATH` is required — the same requiremen
 
 **When running tests, read the full output.** Do not pipe test commands through `grep`, `head`, `tail`, or any truncation. Grep for a pass/fail marker and you will miss the failure context (the diff block, the stderr traceback, which doc actually failed) and end up re-running the suite to recover what the first run already told you. The Bash tool captures the full output to a file when it exceeds the display window — read that file with the Read tool (offset/limit) instead of truncating on the shell side.
 
-## Key files
-
-- `src/odda/mcp.py` — the MCP server: stdio entrypoint, lifespan, tool handlers (one tool per capability), and the `odda://docs/<slug>` concept-doc resources.
-- `src/odda/cli.py` — the two-command CLI (`mcp`, `init-chrome-profile`) plus `--version`/`-V`.
-- `src/odda/browser.py` — patchright/Playwright browser automation.
-- `src/odda/chrome_args.py` — Redeclared Chrome launch flags (the patchright `chromiumSwitches` mirror + m150 model-store suppression); see the drift audit note below.
-- `src/odda/proxy.py` — mitmproxy wrapper.
-- `src/odda/flowstore.py` — File-based flow storage (flows.jsonl + per-flow dirs).
-- `src/odda/docs/` — the six concept docs served as `odda://docs/<slug>` markdown resources.
-
 ## Conventions
 
 Code standards live in `CODING_STANDARDS.md` (thin-CLI architecture, tool

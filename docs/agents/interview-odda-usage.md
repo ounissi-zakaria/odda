@@ -31,7 +31,8 @@ Things that succeeded but behaved differently from your mental model — default
 - **Snapshot + refs:** Did the snapshot→ref→action workflow work? Stale refs, elements missing from the a11y tree (e.g. file inputs), cross-iframe refs?
 - **`eval` / `wait_for`:** Serialization surprises (double-encode, `Response` → `{}`, Promises), expression-vs-return confusion, timeout behavior?
 - **Screenshot vs snapshot:** Did you pick the right one, or reach for the wrong tool first?
-- **Userscripts:** Install/reload lifecycle, the dialog interceptor (`__oddaDialogs` / `__oddaDialogResponses`), cross-frame/cross-nav limits?
+- **Userscripts:** Install/reload lifecycle, cross-frame reach?
+- **Dialogs:** The trigger rule (the tool that opens a dialog returns its details), the same-tab block set, the `dialogs` note, `dialog_handle` (accept/dismiss/prompt text), user-close behavior in headed windows?
 - **Dynamic analysis (wrap / logpoint / coverage):** Did you pick the right one for what you knew? The **records-wipe-on-navigation** rule — did it bite you? Logpoint `col` requirement? Coverage delta vs cumulative?
 - **Traffic capture & flows:** Reading `.odda/flows/<id>/`, response-body decoding, `flows.jsonl` schema?
 - **Raw request crafting:** `request_clone`/`request_new`/`request_send`, CRLF gotchas, `meta.json` host vs `Host` header, HTTP/2 framing, `fix_content_length`?

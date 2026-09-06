@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from patchright.async_api import (
     BrowserContext,
     CDPSession,
+    Dialog,
     Page,
     Playwright,
     async_playwright,
@@ -200,6 +201,42 @@ def _is_target_closed_error(exc: BaseException) -> bool:
     return "target closed" in msg or "has been closed" in msg
 
 
+def _is_dialog_already_closed_error(exc: BaseException) -> bool:
+    """Return True if exc means the dialog was closed/handled elsewhere.
+
+    Two surfaces: Chrome's protocol error when no dialog is showing
+    (``Page.handleJavaScriptDialog: No dialog is showing``), and the
+    driver's own assertion when its Dialog object was already handled
+    (``Cannot accept dialog which is already handled!``). Both mean a
+    user close or another handler beat us to the dialog.
+    """
+    msg = str(exc).lower()
+    return (
+        "no dialog is showing" in msg
+        or "already handled" in msg
+        or "cannot accept dialog" in msg
+    )
+
+
+def _discard_task_result(task: asyncio.Task[Any] | None) -> None:
+    """Discard a parked task's eventual result/exception.
+
+    A task whose result nobody will read (a trigger action parked
+    after losing the race to a dialog per ADR-0022, or a superseded
+    liveness probe) would warn "exception was never retrieved" at GC
+    time. When the task is already done (async context), retrieve
+    the result now; otherwise schedule the retrieval as a done
+    callback. ``None`` (no probe could be parked) is a no-op.
+    """
+    if task is None:
+        return
+    if task.done():
+        with suppress(Exception):
+            task.result()
+    else:
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+
 class BrowserInstance:
     """Manages a single Chrome browser context and its tabs.
 
@@ -241,7 +278,23 @@ class BrowserInstance:
         self._logpoints: dict[int, list[dict[str, Any]]] = {}
         self._logpoint_counter: int = 0
         self._browser_cdp_session: CDPSession | None = None
-        self._extension_id: str | None = None
+        # Per-tab open-dialog registry (ADR-0022): ``{tab_id: {type,
+        # message, default_value, dialog, probe_task}}``. Keyed by tab
+        # at ``page.on("dialog")`` time — never trust the driver
+        # Dialog object for openness (a user close in the real browser
+        # leaves it stale). The liveness probe (a parked
+        # ``page.evaluate("1")``) completes exactly when the dialog is
+        # no longer open; the MCP ``dialog_handle`` tool (issue 02)
+        # calls ``dialog.accept()/dismiss()`` on the stored object.
+        self._dialogs: dict[int, dict[str, Any]] = {}
+        # Per-tab trigger-race waiters: Futures resolved by the dialog
+        # listener when a dialog opens mid-action. A trigger tool
+        # races its action task against its own future
+        # (FIRST_COMPLETED); dialog wins → the tool returns dialog
+        # details, action wins → normal result. A list, not one slot:
+        # multiple trigger tools can race concurrently on one tab
+        # (e.g. an eval and a click) and each must be woken.
+        self._dialog_waiters: dict[int, list[asyncio.Future[None]]] = {}
 
         # New pages (from context.new_page or window.open) auto-register.
         self.context.on("page", self._on_context_page)
@@ -286,6 +339,7 @@ class BrowserInstance:
         self._script_maps[tab_id] = {}
         page.on("framenavigated", lambda frame: self._on_frame_navigated(tab_id, frame))
         page.on("close", lambda: self._on_page_close(tab_id))
+        page.on("dialog", lambda dialog: self._on_dialog_open(tab_id, dialog))
         with suppress(RuntimeError):
             # No running loop: _get_cdp_session will lazily create it later.
             asyncio.get_running_loop().create_task(
@@ -314,10 +368,24 @@ class BrowserInstance:
 
     def _on_page_close(self, tab_id: int) -> None:
         """Tear down per-tab state when a page closes."""
-        with suppress(Exception):
-            cdp = self._cdp_sessions.pop(tab_id, None)
-            if cdp is not None:
-                cdp.detach()
+        cdp = self._cdp_sessions.pop(tab_id, None)
+        if cdp is not None:
+            # detach is async and this handler is sync: schedule it,
+            # discarding the result (a dying target rejects the send
+            # — the session is dead either way).
+            task = asyncio.get_running_loop().create_task(cdp.detach())
+            task.add_done_callback(_discard_task_result)
+        # A closed tab can no longer hold a dialog; drop its registry
+        # entry. The probe task's own done-callback clears the entry
+        # too (it may still be parked when the tab is torn down from
+        # elsewhere).
+        if tab_id in self._dialogs:
+            self._clear_dialog_entry(tab_id)
+        # Discard pending trigger-race waiters without resolving them:
+        # a closed tab never opens a dialog, so the races must resolve
+        # via their action tasks instead (they fail with target-closed
+        # errors, which each action's error handling converts).
+        self._dialog_waiters.pop(tab_id, None)
         self._tabs.pop(tab_id, None)
         self._script_maps.pop(tab_id, None)
         self._coverage_recording.pop(tab_id, None)
@@ -374,6 +442,20 @@ class BrowserInstance:
             )
         return page
 
+    def _require_ready_tab(self, tab_id: int) -> Page:
+        """Return the tab's Page, raising unless the tab is dialog-free.
+
+        The single prologue for every tool that dispatches into a
+        tab: unknown tab → the not-found error; open dialog on the
+        tab → the reject error (ADR-0022 block gate: the renderer
+        is frozen behind a native dialog; dispatching would hang the
+        tool). Tools that must run with a dialog open (dialog_handle,
+        close_tab) use ``_require_tab`` directly.
+        """
+        page = self._require_tab(tab_id)
+        self._reject_if_dialog(tab_id)
+        return page
+
     # --- userscript extension -----------------------------------------
 
     async def _load_userscript_extension(self) -> str | None:
@@ -402,6 +484,290 @@ class BrowserInstance:
         ext_id = resp.get("id")
         self._extension_id = ext_id
         return ext_id
+
+    async def _run_action(
+        self,
+        tab_id: int,
+        verb: str,
+        action: Callable[[], Awaitable[Any]],
+        convert: Callable[[Exception], BrowserOperationError | None] | None = None,
+    ) -> Any:
+        """Run a tab action with the shared error conversion.
+
+        Target-closed errors tear down the tab's state and raise the
+        "<verb> closed" error (the tab is gone). Everything else goes
+        to ``convert`` — each tool supplies its own mapping (e.g.
+        timeout → the SPA hint for navigate, the stale-ref hint for
+        ref actions); returning ``None`` from ``convert`` re-raises
+        the original exception. ``convert=None`` re-raises anything
+        that is not target-closed.
+        """
+        try:
+            return await action()
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                self._on_page_close(tab_id)
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed during {verb}."
+                ) from exc
+            if convert is not None:
+                converted = convert(exc)
+                if converted is not None:
+                    raise converted from exc
+            raise
+
+    # --- dialogs (ADR-0022) --------------------------------------------
+
+    def _on_dialog_open(self, tab_id: int, dialog: Dialog) -> None:
+        """Record a newly opened native dialog; never handle it.
+
+        Suppresses patchright's no-listener auto-dismiss (registered
+        in ``_register_page`` for every tab). Records the registry
+        entry (keyed by tab, never trusting the driver Dialog object
+        for openness), parks the liveness probe (a plain
+        ``page.evaluate("1")`` — it has no dialog gate and completes
+        exactly when the dialog closes), and wakes any trigger tool
+        racing its action against this dialog.
+        """
+        previous = self._dialogs.get(tab_id)
+        if previous is not None:
+            # A chained dialog replaced a still-registered one (the
+            # previous dialog was handled but its probe hasn't
+            # completed yet): discard the previous probe — a done
+            # callback from it must not clear the new entry (the
+            # identity guard in _on_probe_done handles it, and a
+            # dangling probe result is harmless to leave unretrieved:
+            # evaluate("1") cannot fail on a live tab).
+            _discard_task_result(previous.get("probe_task"))
+        entry = {
+            "type": dialog.type,
+            "message": dialog.message,
+            "default_value": dialog.default_value,
+        }
+        page = self._tabs.get(tab_id)
+        probe_task = None
+        if page is not None and not page.is_closed():
+            probe_task = asyncio.create_task(page.evaluate("1"))
+            probe_task.add_done_callback(
+                lambda _task: self._on_probe_done(tab_id, probe_task)
+            )
+        self._dialogs[tab_id] = {
+            **entry,
+            "dialog": dialog,
+            "probe_task": probe_task,
+        }
+        # Wake every trigger tool racing on this tab: resolve their
+        # waiter futures and clear the slot list — a second dialog on
+        # the same tab (chained) starts fresh waiters.
+        waiters = self._dialog_waiters.pop(tab_id, None)
+        if waiters:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.set_result(None)
+
+    def _on_probe_done(self, tab_id: int, probe_task: asyncio.Task[Any]) -> None:
+        """Probe done-callback: clear the entry, purge stale state.
+
+        The probe (``page.evaluate("1")``) completing means the dialog
+        is no longer open — handled via ``dialog_handle`` (issue 02)
+        or closed by the user in the real browser. A done-callback
+        cannot await; the purge is its own task because the driver's
+        ``dialog.accept()`` is async and the failed CDP call still
+        purges its internal state (purge-before-send, verified on the
+        pin).
+        """
+        # Retrieve the result/exception so a failed probe (tab torn
+        # down mid-dialog) doesn't warn "exception never retrieved" at
+        # GC time; the value itself is uninteresting.
+        with suppress(Exception):
+            probe_task.result()
+        entry = self._dialogs.get(tab_id)
+        # Guard: a second dialog may have replaced this entry (chained
+        # dialogs on the same tab). Only clear if this probe owns it.
+        if entry is None or entry.get("probe_task") is not probe_task:
+            return
+        self._clear_dialog_entry(tab_id)
+        asyncio.get_running_loop().create_task(self._purge_dialog_state(entry))
+
+    def _clear_dialog_entry(self, tab_id: int) -> None:
+        """Drop a tab's dialog registry entry."""
+        self._dialogs.pop(tab_id, None)
+
+    async def _purge_dialog_state(self, entry: dict[str, Any]) -> None:
+        """Best-effort purge the driver's stale dialog state.
+
+        The dialog the probe watched was closed by something other
+        than ``dialog_handle`` (the user closed it in the real
+        browser, or raw CDP). The driver's Dialog object is stale —
+        calling ``accept()`` on it fails the CDP call ("no dialog is
+        showing") but still purges the driver's ``_openedDialogs``
+        entry before the send, so the driver stops gating non-stalling
+        evaluations (title/snapshot helpers) on this dialog.
+        """
+        dialog = entry.get("dialog")
+        if dialog is not None:
+            with suppress(Exception):
+                await dialog.accept()
+
+    def _reject_if_dialog(self, tab_id: int) -> None:
+        """Raise if the tab has an open dialog.
+
+        The clean pre-check: if the registry has an entry, the renderer
+        is frozen — dispatching into it would hang the tool inside the
+        frozen dialog state. Reject the call instead: the agent
+        handles the dialog (``dialog_handle`` or human close) and
+        retries. Blocking set only — the trigger tools race their own
+        action against a dialog opening mid-action.
+        """
+        entry = self._dialogs.get(tab_id)
+        if entry is not None:
+            raise BrowserOperationError(
+                f"Tab {tab_id} has an open {entry['type']} dialog "
+                f"({entry['message']!r}) — handle it with dialog_handle, "
+                "then retry this call."
+            )
+
+    async def _race_dialog(
+        self, tab_id: int, action: Callable[[], Awaitable[Any]]
+    ) -> tuple[bool, Any]:
+        """Race an action against a dialog opening mid-action.
+
+        Trigger-tool wrapper (ADR-0022 trigger rule): the action
+        starts with no dialog open on the tab (the block gate ran
+        first). If the action itself opens a dialog — a click that
+        fires ``confirm()``, an eval running ``alert()`` — the dialog
+        listener resolves this per-tab waiter future and the race
+        resolves ``(True, {"dialog": ...})`` immediately, leaving the
+        action task parked in the background (it completes when the
+        dialog is handled; its result is discarded). If the action
+        completes first, the race resolves ``(False, result)``.
+        """
+        waiter = asyncio.get_running_loop().create_future()
+        self._dialog_waiters.setdefault(tab_id, []).append(waiter)
+        action_task = asyncio.create_task(action())
+        action_task.add_done_callback(_discard_task_result)
+        try:
+            done, _pending = await asyncio.wait(
+                {action_task, waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if waiter in done:
+                return True, await self._open_dialog_result(tab_id)
+            return False, await asyncio.shield(action_task)
+        finally:
+            waiters = self._dialog_waiters.get(tab_id)
+            if waiters is not None:
+                with suppress(ValueError):
+                    waiters.remove(waiter)
+                if not waiters:
+                    self._dialog_waiters.pop(tab_id, None)
+
+    @staticmethod
+    def _dialog_details(entry: dict[str, Any], tab_id: int) -> dict[str, Any]:
+        """Shape a registry entry as the public dialog record.
+
+        Returns ``{type, message, default_value, tab_id}``.
+        """
+        return {
+            "type": entry["type"],
+            "message": entry["message"],
+            "default_value": entry["default_value"],
+            "tab_id": tab_id,
+        }
+
+    async def _open_dialog_result(self, tab_id: int) -> dict[str, Any]:
+        """Return the ``{"dialog": ...}`` result for a won trigger race."""
+        entry = self._dialogs.get(tab_id)
+        if entry is None:
+            raise BrowserOperationError(
+                f"Dialog race resolved for tab {tab_id} but no dialog "
+                "is registered — this is a bug in odda's dialog engine."
+            )
+        return {"dialog": self._dialog_details(entry, tab_id)}
+
+    def open_dialogs(self) -> list[dict[str, Any]]:
+        """Return this browser's open dialogs, oldest tab first.
+
+        One ``{tab_id, type, message, default_value}`` per tab with
+        an open dialog. Read-only observation; ``close_tab`` reads
+        it for the tab it is about to close.
+        """
+        return [
+            self._dialog_details(entry, tab_id)
+            for tab_id, entry in self._dialogs.items()
+        ]
+
+    async def handle_dialog(
+        self, tab_id: int, action: str, prompt_text: str | None = None
+    ) -> dict[str, Any]:
+        """Accept or dismiss the tab's open dialog.
+
+        The single sanctioned way to resolve a dialog (ADR-0022):
+        everything else leaves it open. ``prompt_text`` supplies the
+        answer for ``prompt`` dialogs (accept-only; ignored
+        otherwise). On success the registry entry is cleared at once
+        — tools the dialog rejected can be retried immediately.
+
+        Args:
+            tab_id: Target tab.
+            action: ``"accept"`` or ``"dismiss"``.
+            prompt_text: Optional text to answer a ``prompt`` dialog
+                with (accept-only; ignored otherwise).
+
+        Raises:
+            BrowserOperationError: If the tab has no open dialog.
+            BrowserOperationError: If the driver reports the dialog
+                was already closed (the user beat the call to it).
+
+        Returns:
+            ``{"handled": True, "action": ..., "tab_id": ...}``.
+        """
+        if action not in ("accept", "dismiss"):
+            raise BrowserOperationError(
+                f"Invalid dialog action {action!r}; use 'accept' or 'dismiss'."
+            )
+        entry = self._dialogs.get(tab_id)
+        if entry is None:
+            raise BrowserOperationError(
+                f"Tab {tab_id} in browser {self.browser_id} has no open dialog."
+            )
+        dialog = entry["dialog"]
+        try:
+            if action == "accept":
+                # Human parity: a user clicking OK on a prefilled prompt
+                # submits the prefill. The driver drops a None promptText
+                # and CDP then answers empty, so supply the dialog's
+                # default_value when the caller omits prompt_text.
+                text = prompt_text
+                if text is None and entry["type"] == "prompt":
+                    text = entry["default_value"]
+                await dialog.accept(text)
+            else:
+                await dialog.dismiss()
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                raise BrowserOperationError(
+                    f"Tab {tab_id} closed while handling its dialog."
+                ) from exc
+            if _is_dialog_already_closed_error(exc):
+                # The dialog was closed by someone else (the user in
+                # the real browser, raw CDP). The registry entry is
+                # cleared by the probe completing; report neutrally.
+                raise BrowserOperationError(
+                    f"Dialog on tab {tab_id} was already closed "
+                    "(handled by the user or closed in the browser)."
+                ) from exc
+            raise
+        # The driver answered: the dialog is gone now. Clear the
+        # entry immediately — under drop semantics the reject gate is
+        # one-shot, so a retried call must not lose a race against
+        # the probe's own pipe round-trip. The probe's done-callback
+        # hits the identity guard and stops there (no purge needed:
+        # dialog_handle's own accept/dismiss already cleaned the
+        # driver's state); its result is retrieved before the guard.
+        if self._dialogs.get(tab_id) is entry:
+            self._clear_dialog_entry(tab_id)
+        return {"handled": True, "action": action, "tab_id": tab_id}
 
     async def _reload_userscript_extension(self) -> str | None:
         """Reload the userscript extension: uninstall old, load new.
@@ -437,20 +803,28 @@ class BrowserInstance:
             )
         return tabs
 
-    async def open_tab(self, url: str | None = None) -> int:
+    async def open_tab(self, url: str | None = None) -> dict[str, Any] | int:
         """Open a new tab, optionally navigating to ``url``.
 
         context.on('page') registers the new page synchronously during
         new_page(); we look up the assigned tab_id by identity.
 
+        Trigger tool (ADR-0022) when ``url`` is given: the goto is
+        raced against the new tab's dialog waiters, so a page that
+        opens a dialog at load returns ``{dialog: {...}}`` promptly
+        instead of hanging the goto behind the frozen renderer — the
+        same trigger rule as ``navigate``. Without ``url`` there is no
+        page load to race; the blank tab id is returned.
+
         Returns:
-            The new tab_id.
+            The new tab_id, or ``{dialog: ...}`` when a dialog opened.
         """
         page = await self.context.new_page()
         tab_id = self._tab_id_for_page(page)
-        if url is not None:
-            await page.goto(url)
-        return tab_id
+        if url is None:
+            return tab_id
+        won, result = await self._race_dialog(tab_id, lambda: page.goto(url))
+        return result if won else tab_id
 
     async def close_tab(self, tab_id: int) -> None:
         """Close a tab by id. No-op if already closed."""
@@ -466,8 +840,14 @@ class BrowserInstance:
         *,
         timeout_ms: float = 30000.0,
         wait_until: str = "load",
-    ) -> None:
+    ) -> dict[str, Any]:
         """Navigate an existing tab to ``url``.
+
+        Trigger tool (ADR-0022): if the navigation opens a dialog
+        (e.g. a ``beforeunload`` handler), the result carries the
+        dialog's details instead of the status string; the goto
+        parks in the background and completes once the dialog is
+        handled.
 
         Args:
             tab_id: Target tab.
@@ -477,16 +857,14 @@ class BrowserInstance:
             wait_until: Playwright lifecycle event to wait for — one of
                 ``commit``, ``domcontentloaded``, ``load``,
                 ``networkidle`` (default ``load``).
+
+        Returns:
+            ``{"status": "Navigated to: <url>"}``, or the open
+            dialog's details when the navigation opened one.
         """
-        page = self._require_tab(tab_id)
-        try:
-            await page.goto(url, timeout=timeout_ms, wait_until=wait_until)
-        except Exception as exc:
-            if _is_target_closed_error(exc):
-                self._on_page_close(tab_id)
-                raise BrowserOperationError(
-                    f"Tab {tab_id} closed during navigation."
-                ) from exc
+        page = self._require_ready_tab(tab_id)
+
+        def _convert(exc: Exception) -> BrowserOperationError | None:
             msg = str(exc)
             if "timeout" in msg.lower() or "Timeout" in type(exc).__name__:
                 hint = (
@@ -494,23 +872,43 @@ class BrowserInstance:
                     " tool with a JS expression after navigate to poll"
                     " for a condition."
                 )
-                raise BrowserOperationError(
+                return BrowserOperationError(
                     f"Failed to navigate: {msg} (wait-until `{wait_until}`){hint}"
-                ) from exc
-            raise BrowserOperationError(f"Failed to navigate: {msg}") from exc
+                )
+            return BrowserOperationError(f"Failed to navigate: {msg}")
+
+        won, result = await self._race_dialog(
+            tab_id,
+            lambda: self._run_action(
+                tab_id,
+                "navigation",
+                lambda: page.goto(url, timeout=timeout_ms, wait_until=wait_until),
+                _convert,
+            ),
+        )
+        return result if won else {"status": f"Navigated to: {url}"}
 
     async def eval_js(self, tab_id: int, js_code: str) -> Any:
-        """Execute JavaScript in the target tab's main world."""
-        page = self._require_tab(tab_id)
-        try:
-            return await page.evaluate(js_code, isolated_context=False)
-        except Exception as exc:
-            if _is_target_closed_error(exc):
-                self._on_page_close(tab_id)
-                raise BrowserOperationError(
-                    f"Tab {tab_id} closed during eval."
-                ) from exc
-            return f"JavaScript error: {exc!s}"
+        """Execute JavaScript in the target tab's main world.
+
+        Trigger tool (ADR-0022): if the evaluated code opens a native
+        dialog (``alert``/``confirm``/``prompt``), this returns
+        ``{dialog: {type, message, default_value, tab_id}}`` instead
+        of the code's result — the code resumes when the dialog is
+        handled. Non-target-closed errors are still converted to
+        ``"JavaScript error: ..."`` strings on the action-wins path.
+        """
+        page = self._require_ready_tab(tab_id)
+        _won, result = await self._race_dialog(
+            tab_id,
+            lambda: self._run_action(
+                tab_id,
+                "eval",
+                lambda: page.evaluate(js_code, isolated_context=False),
+                lambda exc: BrowserOperationError(f"JavaScript error: {exc!s}"),
+            ),
+        )
+        return result
 
     async def wait_for(self, tab_id: int, expression: str, *, timeout_ms: float) -> Any:
         """Poll a JS expression until truthy or timeout in the target tab.
@@ -521,29 +919,33 @@ class BrowserInstance:
         while ``#root`` is still absent) keeps polling until truthy or
         timeout rather than crashing on the first throw.
         """
-        page = self._require_tab(tab_id)
+        page = self._require_ready_tab(tab_id)
         fn = (
             "() => { try { const v = (" + expression + "); return v ? v : false; }"
             " catch (e) { return false; } }"
         )
-        try:
-            handle = await page.wait_for_function(fn, timeout=timeout_ms)
-        except Exception as exc:
-            if _is_target_closed_error(exc):
-                self._on_page_close(tab_id)
-                raise BrowserOperationError(
-                    f"Tab {tab_id} closed during wait-for."
-                ) from exc
-            if "timeout" in str(exc).lower() or "Timeout" in type(exc).__name__:
-                raise BrowserOperationError(
-                    f"Timeout after {timeout_ms}ms waiting for expression to "
-                    "become truthy"
-                ) from exc
-            raise
-        try:
-            return await handle.json_value()
-        except Exception:
-            return str(handle)
+
+        async def _wait() -> Any:
+            handle = await self._run_action(
+                tab_id,
+                "wait-for",
+                lambda: page.wait_for_function(fn, timeout=timeout_ms),
+                lambda exc: (
+                    BrowserOperationError(
+                        f"Timeout after {timeout_ms}ms waiting for expression "
+                        "to become truthy"
+                    )
+                    if "timeout" in str(exc).lower() or "Timeout" in type(exc).__name__
+                    else None
+                ),
+            )
+            try:
+                return await handle.json_value()
+            except Exception:
+                return str(handle)
+
+        _won, result = await self._race_dialog(tab_id, _wait)
+        return result
 
     async def screenshot(self, tab_id: int, output_path: str | None = None) -> str:
         """Capture a JPEG screenshot of the target tab's viewport.
@@ -554,28 +956,23 @@ class BrowserInstance:
                 a temp file path under the system temp dir is generated
                 (legacy behavior). When given, the directory must exist.
         """
-        page = self._require_tab(tab_id)
-        try:
-            if output_path is not None:
-                out = Path(output_path)
-                out.parent.mkdir(parents=True, exist_ok=True)
-                target = out
-            else:
-                temp_dir = Path(tempfile.gettempdir())
-                target = temp_dir / f"screenshot_{int(time.time())}.jpeg"
-            await page.screenshot(
-                path=str(target),
-                type="jpeg",
-                full_page=False,
-            )
+        page = self._require_ready_tab(tab_id)
+        if output_path is not None:
+            target = Path(output_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            target = Path(tempfile.gettempdir()) / f"screenshot_{int(time.time())}.jpeg"
+
+        async def _shoot() -> str:
+            await page.screenshot(path=str(target), type="jpeg", full_page=False)
             return str(target)
-        except Exception as exc:
-            if _is_target_closed_error(exc):
-                self._on_page_close(tab_id)
-                raise BrowserOperationError(
-                    f"Tab {tab_id} closed during screenshot."
-                ) from exc
-            raise BrowserOperationError(f"Screenshot error: {exc!s}") from exc
+
+        return await self._run_action(
+            tab_id,
+            "screenshot",
+            _shoot,
+            lambda e: BrowserOperationError(f"Screenshot error: {e!s}"),
+        )
 
     # --- page interaction --------------------------------------------
 
@@ -588,50 +985,63 @@ class BrowserInstance:
         text for the element it wants and passes the ref to ``click``,
         ``fill``, ``hover``, or ``upload``.
         """
-        page = self._require_tab(tab_id)
-        try:
-            return await page.aria_snapshot(mode="ai")
-        except Exception as exc:
-            if _is_target_closed_error(exc):
-                self._on_page_close(tab_id)
-                raise BrowserOperationError(
-                    f"Tab {tab_id} closed during snapshot."
-                ) from exc
-            raise BrowserOperationError(f"Snapshot error: {exc!s}") from exc
+        page = self._require_ready_tab(tab_id)
+        return await self._run_action(
+            tab_id,
+            "snapshot",
+            lambda: page.aria_snapshot(mode="ai"),
+            lambda e: BrowserOperationError(f"Snapshot error: {e!s}"),
+        )
 
-    async def _ref_action(
+    def _ref_convert(
+        self, ref: str, verb: str, timeout_ms: float
+    ) -> Callable[[Exception], BrowserOperationError | None]:
+        """Build the ref-tool error converter.
+
+        A timeout may mean the ref is stale (element removed) or the
+        element is present but not actionable (disabled, covered by
+        an overlay); the error message reflects both possibilities.
+        Anything else becomes the generic ``<Verb> error`` message.
+        """
+
+        def convert(exc: Exception) -> BrowserOperationError | None:
+            if "timeout" in str(exc).lower() or "Timeout" in type(exc).__name__:
+                return BrowserOperationError(
+                    f"ref {ref} did not resolve or become actionable "
+                    f"within {timeout_ms}ms (the element may have been "
+                    f"removed, or it may be disabled or covered by an "
+                    f"overlay; take a new snapshot if stale)"
+                )
+            return BrowserOperationError(f"{verb.capitalize()} error: {exc!s}")
+
+        return convert
+
+    async def _ref_tool(
         self,
         tab_id: int,
         ref: str,
         verb: str,
         action: Callable[[], Awaitable[Any]],
+        status: dict[str, Any],
+        *,
         timeout_ms: float,
-    ) -> None:
-        """Run a ref-driven Playwright action with unified error handling.
+    ) -> dict[str, Any]:
+        """Run a ref-driven tool: gate, race the action, shape the result.
 
-        Runs ``action`` (which should call the Playwright Locator method
-        with the desired timeout) and converts Playwright timeouts and
-        target-closed errors into clean ``BrowserOperationError`` messages.
-        A timeout may mean the ref is stale (element removed) or the
-        element is present but not actionable (disabled, covered by an
-        overlay); the error message reflects both possibilities.
+        The whole body every ref tool shares (ADR-0022 trigger rule):
+        resolve the locator outside the race (a stale ref fails fast
+        in the race's action, not at locator build), convert errors
+        via the ref converter, and return ``status`` unless a dialog
+        opened mid-action.
         """
-        try:
-            await action()
-        except Exception as exc:
-            if _is_target_closed_error(exc):
-                self._on_page_close(tab_id)
-                raise BrowserOperationError(
-                    f"Tab {tab_id} closed during {verb}."
-                ) from exc
-            if "timeout" in str(exc).lower() or "Timeout" in type(exc).__name__:
-                raise BrowserOperationError(
-                    f"ref {ref} did not resolve or become actionable "
-                    f"within {timeout_ms}ms (the element may have been "
-                    f"removed, or it may be disabled or covered by an "
-                    f"overlay; take a new snapshot if stale)"
-                ) from exc
-            raise BrowserOperationError(f"{verb.capitalize()} error: {exc!s}") from exc
+        self._require_ready_tab(tab_id)
+        won, result = await self._race_dialog(
+            tab_id,
+            lambda: self._run_action(
+                tab_id, verb, action, self._ref_convert(ref, verb, timeout_ms)
+            ),
+        )
+        return result if won else status
 
     async def page_click(
         self, tab_id: int, ref: str, *, timeout_ms: float
@@ -643,16 +1053,15 @@ class BrowserInstance:
         (element removed, navigated away), the Playwright timeout is
         converted to a clean ``BrowserOperationError``.
         """
-        page = self._require_tab(tab_id)
-        locator = page.locator(f"aria-ref={ref}")
-        await self._ref_action(
+        locator = self._require_ready_tab(tab_id).locator(f"aria-ref={ref}")
+        return await self._ref_tool(
             tab_id,
             ref,
             "click",
             lambda: locator.click(timeout=timeout_ms),
-            timeout_ms,
+            {"status": "clicked", "ref": ref},
+            timeout_ms=timeout_ms,
         )
-        return {"status": "clicked", "ref": ref}
 
     async def page_click_coords(
         self, tab_id: int, *, x: float, y: float
@@ -670,16 +1079,18 @@ class BrowserInstance:
         screenshot. There is nothing to time out on, so no timeout
         applies.
         """
-        page = self._require_tab(tab_id)
-        try:
-            await page.mouse.click(x, y)
-        except Exception as exc:
-            if _is_target_closed_error(exc):
-                self._on_page_close(tab_id)
-                raise BrowserOperationError(
-                    f"Tab {tab_id} closed during click."
-                ) from exc
-            raise BrowserOperationError(f"Click error: {exc!s}") from exc
+        page = self._require_ready_tab(tab_id)
+        won, _ = await self._race_dialog(
+            tab_id,
+            lambda: self._run_action(
+                tab_id,
+                "click",
+                lambda: page.mouse.click(x, y),
+                lambda e: BrowserOperationError(f"Click error: {e!s}"),
+            ),
+        )
+        if won:
+            return await self._open_dialog_result(tab_id)
         return {"status": "clicked", "x": x, "y": y}
 
     async def page_hover_coords(
@@ -693,16 +1104,18 @@ class BrowserInstance:
         mouseover/mousemove/mouseenter cascade. No element resolution,
         no actionability checks, no scrolling, no timeout.
         """
-        page = self._require_tab(tab_id)
-        try:
-            await page.mouse.move(x, y)
-        except Exception as exc:
-            if _is_target_closed_error(exc):
-                self._on_page_close(tab_id)
-                raise BrowserOperationError(
-                    f"Tab {tab_id} closed during hover."
-                ) from exc
-            raise BrowserOperationError(f"Hover error: {exc!s}") from exc
+        page = self._require_ready_tab(tab_id)
+        won, _ = await self._race_dialog(
+            tab_id,
+            lambda: self._run_action(
+                tab_id,
+                "hover",
+                lambda: page.mouse.move(x, y),
+                lambda e: BrowserOperationError(f"Hover error: {e!s}"),
+            ),
+        )
+        if won:
+            return await self._open_dialog_result(tab_id)
         return {"status": "hovered", "x": x, "y": y}
 
     async def page_fill(
@@ -714,16 +1127,15 @@ class BrowserInstance:
         ``locator.fill()``). Works on text inputs, textareas, contenteditable
         elements, checkboxes (``"true"``/``"false"``), radios, and selects.
         """
-        page = self._require_tab(tab_id)
-        locator = page.locator(f"aria-ref={ref}")
-        await self._ref_action(
+        locator = self._require_ready_tab(tab_id).locator(f"aria-ref={ref}")
+        return await self._ref_tool(
             tab_id,
             ref,
             "fill",
             lambda: locator.fill(value, timeout=timeout_ms),
-            timeout_ms,
+            {"status": "filled", "ref": ref},
+            timeout_ms=timeout_ms,
         )
-        return {"status": "filled", "ref": ref}
 
     async def page_hover(
         self, tab_id: int, ref: str, *, timeout_ms: float
@@ -733,16 +1145,15 @@ class BrowserInstance:
         Auto-scrolls the element into view (Playwright's actionability
         check) before dispatching the hover.
         """
-        page = self._require_tab(tab_id)
-        locator = page.locator(f"aria-ref={ref}")
-        await self._ref_action(
+        locator = self._require_ready_tab(tab_id).locator(f"aria-ref={ref}")
+        return await self._ref_tool(
             tab_id,
             ref,
             "hover",
             lambda: locator.hover(timeout=timeout_ms),
-            timeout_ms,
+            {"status": "hovered", "ref": ref},
+            timeout_ms=timeout_ms,
         )
-        return {"status": "hovered", "ref": ref}
 
     async def page_upload(
         self, tab_id: int, ref: str, files: list[str], *, timeout_ms: float
@@ -753,16 +1164,15 @@ class BrowserInstance:
         path for a single file input, or multiple paths for
         ``<input type="file" multiple>``.
         """
-        page = self._require_tab(tab_id)
-        locator = page.locator(f"aria-ref={ref}")
-        await self._ref_action(
+        locator = self._require_ready_tab(tab_id).locator(f"aria-ref={ref}")
+        return await self._ref_tool(
             tab_id,
             ref,
             "upload",
             lambda: locator.set_input_files(files, timeout=timeout_ms),
-            timeout_ms,
+            {"status": "uploaded", "ref": ref, "files": files},
+            timeout_ms=timeout_ms,
         )
-        return {"status": "uploaded", "ref": ref, "files": files}
 
     async def list_event_listeners(self, tab_id: int) -> list[dict]:
         """List JavaScript event listeners on window and document.
@@ -772,11 +1182,7 @@ class BrowserInstance:
         Runtime, Console, and Page domains are intentionally left
         disabled to avoid detection leaks.
         """
-        page = self._require_tab(tab_id)
-        if page.is_closed():
-            raise BrowserOperationError(
-                f"Tab {tab_id} not found in browser {self.browser_id}."
-            )
+        self._require_ready_tab(tab_id)
         cdp = await self._get_cdp_session(tab_id)
         script_map = self._script_maps.get(tab_id, {})
 
@@ -820,7 +1226,7 @@ class BrowserInstance:
         Returns:
             ``{"status": "recording"}``.
         """
-        self._require_tab(tab_id)
+        self._require_ready_tab(tab_id)
         if self._coverage_recording.get(tab_id):
             raise BrowserOperationError(f"Tab {tab_id} is already recording coverage.")
         cdp = await self._get_cdp_session(tab_id)
@@ -843,7 +1249,7 @@ class BrowserInstance:
             The shaped coverage delta (see
             ``coverage._format_coverage``).
         """
-        self._require_tab(tab_id)
+        self._require_ready_tab(tab_id)
         if not self._coverage_recording.get(tab_id):
             raise BrowserOperationError(f"Tab {tab_id} is not recording coverage.")
         cdp = await self._get_cdp_session(tab_id)
@@ -871,7 +1277,7 @@ class BrowserInstance:
             The shaped cumulative coverage object for the recording
             window.
         """
-        self._require_tab(tab_id)
+        self._require_ready_tab(tab_id)
         if not self._coverage_recording.get(tab_id):
             raise BrowserOperationError(f"Tab {tab_id} is not recording coverage.")
         cdp = await self._get_cdp_session(tab_id)
@@ -1078,11 +1484,21 @@ class BrowserInstance:
 
     async def _close(self) -> None:
         """Close the browser context and release resources."""
+        # Detaching a per-tab CDP session parks forever while a native
+        # dialog is open on that tab (the driver can't complete the
+        # detach). The context close below tears the sessions down
+        # anyway, so the detaches are best-effort with a short budget
+        # and skipped entirely for tabs with an open dialog.
         for tab_id in list(self._cdp_sessions.keys()):
+            if tab_id in self._dialogs:
+                continue
             with suppress(Exception):
-                await self._cdp_sessions[tab_id].detach()
+                await asyncio.wait_for(self._cdp_sessions[tab_id].detach(), 5.0)
         self._cdp_sessions.clear()
         self._tabs.clear()
+        # Drop every open-dialog registry entry — the tabs (and their
+        # dialogs) are going away with the context.
+        self._dialogs.clear()
         self._script_maps.clear()
         with suppress(Exception):
             if self.context:
@@ -1245,22 +1661,47 @@ class BrowserManager:
     async def open_tab(self, browser_id: int, url: str | None = None) -> dict[str, Any]:
         """Open a new tab in a specific browser.
 
+        Trigger tool when ``url`` is given (ADR-0022): a page that
+        opens a dialog at load resolves with the dialog's details
+        instead of the open status; the goto completes in the
+        background once the dialog is handled.
+
         Returns:
-            Dict with browser_id, the new tab_id, and status.
+            Dict with browser_id, the new tab_id, and status — or
+            with the open dialog's details.
         """
         inst = self._require_instance(browser_id)
-        tab_id = await inst.open_tab(url)
-        return {"browser_id": browser_id, "tab_id": tab_id, "status": "opened"}
+        result = await inst.open_tab(url)
+        if isinstance(result, dict):
+            return {"browser_id": browser_id, **result}
+        return {"browser_id": browser_id, "tab_id": result, "status": "opened"}
 
     async def close_tab(self, browser_id: int, tab_id: int) -> dict[str, Any]:
         """Close a tab in a specific browser.
 
+        If the closed tab had an open dialog (ADR-0022), the result
+        carries ``closed_dialog: {type, message}`` so the agent knows
+        what they destroyed with the close. The lookup happens before
+        the close.
+
         Returns:
-            Dict with browser_id, tab_id, and status.
+            Dict with browser_id, tab_id, and status; plus
+            ``closed_dialog`` when a dialog was open.
         """
         inst = self._require_instance(browser_id)
+        tab_dialog = next(
+            (d for d in inst.open_dialogs() if d["tab_id"] == tab_id), None
+        )
+        closed_dialog = (
+            {"type": tab_dialog["type"], "message": tab_dialog["message"]}
+            if tab_dialog is not None
+            else None
+        )
         await inst.close_tab(tab_id)
-        return {"browser_id": browser_id, "tab_id": tab_id, "status": "closed"}
+        result = {"browser_id": browser_id, "tab_id": tab_id, "status": "closed"}
+        if closed_dialog is not None:
+            result["closed_dialog"] = closed_dialog
+        return result
 
     async def navigate(
         self,
@@ -1273,12 +1714,17 @@ class BrowserManager:
     ) -> dict[str, Any]:
         """Navigate an existing tab to ``url``.
 
+        Trigger tool (ADR-0022): if the navigation opens a dialog
+        (e.g. a ``beforeunload`` handler), the result carries the
+        dialog details instead of the status string.
+
         Returns:
-            Dict with status.
+            Dict with status, or with dialog details.
         """
         inst = self._require_instance(browser_id)
-        await inst.navigate(tab_id, url, timeout_ms=timeout_ms, wait_until=wait_until)
-        return {"status": f"Navigated to: {url}"}
+        return await inst.navigate(
+            tab_id, url, timeout_ms=timeout_ms, wait_until=wait_until
+        )
 
     async def eval_js(self, browser_id: int, tab_id: int, js_code: str) -> Any:
         """Execute JavaScript in the target tab."""
@@ -1530,3 +1976,14 @@ class BrowserManager:
         """Remove a logpoint's CDP breakpoint and registry entry."""
         inst = self._require_instance(browser_id)
         return await inst.logpoint_remove(tab_id, lp_id)
+
+    async def handle_dialog(
+        self,
+        browser_id: int,
+        tab_id: int,
+        action: str,
+        prompt_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Accept or dismiss the tab's open dialog."""
+        inst = self._require_instance(browser_id)
+        return await inst.handle_dialog(tab_id, action, prompt_text)

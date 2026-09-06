@@ -24,6 +24,10 @@ The version lives in three places — `pyproject.toml`, `src/odda/__init__.py`
 (`__version__`), and `uv.lock` — and must move together: update both code sites, then
 run `uv lock`.
 
+Version bumps happen only on explicit request: the user merges dev branches first and
+increments the version afterwards, so never touch the version on a dev branch unless
+asked.
+
 ## Dependencies
 
 `patchright` stays pinned to an exact version, never ranged. A bump requires the

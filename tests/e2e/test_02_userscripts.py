@@ -1,15 +1,12 @@
-"""Userscripts and the dialog interceptor (port of scrut 02-userscripts.md).
+"""Userscripts (port of scrut 02-userscripts.md).
 
 Userscripts are JS helpers that run at document_start on every
-navigation, scoped per browser. odda also ships a built-in dialog
-interceptor that captures window.print/alert/confirm/prompt calls in
-window.__oddaDialogs. Assertion source: verify_06.py's '02: userscripts'
-section; the scrut doc adds the dialog-interceptor surface.
+navigation, scoped per browser. The default userscripts
+(logpoint-helpers.js) ship in every browser's scope. Assertion
+source: verify_06.py's '02: userscripts' section.
 """
 
 from __future__ import annotations
-
-import json
 
 from tests.e2e.conftest import fixture_site
 
@@ -139,137 +136,3 @@ async def test_userscript_remove_stops_injection(odda_session, tmp_path) -> None
             "userscript_remove", {"browser_id": bid, "name": "no-such"}
         )
         assert err == "Userscript 'no-such' not found"
-
-
-async def test_dialog_interceptor_installed_and_captures(odda_session) -> None:
-    """The interceptor ships by default: print doesn't block and
-    alert/confirm/prompt are captured into __oddaDialogs in order."""
-    async with odda_session() as h, fixture_site(["index.html", "dialogs.html"]) as fx:
-        bid, tid = await h.open_browser(f"{fx.base}/")
-        await h.navigate(bid, tid, f"{fx.base}/dialogs.html")
-        v = await h.wait_for(bid, tid, "window.__oddaDialogInterceptorInstalled")
-        assert v == "true"
-
-        v = await h.eval(bid, tid, "window.print(); 'print-ok'")
-        assert v == "print-ok"
-
-        v = await h.eval(bid, tid, "window.alert('alert-msg'); 'alert-ok'")
-        assert v == "alert-ok"
-        v = await h.eval(bid, tid, "window.confirm('confirm-msg'); 'confirm-ok'")
-        assert v == "confirm-ok"
-        v = await h.eval(
-            bid, tid, "window.prompt('prompt-msg', 'prompt-default'); 'prompt-ok'"
-        )
-        assert v == "prompt-ok"
-
-        js = (
-            "JSON.stringify(window.__oddaDialogs.slice(-4)"
-            ".map(e => [e.type, e.message, e.defaultValue]))"
-        )
-        captured = json.loads(await h.eval(bid, tid, js))
-        assert captured == [
-            ["print", None, None],
-            ["alert", "alert-msg", None],
-            ["confirm", "confirm-msg", None],
-            ["prompt", "prompt-msg", "prompt-default"],
-        ]
-
-
-async def test_dialog_defaults_proceed(odda_session) -> None:
-    """With no pre-registered response, confirm returns true and prompt returns
-    'odda' (ADR-0011), and both defaults are recorded as result."""
-    async with odda_session() as h, fixture_site(["index.html", "dialogs.html"]) as fx:
-        bid, tid = await h.open_browser(f"{fx.base}/")
-        await h.navigate(bid, tid, f"{fx.base}/dialogs.html")
-        await h.wait_for(bid, tid, "window.__oddaDialogInterceptorInstalled")
-
-        v = await h.eval(bid, tid, "String(window.confirm('are-you-sure'))")
-        assert v == "true"
-        v = await h.eval(bid, tid, "String(window.prompt('answer-please'))")
-        assert v == "odda"
-
-        js = (
-            "JSON.stringify(window.__oddaDialogs.slice(-2)"
-            ".map(e => [e.type, e.message, e.result]))"
-        )
-        recorded = json.loads(await h.eval(bid, tid, js))
-        assert recorded == [
-            ["confirm", "are-you-sure", True],
-            ["prompt", "answer-please", "odda"],
-        ]
-
-
-async def test_dialog_response_map_overrides(odda_session) -> None:
-    """__oddaDialogResponses overrides the defaults; the registered values are
-    returned and recorded as result."""
-    async with odda_session() as h, fixture_site(["index.html", "dialogs.html"]) as fx:
-        bid, tid = await h.open_browser(f"{fx.base}/")
-        await h.navigate(bid, tid, f"{fx.base}/dialogs.html")
-        await h.wait_for(bid, tid, "window.__oddaDialogInterceptorInstalled")
-
-        v = await h.eval(
-            bid,
-            tid,
-            "window.__oddaDialogResponses = {prompt: 's3cr3t', confirm: false}; 'set'",
-        )
-        assert v == "set"
-
-        v = await h.eval(bid, tid, "String(window.prompt('answer-please'))")
-        assert v == "s3cr3t"
-        v = await h.eval(bid, tid, "String(window.confirm('are-you-sure'))")
-        assert v == "false"
-
-        js = (
-            "JSON.stringify(window.__oddaDialogs.slice(-2)"
-            ".map(e => [e.type, e.message, e.result]))"
-        )
-        recorded = json.loads(await h.eval(bid, tid, js))
-        assert recorded == [
-            ["prompt", "answer-please", "s3cr3t"],
-            ["confirm", "are-you-sure", False],
-        ]
-
-
-async def test_dialog_response_verbatim_no_coercion(odda_session) -> None:
-    """A string registered for confirm is returned verbatim, not coerced to a
-    boolean, and recorded as the string."""
-    async with odda_session() as h, fixture_site(["index.html", "dialogs.html"]) as fx:
-        bid, tid = await h.open_browser(f"{fx.base}/")
-        await h.navigate(bid, tid, f"{fx.base}/dialogs.html")
-        await h.wait_for(bid, tid, "window.__oddaDialogInterceptorInstalled")
-
-        v = await h.eval(
-            bid, tid, "window.__oddaDialogResponses = {confirm: 'yes'}; 'set'"
-        )
-        assert v == "set"
-
-        v = await h.eval(bid, tid, "String(window.confirm('are-you-sure'))")
-        assert v == "yes"
-
-        js = (
-            "JSON.stringify(window.__oddaDialogs.slice(-1)"
-            ".map(e => [e.type, e.message, e.result]))"
-        )
-        recorded = json.loads(await h.eval(bid, tid, js))
-        assert recorded == [["confirm", "are-you-sure", "yes"]]
-
-
-async def test_dialog_alert_print_keys_ignored(odda_session) -> None:
-    """alert/print keys in the response map are ignored: neither throws nor
-    changes behavior."""
-    async with odda_session() as h, fixture_site(["index.html", "dialogs.html"]) as fx:
-        bid, tid = await h.open_browser(f"{fx.base}/")
-        await h.navigate(bid, tid, f"{fx.base}/dialogs.html")
-        await h.wait_for(bid, tid, "window.__oddaDialogInterceptorInstalled")
-
-        v = await h.eval(
-            bid,
-            tid,
-            "window.__oddaDialogResponses = {alert: 'foo', print: 'bar'}; 'set'",
-        )
-        assert v == "set"
-
-        v = await h.eval(bid, tid, "window.alert('alert-msg'); 'alert-ok'")
-        assert v == "alert-ok"
-        v = await h.eval(bid, tid, "window.print(); 'print-ok'")
-        assert v == "print-ok"

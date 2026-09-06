@@ -97,7 +97,7 @@ A real Chrome (via patchright/Playwright), headless by default:
 - **Open / navigate / eval / wait-for / screenshot** — drive the browser and run JS in the page.
 - **Ref-driven page interaction** — `page_snapshot` returns the accessibility tree with `[ref=eN]` tags; pass the ref to `page_click` / `page_fill` / `page_hover` / `page_upload`. `page_click` and `page_hover` also accept viewport coordinates as a raw trusted event for targets the a11y tree can't name. Cross-iframe is transparent.
 - **Per-browser userscripts** — JS that auto-runs at `document_start` on every navigation, before the page's own scripts.
-- **Dialog interceptor** — `alert` / `confirm` / `prompt` / `print` proceed by default and are recorded for inspection.
+- **Dialog blocking** — `alert` / `confirm` / `prompt` / `beforeunload` stay open until handled: the action that opens one returns its details, other tools on that tab wait, and every same-browser result lists open dialogs. Resolve with `dialog_handle` (accept/dismiss, prompt text); a human closing it in a headed window works too.
 
 ### Capture every flow
 

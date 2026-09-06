@@ -43,8 +43,16 @@ Observing JavaScript execution in progress — recording what code does as it ru
 _Avoid_: trace, analyze-js, instrumentation
 
 **Userscript**:
-A JS helper that auto-runs at `document_start` on every navigation, before the page's own scripts, in the main world. Installed via the `userscript_install` tool and re-injected on every page load. odda ships built-in default userscripts (notably the dialog interceptor recording `window.print`/`alert`/`confirm`/`prompt` calls into `window.__oddaDialogs`). Scope: per-browser, not shared across browsers; an agent opening a fresh browser starts with only the default userscripts.
+A JS helper that auto-runs at `document_start` on every navigation, before the page's own scripts, in the main world. Installed via the `userscript_install` tool and re-injected on every page load. odda ships built-in default userscripts. Scope: per-browser, not shared across browsers; an agent opening a fresh browser starts with only the default userscripts.
 _Avoid_: content script, extension script, injected helper, hook
+
+**Logpoint**:
+A placed observation at a source location the agent identifies by script URL, line, and column. odda plants a non-pausing `Debugger.setBreakpointByUrl` whose condition evaluates an expression the agent supplies, in the paused-then-immediately-resumed frame's scope. The page never stops. The expression can have side effects if the agent writes them, but the intent is to read, not write. odda warns at install time if no loaded script matches the URL. Logpoints persist until explicitly removed; records are wiped on navigation. Logpoints do not survive tab close — they are per-tab-session, not durable. Scope: same frame as the Debugger domain already enabled on (main frame and same-origin iframes). Cross-origin iframes and worker contexts are out of scope.
+_Avoid_: breakpoint, tracepoint, watchpoint, probe
+
+**Coverage**:
+An aggregate query over a browsing context — start it, do the thing, stop it, read back per-block hit counts. Not placed at any target; records counts, not events. The recording window spans navigations: counts accumulate across page loads inside the `[start, stop]` window, so an agent can start, navigate to trigger behavior, and snapshot/stop to read which paths ran. Scope: main frame and same-origin iframes in a tab. Cross-origin iframes and worker contexts are out of scope.
+_Avoid_: probe, profile, execution map, wrap
 
 ## Request crafting
 
@@ -68,23 +76,25 @@ _Avoid_: H2 source, frame input, pseudo-header source
 The byte sequence ending a header line in the request file, stored in `meta.json` (`line_terminator`, default `\r\n`) and set at `request_new` time. The block terminator (header/body separator) is always two line terminators. Only honored for frame-source (HTTP/2) request files; ignored on HTTP/1.1 (wire-faithful — the file is the wire bytes, no re-framing). Lets an agent put a literal CRLF inside a pseudo-header value (e.g. a `:path` of `/foo\r\nX-Evil: yes` for H2→H1 downgrade smuggling) by setting the line terminator to `\n`: the parser splits on `\n` / `\n\n`, never on `\r\n`, so the CRLF inside the value is preserved into the H2 frame. The agent's constraint is that no value contains the terminator.
 _Avoid_: separator, delimiter, line separator, framing byte
 
+## Dialogs
+
+**Dialog**:
+A JavaScript modal (`alert`, `confirm`, `prompt`, `beforeunload`) that the page opens. Under odda, a dialog is a first-class open state of its tab: it stays open (never auto-accepted, never auto-dismissed), it surfaces in every same-browser tool result while open, and it gates the tab — tab-touching tools block until it is handled. The action that opened it returns with the dialog's details instead of hanging.
+_Avoid_: dialog interceptor, notification, popup
+
+**Dialog note**:
+The structured record of open dialogs a tool result carries while any dialog is open in the same browser: `dialogs: [{tab_id, type, message, default_value}]` appended to same-browser tool results, and `closed_dialog: {type, message}` on a `tabs_close` that closed a dialog tab. The note is read-only observation — it never handles the dialog.
+_Avoid_: dialog response, modal state, dialog hint
+
+**Dialog handling**:
+Resolving an open dialog via the `dialog_handle` tool (`accept`/`dismiss`, `prompt_text` for prompts). The only way an agent changes a dialog's outcome; handling resumes the tab's frozen page JS, completes parked actions, and unblocks same-tab tools. A human closing the dialog in a headed window resolves it just as well: the tab unblocks (odda detects the close via a parked liveness probe and clears its dialog state), and a subsequent `dialog_handle` reports the dialog as already closed rather than double-handling it.
+_Avoid_: dialog response, auto-accept, dialog handler
+
 ## Proxy interception
 
 **Proxy-script**:
 A Python file in mitmproxy `-s` script format that odda execs and adds to the running proxy's addon chain. Installed via the `proxy_script_install` tool (`force` overwrites by name), persisted under `.odda/proxy-scripts/<name>/script.py`, re-added on session boot; scope is global (one proxy shared across all browsers, not per-browser like userscripts).
 _Avoid_: addon, interceptor, proxy addon, mitmproxy script, userscript
-
-**Dialog response**:
-A pre-registered value the dialog interceptor returns for a `confirm` or `prompt` call instead of the default. Defaults: `confirm` returns `true`, `prompt` returns `"odda"` (proceed-by-default). The agent overrides per-type by setting `window.__oddaDialogResponses` (e.g. `{prompt: "s3cr3t"}`) via `eval` before the triggering click, or via a userscript for on-load prompts; the interceptor reads the map and returns the registered value, recording the dialog in `window.__oddaDialogs` with that `result`. To restore the old deny-by-default, register `{confirm: false, prompt: null}`. The interceptor never resets the map (agent-owned state); no map set = proceed-by-default. Per-tab: the map lives on `window`, scoped to one document. Keys for `alert`/`print` are ignored — those types have no return value to influence. Registered values pass through verbatim (no type coercion).
-_Avoid_: dialog handler, dialog stub, dialog mock, prompt override
-
-**Logpoint**:
-A placed observation at a source location the agent identifies by script URL, line, and column. odda plants a non-pausing `Debugger.setBreakpointByUrl` whose condition evaluates an expression the agent supplies, in the paused-then-immediately-resumed frame's scope. The page never stops. The expression can have side effects if the agent writes them, but the intent is to read, not write. odda warns at install time if no loaded script matches the URL. Logpoints persist until explicitly removed; records are wiped on navigation. Logpoints do not survive tab close — they are per-tab-session, not durable. Scope: same frame as the Debugger domain already enabled on (main frame and same-origin iframes). Cross-origin iframes and worker contexts are out of scope.
-_Avoid_: breakpoint, tracepoint, watchpoint, probe
-
-**Coverage**:
-An aggregate query over a browsing context — start it, do the thing, stop it, read back per-block hit counts. Not placed at any target; records counts, not events. The recording window spans navigations: counts accumulate across page loads inside the `[start, stop]` window, so an agent can start, navigate to trigger behavior, and snapshot/stop to read which paths ran. Scope: main frame and same-origin iframes in a tab. Cross-origin iframes and worker contexts are out of scope.
-_Avoid_: probe, profile, execution map, wrap
 
 ## Testing
 

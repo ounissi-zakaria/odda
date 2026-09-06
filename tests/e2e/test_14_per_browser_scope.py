@@ -4,7 +4,7 @@ of scrut 14-per-browser-scope.md).
 Wraps and userscripts are stored per-browser (ADR-0010): a wrap or
 userscript installed on browser 1 does not appear in browser 2's
 wrap_list/userscript_list and does not run in browser 2's tabs. The
-default userscripts (dialog interceptor) ship in every browser's scope.
+default userscripts (logpoint-helpers.js) ship in every browser's scope.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ async def test_wrap_scope_is_per_browser(odda_session) -> None:
 
         # With wraps installed on browser 1, browser 2's userscript_list must
         # not carry the wrap's userscript either (containment absence, not an
-        # exact list — only default userscripts like the dialog interceptor
+        # exact list — only default userscripts like logpoint-helpers.js
         # may appear).
         r = await h.call("userscript_list", {"browser_id": bid2})
         assert not any(s["name"] == WRAP_PREFIX + "leaktest" for s in r)
@@ -95,7 +95,7 @@ async def test_userscript_scope_is_per_browser(odda_session, tmp_path) -> None:
 
 
 async def test_default_userscripts_ship_in_every_browser(odda_session) -> None:
-    """The dialog interceptor is a default userscript: it runs in both browser
+    """logpoint-helpers.js is a default userscript: it runs in both browser
     1 and browser 2 without ever being installed on either."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         bid1, tid1 = await h.open_browser(f"{fx.base}/")
@@ -103,12 +103,12 @@ async def test_default_userscripts_ship_in_every_browser(odda_session) -> None:
 
         await h.navigate(bid1, tid1, f"{fx.base}/")
         v = await h.wait_for(
-            bid1, tid1, "window.__oddaDialogInterceptorInstalled", timeout=3
+            bid1, tid1, "window.__oddaLogpoint !== undefined", timeout=3
         )
         assert v == "true"
 
         await h.navigate(bid2, tid2, f"{fx.base}/")
         v = await h.wait_for(
-            bid2, tid2, "window.__oddaDialogInterceptorInstalled", timeout=3
+            bid2, tid2, "window.__oddaLogpoint !== undefined", timeout=3
         )
         assert v == "true"

@@ -247,7 +247,7 @@ Clone a captured `GET /admin` (401, "only local users") from `flows.jsonl`, rewr
 
 ## Recipe: inject before page scripts via userscript, then observe
 
-Install a userscript that runs at `document_start` (before the page's own scripts) to inject hooks or payloads, then use `eval`/`wrap_*`/`coverage_*` to observe how the page's scripts interact with the injected code — the userscript + dynamic-analysis composition for any "I need to run code before the page" investigation (prototype pollution, DOM clobbering, pre-script `window` mods). Wraps *are* userscripts (`wrap_calls_add`/`wrap_access_add` inject at `document_start`), and odda's built-in dialog interceptor is a default userscript recording `alert`/`confirm`/`prompt` into `window.__oddaDialogs`.
+Install a userscript that runs at `document_start` (before the page's own scripts) to inject hooks or payloads, then use `eval`/`wrap_*`/`coverage_*` to observe how the page's scripts interact with the injected code — the userscript + dynamic-analysis composition for any "I need to run code before the page" investigation (prototype pollution, DOM clobbering, pre-script `window` mods). Wraps *are* userscripts (`wrap_calls_add`/`wrap_access_add` inject at `document_start`).
 
 ### 1. Open a browser and navigate to the target
 
@@ -290,13 +290,17 @@ wrap_dump(browser_id=B, tab_id=T)
 navigate(browser_id=B, tab_id=T, url="<url>?__proto__[<gadgetProperty>]=<payload>")
 ```
 
-### 6. Confirm the result via window.__oddaDialogs
+### 6. Confirm the result via the dialog it fires
 
 ```
-eval(browser_id=B, tab_id=T, js="window.__oddaDialogs")
-# the dialog interceptor (a default userscript) records alert/confirm/prompt calls
+navigate(browser_id=B, tab_id=T, url="<url>?__proto__[<gadgetProperty>]=<payload>")
+# → {dialog: {type: "alert", message: "1", ...}}   — the payload's alert fired
 ```
+
+The dialog's details come back in the result; `dialog_handle` to resolve it (or dismiss to deny a `confirm`-gated action).
+
+For a payload that fires inside a cross-origin iframe, the dialog still opens (the browser owns dialogs, not the frame) — but to pin down *which* frame ran the payload, test on a same-origin instance of the page.
 
 ### Worked example: DOM XSS via client-side prototype pollution
 
-Navigated to the lab, then to `?__proto__[foo]=bar`; `eval` with `js="Object.prototype.foo"` returned `"bar"`, confirming `deparam.js` is the source. Grepping `flows.jsonl` for the lab host surfaced `searchLogger.js`; reading its body showed `config = {params: deparam(...)}` then `if (config.transport_url) { script.src = config.transport_url }` — `transport_url` is never set on `config`, so it's inherited from the polluted prototype and flows into a `script.src` sink. Navigating to `?__proto__[transport_url]=data:text/javascript,alert(1)` injected a script that called `alert(1)`; the built-in dialog interceptor captured it in `window.__oddaDialogs` and the page showed "Solved". No custom userscript was needed here — the built-in interceptor plus `eval`/flow reading sufficed. When the page's own scripts sanitize or the gadget needs a pre-script hook, author a userscript and `userscript_install` it, then re-navigate.
+Navigated to the lab, then to `?__proto__[foo]=bar`; `eval` with `js="Object.prototype.foo"` returned `"bar"`, confirming `deparam.js` is the source. Grepping `flows.jsonl` for the lab host surfaced `searchLogger.js`; reading its body showed `config = {params: deparam(...)}` then `if (config.transport_url) { script.src = config.transport_url }` — `transport_url` is never set on `config`, so it's inherited from the polluted prototype and flows into a `script.src` sink. Navigating to `?__proto__[transport_url]=data:text/javascript,alert(1)` injected a script that called `alert(1)`; the `navigate` result carried the open `{type: "alert"}` dialog as proof the payload executed, and `dialog_handle` with `accept` closed it so the page (which showed "Solved") kept running. No custom userscript was needed here — dialog results plus `eval`/flow reading sufficed. When the page's own scripts sanitize or the gadget needs a pre-script hook, author a userscript and `userscript_install` it, then re-navigate.

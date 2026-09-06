@@ -2,7 +2,17 @@
 <html>
 <head><title>Dialog Test</title></head>
 <body>
+<button id="confirm-btn"
+  onclick="window.__confirmResult = window.confirm('confirm-message'); window.__confirmDone = true">Confirm me</button>
+<button id="prompt-btn"
+  onclick="window.__promptResult = window.prompt('prompt-message', 'prefilled'); window.__promptDone = true">Prompt me</button>
+<button id="alert-btn" onclick="window.alert('alert-message')">Alert me</button>
+<button id="arm-btn">Arm beforeunload</button>
 <script>
+document.getElementById('arm-btn').addEventListener('click', () => {
+  window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; });
+  window.__armed = true;
+});
 </script>
 </body>
 </html>

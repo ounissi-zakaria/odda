@@ -118,8 +118,9 @@ async def test_event_listeners_lists_window_and_document_types(odda_session) -> 
 
         r = await h.call("event_listeners", {"browser_id": bid, "tab_id": tid})
         types = sorted({l["type"] for l in r})
-        # The built-in dialog-interceptor userscript adds a `message`
-        # listener, so containment (not the exact set) is the contract.
+        # Built-in default userscripts still ship in every browser and
+        # may register listeners, so containment (not the exact set) is
+        # the contract.
         assert {"resize", "scroll"} <= set(types)
         assert types == sorted(types)
 

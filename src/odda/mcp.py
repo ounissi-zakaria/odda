@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib import resources as importlib_resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 # Context must be imported at runtime: the SDK resolves tool
 # annotations via get_type_hints at add_tool time, so a
@@ -192,7 +192,7 @@ def _register_doc_resources() -> None:
         "flows": "Flow file layout and the flows.jsonl schema.",
         "dynamic-analysis": "Wrap, logpoint, and coverage observation of JS execution.",
         "userscripts": (
-            "Userscripts that auto-run at document_start; built-in dialog interceptor."
+            "Userscripts that auto-run at document_start; shipped default helper."
         ),
         "proxy-scripts": (
             "mitmproxy addons at the proxy layer; format, scope, failure model."
@@ -276,7 +276,12 @@ async def tabs_open(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Open a new tab in a browser, optionally navigating to a URL."""
+    """Open a new tab in a browser, optionally navigating to a URL.
+
+    If the URL's page opens a dialog while loading (e.g. an on-load
+    alert), the result carries the dialog's details instead of the
+    open status; resolve it with dialog_handle.
+    """
     return await ctx.request_context.lifespan_context.browser.open_tab(browser_id, url)
 
 
@@ -292,6 +297,33 @@ async def tabs_close(
     """
     return await ctx.request_context.lifespan_context.browser.close_tab(
         browser_id, tab_id
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def dialog_handle(
+    browser_id: int,
+    tab_id: int,
+    action: Literal["accept", "dismiss"],
+    prompt_text: str | None = None,
+    *,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Accept or dismiss the tab's open alert/confirm/prompt dialog.
+
+    Native dialogs (alert/confirm/prompt/beforeunload) block the page
+    until handled. accept answers OK/true (confirm) or
+    the given prompt_text (prompt; supplies the answer, defaults to
+    the dialog's default_value; ignored for non-prompts and with
+    dismiss); dismiss answers cancel/false/null. While a dialog is
+    open, same-tab tools reject with an error instead of running —
+    handle the dialog first, then retry them. beforeunload
+    fires on navigate away (accept completes it, dismiss stays) but
+    never on tab/browser close.
+    """
+    return await ctx.request_context.lifespan_context.browser.handle_dialog(
+        browser_id, tab_id, action, prompt_text
     )
 
 

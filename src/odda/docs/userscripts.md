@@ -21,36 +21,6 @@ Userscripts are stored **per-browser** on disk under `.odda/browsers/<browser_id
 
 ## Built-in default userscripts
 
-odda ships built-in default userscripts that are always injected before any installed userscripts in every browser. Currently this includes a **dialog interceptor** that records calls to `window.print`, `window.alert`, `window.confirm`, and `window.prompt` in `window.__oddaDialogs`. It loads at `document_start` before the page's own scripts, so it captures alerts from page scripts, userscripts, and payload scripts injected later (e.g. via prototype pollution `data:` URL gadgets).
+odda ships built-in default userscripts that are always injected before any installed userscripts in every browser. They are inlined into the same extension as installed userscripts, so they load in every tab and frame at `document_start`, ahead of the page's own scripts — but they are not listed by `userscript_list` (which reports installed scripts only) and cannot be removed.
 
-`eval` with `js="window.__oddaDialogs"` returns an array of captured dialog/print events. Each entry has `{type, url, timestamp, stack, result?}` plus `message` and `defaultValue` when applicable:
-
-- `type` is one of `print`, `alert`, `confirm`, `prompt`.
-- `message` is present for `alert`/`confirm`/`prompt`.
-- `defaultValue` is present for `prompt`.
-- `result` is recorded for `confirm`/`prompt` — the value the interceptor returned (a registered override if set, else the default; see below).
-
-Use this to inspect what modal dialogs or print calls a page triggered during automation.
-
-### Dialog responses: proceed-by-default and override
-
-`confirm` and `prompt` **proceed by default**: `confirm` returns `true` and `prompt` returns `"odda"`, so a dialog-gated form or action proceeds instead of being silently denied by headless Chrome's native handlers. `alert` (forwards to the native no-op) and `print` (suppressed) are unchanged — they have no return value to gate.
-
-Override the return value per-type by setting `window.__oddaDialogResponses` before the triggering call:
-
-```
-eval(browser_id=B, tab_id=T, js="window.__oddaDialogResponses = {prompt: 's3cr3t'}")
-page_click(browser_id=B, tab_id=T, ref="e8")
-eval(browser_id=B, tab_id=T, js="window.__oddaDialogs")   # result: "s3cr3t"
-```
-
-- The map is keyed by dialog type (`{prompt: "value", confirm: true}`). Registered values pass through **verbatim** — no type coercion; `{confirm: "yes"}` returns the string `"yes"` (truthy, page proceeds as confirmed).
-- To restore the old deny-by-default per-type, register `{confirm: false, prompt: null}`.
-- Keys for `alert`/`print` are ignored (no return value to influence).
-- The interceptor **reads** `window.__oddaDialogResponses` only; it never writes or resets the map. The map is agent-owned state. This preserves the on-load-prompt escape hatch: a userscript setting the map at `document_start` runs before the page's on-load `prompt()`, so the interceptor sees the registered value. (Default userscripts load before agent-installed ones, so an interceptor that reset the map would clobber an agent userscript's response.)
-- The map **persists until cleared** (re-`eval` `window.__oddaDialogResponses = {}` or `delete` the key). A forgotten response leaks to later dialogs of that type, but the leak is visible in `__oddaDialogs` (every dialog records its `result`).
-
-#### Limitations
-
-- **Cross-frame.** `window.__oddaDialogs` is **per-window** — the interceptor runs in every frame and records into that frame's own `window.__oddaDialogs`, not a shared top-frame array. A `prompt()`/`alert()` inside a cross-origin iframe is recorded in the iframe's `window`, which the top frame cannot read cross-origin (`Blocked a frame ... from accessing a cross-origin frame`). An agent that triggers an XSS payload in a cross-origin iframe and then reads `window.__oddaDialogs` from the top frame sees `[]` and wrongly concludes the payload failed. To confirm a sink that fires in a cross-origin iframe, test it on a **same-origin instance** of the page (e.g. host the payload same-origin, or navigate the iframe to a same-origin URL that triggers the same code path) and read `__oddaDialogs` from there.
-- **Cross-navigation (userscript-set responses).** A response set via `eval` is scoped to one document and dies on navigation (fresh `window`). A response set via a userscript (the on-load-prompt escape hatch) persists across navigation and applies to an unrelated page's on-load prompt too. This is inherent to how userscripts work (run on every navigation; see "Idempotent re-injection" above). Prefer `eval` for one-shot responses; reserve userscript-set responses for pages whose on-load scripts call `confirm`/`prompt`.
+Currently the default is a single **logpoint helper**: it sets up `window.__oddaLogpoint` (the per-tab record array that `logpoint_dump` reads) and the value-serialization helper `window.__oddaSerialize` used by logpoint breakpoint conditions. It guards its own definitions (`if (!window.__odda…)`) so re-injection is idempotent, and because defaults load before installed userscripts, the default's definition always wins — do not define your own `window.__oddaLogpoint`, `window.__oddaLogpointPush`, or `window.__oddaSerialize` in an installed userscript expecting it to take effect. Overwriting `window.__oddaLogpoint` with a non-array breaks `logpoint_dump` on that tab.
