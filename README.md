@@ -95,7 +95,7 @@ All captured traffic is stored under `.odda/flows/<id>/` — request bytes, resp
 A real Chrome (via patchright/Playwright), headless by default:
 
 - **Open / navigate / eval / wait-for / screenshot** — drive the browser and run JS in the page.
-- **Ref-driven page interaction** — `page_snapshot` returns the accessibility tree with `[ref=eN]` tags; pass the ref to `page_click` / `page_fill` / `page_hover` / `page_upload`. `page_click` and `page_hover` also accept viewport coordinates as a raw trusted event for targets the a11y tree can't name. Cross-iframe is transparent.
+- **Ref-driven page interaction** — `page_snapshot` returns the accessibility tree with `[ref=eN]` tags; pass the ref to `page_click` / `page_fill` / `page_hover` / `page_upload`. `page_snapshot` scopes to a subtree (`target`: ref or selector) and caps depth; `page_find` regex-searches the snapshot and returns matches with context instead of the whole tree (the cheap way to locate a ref on a large page); `boxes: true` adds element geometry for coordinate clicks. `page_click` and `page_hover` also accept viewport coordinates as a raw trusted event for targets the a11y tree can't name. Cross-iframe is transparent.
 - **Per-browser userscripts** — JS that auto-runs at `document_start` on every navigation, before the page's own scripts.
 - **Dialog blocking** — `alert` / `confirm` / `prompt` / `beforeunload` stay open until handled: the action that opens one returns its details, other tools on that tab wait, and every same-browser result lists open dialogs. Resolve with `dialog_handle` (accept/dismiss, prompt text); a human closing it in a headed window works too.
 

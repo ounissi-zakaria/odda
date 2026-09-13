@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib import resources as importlib_resources
@@ -474,7 +475,13 @@ async def screenshot(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def page_snapshot(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: int,
+    tab_id: int,
+    target: str | None = None,
+    depth: int | None = None,
+    *,
+    boxes: bool = False,
+    ctx: Context[OddaState],
 ) -> str:
     """Take an agent-readable snapshot of the page's accessibility tree.
 
@@ -484,9 +491,50 @@ async def page_snapshot(
     so they survive DOM mutations; take a fresh snapshot after a
     navigation. Prefer this over screenshot for finding elements;
     use screenshot for visual layout.
+
+    target: scope to one element's subtree — a ref from a snapshot, or
+    any Playwright selector (e.g. "nav", "#login-form"), so a subtree
+    can be snapshotted without a prior full snapshot.
+    depth: cap tree depth; boundary nodes render without children.
+    boxes: include [box=x,y,width,height] per line — geometry source
+    for page_click/page_hover coordinates.
+    On a large page, prefer page_find (search without the full tree).
     """
     return await ctx.request_context.lifespan_context.browser.page_snapshot(
-        browser_id, tab_id
+        browser_id, tab_id, target=target, depth=depth, boxes=boxes
+    )
+
+
+@mcp_server.tool(structured_output=False)
+@odda_tool
+async def page_find(
+    browser_id: int,
+    tab_id: int,
+    regex: str,
+    *,
+    boxes: bool = False,
+    ctx: Context[OddaState],
+) -> str:
+    """Search the page's accessibility snapshot for a regex.
+
+    Returns matching regions with context, not the whole tree.
+
+    Cheaper than page_snapshot when you only need to locate an element
+    and its ref on a large page: each match comes back with a few lines
+    of context and its ancestor path from the tree root, so refs arrive
+    with their location. The snapshot is taken fresh on every call.
+    regex: Python re pattern, matched per line (case-sensitive; add
+    (?i) for case-insensitive). Refs in results work in page_click/
+    page_fill/page_hover/page_upload and as page_snapshot targets.
+    boxes: include [box=x,y,width,height] per line — geometry source
+    for page_click/page_hover coordinates.
+    """
+    try:
+        pattern = re.compile(regex)
+    except re.error as exc:
+        raise ToolParamError(f"Invalid regex: {exc}") from exc
+    return await ctx.request_context.lifespan_context.browser.page_find(
+        browser_id, tab_id, pattern, boxes=boxes
     )
 
 

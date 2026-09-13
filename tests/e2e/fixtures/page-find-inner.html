@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>page-find inner</title>
+</head>
+<body>
+  <button type="button" id="iframe-btn">Iframe target</button>
+  <div id="iframe-result">iframe result: pending</div>
+  <script>
+    document.getElementById("iframe-btn").onclick = () => {
+      document.getElementById("iframe-result").textContent = "iframe result: clicked";
+    };
+    window.__oddaPageFindIframeLoaded = true;
+  </script>
+</body>
+</html>

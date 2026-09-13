@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ from patchright.async_api import (
     BrowserContext,
     CDPSession,
     Dialog,
+    Locator,
     Page,
     Playwright,
     async_playwright,
@@ -33,6 +35,13 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+# A snapshot ref (``e5``) optionally frame-prefixed (``f1e12``) — the
+# target forms page_snapshot routes to the aria-ref engine; anything
+# else is parsed as a Playwright selector.
+_REF_LIKE = re.compile(r"(?:f\d+)?e\d+")
+# Context lines around each page_find match (upstream parity: grep -C 3).
+_FIND_CONTEXT_LINES = 3
 
 BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
 
@@ -976,22 +985,100 @@ class BrowserInstance:
 
     # --- page interaction --------------------------------------------
 
-    async def page_snapshot(self, tab_id: int) -> str:
+    async def page_snapshot(
+        self,
+        tab_id: int,
+        *,
+        target: str | None = None,
+        depth: int | None = None,
+        boxes: bool = False,
+    ) -> str:
         """Return the page's accessibility tree as agent-readable text.
 
-        Calls Playwright's ``page.aria_snapshot(mode="ai")`` which returns
+        Calls Playwright's ``aria_snapshot(mode="ai")`` which returns
         a YAML-ish serialization of the a11y tree with ``[ref=eN]`` tags
         (or ``[ref=f<frameSeq>eN]`` inside iframes). The agent greps the
         text for the element it wants and passes the ref to ``click``,
         ``fill``, ``hover``, or ``upload``.
+
+        ``target`` scopes the snapshot to one element's subtree: a ref
+        (``e5``, frame-prefixed ``f1e12``) resolved via the ``aria-ref``
+        engine, or any other string parsed as a Playwright selector —
+        so a subtree can be snapshotted without a prior full snapshot.
+        ``depth`` caps the tree depth (boundary nodes render without
+        children); ``boxes`` adds ``[box=x,y,width,height]`` per line
+        (source for coordinate clicks).
         """
         page = self._require_ready_tab(tab_id)
+        root: Page | Locator = page
+        if target is not None:
+            if _REF_LIKE.fullmatch(target):
+                root = page.locator(f"aria-ref={target}")
+            else:
+                root = page.locator(target)
         return await self._run_action(
             tab_id,
             "snapshot",
-            lambda: page.aria_snapshot(mode="ai"),
+            lambda: root.aria_snapshot(mode="ai", depth=depth, boxes=boxes or None),
             lambda e: BrowserOperationError(f"Snapshot error: {e!s}"),
         )
+
+    async def page_find(
+        self, tab_id: int, pattern: re.Pattern[str], *, boxes: bool = False
+    ) -> str:
+        """Search a fresh snapshot; return matching regions, not the tree.
+
+        Cheap way to locate an element and its ref on a large page: a
+        full ``mode="ai"`` snapshot is still taken server-side, but only
+        the matched lines (each with a few lines of context, overlapping
+        windows coalesced, and the match's ancestor path from the tree
+        root prepended) come back.
+        """
+        text = await self.page_snapshot(tab_id, boxes=boxes)
+        lines = text.splitlines()
+        matched = [i for i, line in enumerate(lines) if pattern.search(line)]
+        if not matched:
+            return f"No matches for /{pattern.pattern}/ in snapshot"
+
+        windows: list[tuple[int, int]] = []
+        for i in matched:
+            lo = max(0, i - _FIND_CONTEXT_LINES)
+            hi = min(len(lines) - 1, i + _FIND_CONTEXT_LINES)
+            # +1: adjacent windows merge too (upstream parity).
+            if windows and lo <= windows[-1][1] + 1:
+                windows[-1] = (windows[-1][0], hi)
+            else:
+                windows.append((lo, hi))
+
+        blocks = []
+        for w, (lo, hi) in enumerate(windows, 1):
+            first_match = next(i for i in matched if lo <= i <= hi)
+            chain = self._ancestor_chain(lines, first_match)
+            body = "\n".join(lines[lo : hi + 1])
+            blocks.append(f"[{w}] {' > '.join(chain)}\n{body}")
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _ancestor_chain(lines: list[str], idx: int) -> list[str]:
+        """Root-to-node ancestor crumbs for snapshot line ``idx``.
+
+        Walks upward collecting strictly-dedenting non-blank lines —
+        YAML indentation is the tree structure. Crumbs keep their
+        ``[ref=eN]`` tags (ancestor refs are valid scoping targets),
+        minus the list marker and trailing container colon.
+        """
+        chain: list[str] = []
+        indent = len(lines[idx]) - len(lines[idx].lstrip(" "))
+        for line in reversed(lines[:idx]):
+            if not line.strip():
+                continue
+            line_indent = len(line) - len(line.lstrip(" "))
+            if line_indent < indent:
+                crumb = line.strip().removeprefix("- ")
+                chain.append(crumb.rstrip(":"))
+                indent = line_indent
+        chain.reverse()
+        return chain
 
     def _ref_convert(
         self, ref: str, verb: str, timeout_ms: float
@@ -1676,6 +1763,31 @@ class BrowserManager:
             return {"browser_id": browser_id, **result}
         return {"browser_id": browser_id, "tab_id": result, "status": "opened"}
 
+    async def page_snapshot(
+        self,
+        browser_id: int,
+        tab_id: int,
+        *,
+        target: str | None = None,
+        depth: int | None = None,
+        boxes: bool = False,
+    ) -> str:
+        """Return the page's accessibility tree as agent-readable text."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_snapshot(tab_id, target=target, depth=depth, boxes=boxes)
+
+    async def page_find(
+        self,
+        browser_id: int,
+        tab_id: int,
+        pattern: re.Pattern[str],
+        *,
+        boxes: bool = False,
+    ) -> str:
+        """Return matching snapshot regions for a regex, not the tree."""
+        inst = self._require_instance(browser_id)
+        return await inst.page_find(tab_id, pattern, boxes=boxes)
+
     async def close_tab(self, browser_id: int, tab_id: int) -> dict[str, Any]:
         """Close a tab in a specific browser.
 
@@ -1744,11 +1856,6 @@ class BrowserManager:
         """Capture a screenshot of the target tab's viewport."""
         inst = self._require_instance(browser_id)
         return await inst.screenshot(tab_id, output_path)
-
-    async def page_snapshot(self, browser_id: int, tab_id: int) -> str:
-        """Return the page's accessibility tree as agent-readable text."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_snapshot(tab_id)
 
     async def page_click(
         self, browser_id: int, tab_id: int, ref: str, *, timeout_ms: float

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>page-find fixture</title>
+</head>
+<body>
+  <header>
+    <h1>Find Fixture Header</h1>
+    <nav aria-label="primary">
+      <a href="#" id="nav-download">Download report</a>
+      <a href="#" id="nav-pricing">Pricing overview</a>
+      <a href="#" id="nav-about">About the company</a>
+    </nav>
+  </header>
+  <main>
+    <form id="signup" aria-label="Signup form">
+      <h2>Signup</h2>
+      <label>Email address <input type="email" id="email-input" name="email"></label>
+      <label>Email confirmation <input type="email" id="email-confirm"></label>
+      <div class="field-group">
+        <div class="inner">
+          <label>Deep username <input type="text" id="deep-username"></label>
+        </div>
+      </div>
+      <button type="button" id="create-account-btn">Create account</button>
+    </form>
+    <p>Filler paragraph one for window separation.</p>
+    <p>Filler paragraph two for window separation.</p>
+    <p>Filler paragraph three for window separation.</p>
+    <p>Filler paragraph four for window separation.</p>
+    <p>Filler paragraph five for window separation.</p>
+    <p>Filler paragraph six for window separation.</p>
+    <section aria-label="Downloads">
+      <h2>Downloads</h2>
+      <button type="button" id="download-btn">Download report</button>
+      <button type="button" id="archive-btn">Open archive</button>
+    </section>
+  </main>
+  <footer>
+    <div id="box-result">box result: pending</div>
+    <div id="click-result">click result: pending</div>
+    <div
+      id="fixed-box-target"
+      style="position: fixed; left: 20px; bottom: 20px; width: 100px; height: 50px; background: #ccc;"
+      onclick="document.getElementById('box-result').textContent = 'box result: clicked'"
+    >Fixed target</div>
+    <iframe id="find-inner-frame" src="page-find-inner.html" title="inner"></iframe>
+  </footer>
+  <script>
+    document.getElementById("create-account-btn").onclick = () => {
+      document.getElementById("click-result").textContent = "click result: account created";
+    };
+    document.getElementById("download-btn").onclick = () => {
+      document.getElementById("click-result").textContent = "click result: download started";
+    };
+  </script>
+</body>
+</html>

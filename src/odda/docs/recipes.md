@@ -75,7 +75,21 @@ page_snapshot(browser_id=B, tab_id=T)
 # grep the text for the element you want (a textbox, a button, a link)
 ```
 
-Refs are valid until the element leaves the DOM (navigation, SPA swap). Re-snapshot after any content change; existing refs keep working without re-snapshotting.
+On a large page, search instead of shipping the tree:
+
+```
+page_find(browser_id=B, tab_id=T, regex="Log in|Sign in")
+# returns each match with a few lines of context and its ancestor
+# path from the root — pluck the [ref=eN] and act on it directly
+```
+
+To read one subtree without the rest of the page, scope the snapshot — `target` takes a ref or any CSS/Playwright selector, and `depth` caps how deep it renders:
+
+```
+page_snapshot(browser_id=B, tab_id=T, target="#login-form", depth=2)
+```
+
+Refs are valid until the element leaves the DOM (navigation, SPA swap). Re-snapshot (or re-find) after any content change; existing refs keep working without re-snapshotting.
 
 ### 3. Fill form fields by ref
 
