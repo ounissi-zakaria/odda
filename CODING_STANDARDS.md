@@ -9,7 +9,7 @@ The reader is an agent with no repo access.
 
 The CLI stays thin; automation logic belongs in library modules (`browser.py`,
 `proxy.py`, `request/`, ...) and is exposed as MCP tools in `mcp.py` — one
-`@mcp_server.tool()` per capability, handlers ported verbatim from the library layer.
+`@mcp_server.tool(...)` per capability, handlers ported verbatim from the library layer.
 
 ## Tool results and errors
 
