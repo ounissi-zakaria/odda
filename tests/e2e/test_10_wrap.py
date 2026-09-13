@@ -28,7 +28,7 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
         )
         assert (r["name"], r["type"], r["expr"]) == ("jp", "call", "JSON.parse")
 
-        r = await h.call("wrap_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_list", {"browser_id": bid, "tab_id": tid})
         assert [(w["name"], w["type"], w["expr"]) for w in r] == [
             ("jp", "call", "JSON.parse")
         ]
@@ -40,7 +40,7 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
         await h.eval(
             bid, tid, "String(window.__oddaWrapParseAndReturn('{\"a\": 1}').a)"
         )
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert len(r) >= 1
         rec = r[0]
         assert rec["wrap"] == "jp" and rec["type"] == "call"
@@ -68,7 +68,7 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
             "String(window.__oddaWrapFixture("
             "document.body, 'click', function myHandler() {}))",
         )
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         ael = [
             x
             for x in r
@@ -102,7 +102,7 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaWrapFixture === 'function'")
         await h.eval(bid, tid, "String(window.__oddaWrapSetSink('<b>hi</b>'))")
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         ih = [x for x in r if x["wrap"] == "ih" and x["type"] == "access"]
         assert ih
         assert ih[0]["args"] == ["<b>hi</b>"]
@@ -112,7 +112,7 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
         # Clear zeros the records without navigating.
         r = await h.call("wrap_clear", {"browser_id": bid, "tab_id": tid})
         assert r["status"] == "cleared" and r["count"] >= 0
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert r == []
 
 
@@ -138,18 +138,18 @@ async def test_wrap_records_wipe_installation_persists_iframes(
         await h.eval(
             bid, tid, "String(window.__oddaWrapParseAndReturn('{\"x\": 1}').x)"
         )
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x["wrap"] == "jp" for x in r)
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaWrapFixture === 'function'")
         # Playwright's own setup may record; clear any stragglers first.
         await h.call("wrap_clear", {"browser_id": bid, "tab_id": tid})
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert r == []
         await h.eval(
             bid, tid, "String(window.__oddaWrapParseAndReturn('{\"y\": 2}').y)"
         )
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x["wrap"] == "jp" for x in r)
 
         # all_frames: true — the wrap runs in the iframe too, and
@@ -162,7 +162,7 @@ async def test_wrap_records_wipe_installation_persists_iframes(
             "var inner = f.contentWindow; "
             "inner.JSON.parse('{\"inf\": 1}'); 'ok'",
         )
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x["wrap"] == "jp" for x in r)
 
 
@@ -203,7 +203,7 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
             "Array.of.apply(null, new Array(150).fill(0)"
             ".map(function(_, i) { return i; })); 'ok'",
         )
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         big = [x for x in r if x["wrap"] == "big"]
         assert big
         assert big[0]["ret"]["type"] == "array"
@@ -215,7 +215,7 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
             "wrap_remove", {"browser_id": bid, "tab_id": tid, "name": "jp"}
         )
         assert (r["name"], r["removed"]) == ("jp", True)
-        r = await h.call("wrap_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_list", {"browser_id": bid, "tab_id": tid})
         assert sorted(w["name"] for w in r) == ["ael", "big", "ih"]
 
         # After a re-navigate the removed wrap no longer records; the
@@ -225,10 +225,10 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         await h.eval(
             bid, tid, "String(window.__oddaWrapParseAndReturn('{\"z\": 3}').z)"
         )
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert not any(x["wrap"] == "jp" for x in r)
         await h.eval(bid, tid, "String(window.__oddaWrapSetSink('<i>bye</i>'))")
-        r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x["wrap"] == "ih" for x in r)
 
         # Errors: missing tab, missing browser, non-existent wrap.

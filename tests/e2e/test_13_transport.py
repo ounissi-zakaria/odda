@@ -45,7 +45,7 @@ async def test_large_wrap_dump_succeeds(odda_session) -> None:
         )
         assert await h.eval(bid, tid, inject) == "300"
 
-        dump = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        dump = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert isinstance(dump, list)
         assert len(dump) == 300
 
@@ -80,13 +80,13 @@ async def test_wrap_dump_name_filters_server_side(odda_session) -> None:
         )
         assert await h.eval(bid, tid, inject2) == "301"
 
-        big = await h.call(
+        big = await h.call_json(
             "wrap_dump", {"browser_id": bid, "tab_id": tid, "name": "big"}
         )
         assert len(big) == 300
         assert all(r["wrap"] == "big" for r in big)
 
-        other = await h.call(
+        other = await h.call_json(
             "wrap_dump", {"browser_id": bid, "tab_id": tid, "name": "other"}
         )
         assert len(other) == 1
@@ -94,7 +94,7 @@ async def test_wrap_dump_name_filters_server_side(odda_session) -> None:
 
         # No matching records → empty list.
         assert (
-            await h.call(
+            await h.call_json(
                 "wrap_dump", {"browser_id": bid, "tab_id": tid, "name": "no-such-wrap"}
             )
             == []

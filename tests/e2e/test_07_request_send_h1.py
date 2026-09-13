@@ -39,7 +39,7 @@ async def test_send_h1_records_flow(odda_session) -> None:
             + b"Accept: */*\r\n\r\n",
         )
 
-        sc = await h.call(
+        sc = await h.call_json(
             "request_send", {"name": "h1-test", "insecure": True, "timeout": 10}
         )
         assert isinstance(sc, dict)

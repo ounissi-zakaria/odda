@@ -22,22 +22,24 @@ async def test_browser_list_rows_and_closing(odda_session) -> None:
         bid, tid = await h.open_browser(f"{fx.base}/")
         assert (bid, tid) == (1, 1)
 
-        r = await h.call("browser_list", {})
+        r = await h.call_json("browser_list", {})
         assert r == [{"browser_id": 1, "tab_count": 1}]
 
         bid2, tid2 = await h.open_browser()
         assert (bid2, tid2) == (2, 1)
-        r = await h.call("browser_list", {})
+        r = await h.call_json("browser_list", {})
         assert r == [
             {"browser_id": 1, "tab_count": 1},
             {"browser_id": 2, "tab_count": 1},
         ]
 
         await h.call("browser_close", {"browser_id": 2})
-        assert await h.call("browser_list", {}) == [{"browser_id": 1, "tab_count": 1}]
+        assert await h.call_json("browser_list", {}) == [
+            {"browser_id": 1, "tab_count": 1}
+        ]
 
         await h.call("browser_close", {"browser_id": 1})
-        assert await h.call("browser_list", {}) == []
+        assert await h.call_json("browser_list", {}) == []
 
 
 async def test_eval_runs_js_and_renders_values(odda_session) -> None:
@@ -116,7 +118,7 @@ async def test_event_listeners_lists_window_and_document_types(odda_session) -> 
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         bid, tid = await h.open_browser(f"{fx.base}/")
 
-        r = await h.call("event_listeners", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("event_listeners", {"browser_id": bid, "tab_id": tid})
         types = sorted({l["type"] for l in r})
         # Built-in default userscripts still ship in every browser and
         # may register listeners, so containment (not the exact set) is

@@ -100,7 +100,7 @@ async def test_list_returns_installed_sorted(odda_session, tmp_path) -> None:
             "proxy_script_install",
             {"name": "inline", "source": "def response(flow): pass"},
         )
-        r = await h.call("proxy_script_list", {})
+        r = await h.call_json("proxy_script_list", {})
         assert sorted(s["name"] for s in r) == ["inline", "minimal"]
 
 
@@ -282,7 +282,7 @@ async def test_boot_restore_readds_persisted_script(odda_session, tmp_path) -> N
 
         # Fresh session on the same tmp_path → same .odda data dir.
         async with odda_session() as h:
-            r = await h.call("proxy_script_list", {})
+            r = await h.call_json("proxy_script_list", {})
             assert "restorer" in {s["name"] for s in r}
 
             opener = await _opener(h)
@@ -318,7 +318,7 @@ async def test_boot_with_broken_script_does_not_kill_session(
         # survive it and the proxy must serve.
         odda_session() as h,
     ):
-        r = await h.call("proxy_script_list", {})
+        r = await h.call_json("proxy_script_list", {})
         assert "broken" in {s["name"] for s in r}
 
         opener = await _opener(h)

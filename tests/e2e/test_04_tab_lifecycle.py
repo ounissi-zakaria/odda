@@ -28,22 +28,22 @@ async def test_tab_lifecycle_and_id_monotonicity(odda_session) -> None:
     async with odda_session() as h, fixture_site(["index.html", "dialogs.html"]) as fx:
         bid, tid = await h.open_browser()
         assert (bid, tid) == (1, 1)
-        assert _tab_total(await h.call("tabs_list", {})) == 1
+        assert _tab_total(await h.call_json("tabs_list", {})) == 1
 
         # tabs_open --url → tab_id 2, status opened.
         r = await h.call("tabs_open", {"browser_id": bid, "url": f"{fx.base}/"})
         assert r == {"browser_id": 1, "tab_id": 2, "status": "opened"}
-        assert _tab_total(await h.call("tabs_list", {})) == 2
+        assert _tab_total(await h.call_json("tabs_list", {})) == 2
 
         # tabs_open without url → blank tab, id 3.
         r = await h.call("tabs_open", {"browser_id": bid})
         assert r == {"browser_id": 1, "tab_id": 3, "status": "opened"}
-        assert _tab_total(await h.call("tabs_list", {})) == 3
+        assert _tab_total(await h.call_json("tabs_list", {})) == 3
 
         # tabs_close → status closed, count drops.
         r = await h.call("tabs_close", {"browser_id": bid, "tab_id": 2})
         assert r == {"browser_id": 1, "tab_id": 2, "status": "closed"}
-        assert _tab_total(await h.call("tabs_list", {})) == 2
+        assert _tab_total(await h.call_json("tabs_list", {})) == 2
 
         # The closed tab's id stays dead.
         err = await h.call_error("eval", {"browser_id": bid, "tab_id": 2, "js": "1"})
@@ -59,14 +59,14 @@ async def test_tab_lifecycle_and_id_monotonicity(odda_session) -> None:
         # Closing all tabs leaves the browser alive with zero tabs.
         for t in (1, 3, 4):
             await h.call("tabs_close", {"browser_id": bid, "tab_id": t})
-        r = await h.call("tabs_list", {"browser_id": bid})
+        r = await h.call_json("tabs_list", {"browser_id": bid})
         assert r == [{"browser_id": 1, "tabs": []}]
 
         # A browser with zero tabs can still open new tabs (id keeps
         # climbing past every retired id).
         r = await h.call("tabs_open", {"browser_id": bid, "url": f"{fx.base}/"})
         assert r == {"browser_id": 1, "tab_id": 5, "status": "opened"}
-        r = await h.call("tabs_list", {"browser_id": bid})
+        r = await h.call_json("tabs_list", {"browser_id": bid})
         assert len(r[0]["tabs"]) == 1
 
 
@@ -87,16 +87,18 @@ async def test_multiple_browsers_isolated_and_ids_never_reused(
         # internet dependency in the e2e run).
         r = await h.navigate(bid2, tid2, f"{fx.base}/")
         assert r == {"status": f"Navigated to: {fx.base}/"}
-        assert _tab_total(await h.call("tabs_list", {})) == 1
+        assert _tab_total(await h.call_json("tabs_list", {})) == 1
 
         bid3, tid3 = await h.open_browser()
         assert (bid3, tid3) == (3, 1)
-        assert len(await h.call("tabs_list", {})) == 2
+        assert len(await h.call_json("tabs_list", {})) == 2
 
         # Operating on browser 2 doesn't affect browser 3: independent
         assert await h.eval(bid3, tid3, "document.title") == ""
         assert await h.eval(bid2, tid2, "document.title") == "Listener Test"
-        rows = {b["browser_id"]: len(b["tabs"]) for b in await h.call("tabs_list", {})}
+        rows = {
+            b["browser_id"]: len(b["tabs"]) for b in await h.call_json("tabs_list", {})
+        }
         assert rows == {2: 1, 3: 1}
 
         await h.call("browser_close", {"browser_id": 3})

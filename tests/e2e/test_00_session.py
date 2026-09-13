@@ -25,24 +25,24 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
         proxy = await h.call("proxy_url", {})
         assert str(proxy).startswith("http://127.0.0.1:")
 
-        assert await h.call("browser_list", {}) == []
+        assert await h.call_json("browser_list", {}) == []
 
         bid, tid = await h.open_browser(f"{fx.base}/")
         assert (bid, tid) == (1, 1)
 
-        r = await h.call("browser_list", {})
+        r = await h.call_json("browser_list", {})
         assert r == [{"browser_id": 1, "tab_count": 1}]
 
         title = await h.eval(bid, tid, "document.title")
         assert title == "Listener Test"
 
-        # screenshot writes a JPEG and returns the path (str-annotated →
-        # {"result": ...} wrap, unwrapped by Harness.call).
+        # screenshot writes a JPEG and returns the path (text-first →
+        # the raw path arrives as the single text block).
         shot = await h.call("screenshot", {"browser_id": bid, "tab_id": tid})
         assert str(shot).endswith(".jpeg")
 
         await h.call("browser_close", {"browser_id": bid})
-        assert await h.call("browser_list", {}) == []
+        assert await h.call_json("browser_list", {}) == []
 
 
 async def test_data_dir_ownership_and_isolation(odda_session, tmp_path) -> None:

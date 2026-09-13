@@ -43,7 +43,7 @@ async def test_h2_multiname_concurrent_streams(odda_session, tmp_path) -> None:
                     f"user-agent: odda-test\r\n\r\n"
                 ).encode(),
             )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {"names": ["h2-a", "h2-b", "h2-c"], "insecure": True, "timeout": 10},
         )
@@ -58,7 +58,7 @@ async def test_h2_multiname_concurrent_streams(odda_session, tmp_path) -> None:
 
         # single-packet: clear the file first, send, spread < 50ms
         (race_dir / "h2mn").unlink(missing_ok=True)
-        await h.call(
+        await h.call_json(
             "request_send",
             {"names": ["h2-a", "h2-b", "h2-c"], "insecure": True, "timeout": 10},
         )
@@ -79,7 +79,7 @@ async def test_h1_multiname_stays_sequential(odda_session, tmp_path) -> None:
                     f"Connection: keep-alive\r\n\r\n"
                 ).encode(),
             )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {"names": ["h1-a", "h1-b"], "insecure": True, "timeout": 10},
         )

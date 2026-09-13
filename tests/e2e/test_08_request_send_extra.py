@@ -4,6 +4,8 @@ connection-close error flows, empty-file rejection, excluded body storage."""
 
 from __future__ import annotations
 
+import json
+
 from tests.e2e.conftest import dyn_server, script_server
 
 
@@ -20,7 +22,7 @@ async def test_h2_negotiated_when_request_line_says_http2(odda_session) -> None:
             b" HTTP/2\r\nuser-agent: odda-test\r\naccept: */*\r\n\r\n",
         )
 
-        sc = await h.call(
+        sc = await h.call_json(
             "request_send", {"name": "h2-test", "insecure": True, "timeout": 10}
         )
         assert sc["status_code"] == 200
@@ -49,7 +51,7 @@ async def test_fix_content_length_preserves_crlf_after_cl(odda_session) -> None:
             b"X-Order: trailing\r\nConnection: close\r\n\r\npostbody",
         )
 
-        sc = await h.call(
+        sc = await h.call_json(
             "request_send",
             {
                 "name": "cl-crlf",
@@ -85,7 +87,7 @@ async def test_fix_content_length_preserves_crlf_on_h2_path(odda_session) -> Non
             b"X-Order: trailing\r\n\r\nh2body",
         )
 
-        sc = await h.call(
+        sc = await h.call_json(
             "request_send",
             {
                 "name": "cl-h2",
@@ -117,7 +119,7 @@ async def test_gzip_response_is_decoded(odda_session) -> None:
             + b"Connection: close\r\n\r\n",
         )
 
-        sc = await h.call(
+        sc = await h.call_json(
             "request_send", {"name": "gzip-test", "insecure": True, "timeout": 10}
         )
         assert sc["status_code"] == 200
@@ -141,20 +143,20 @@ async def test_tls_failure_is_error_flow_not_tool_error(odda_session) -> None:
             + b"Connection: close\r\n\r\n",
         )
 
-        # Inspect the raw CallToolResult: the failure must NOT be a tool error,
-        # and the SDK wraps request_send's union return in {"result": ...}.
+        # Inspect the raw CallToolResult: the failure must NOT be a tool
+        # error, and request_send is text-first (ADR 0023) — the record
+        # arrives as the single JSON text block, no structured channel.
         r = await h.client.call_tool(
             "request_send", {"name": "insecure-test", "timeout": 5}
         )
         assert r.is_error is False
-        sc = r.structured_content
-        assert isinstance(sc, dict) and set(sc) == {"result"}, sc
-        sc = sc["result"]
+        assert r.structured_content is None
+        sc = json.loads(r.content[0].text)
         assert sc["status_code"] is None
         err = sc.get("error")
         assert isinstance(err, str) and err
 
-        sc = await h.call(
+        sc = await h.call_json(
             "request_send", {"name": "insecure-test", "insecure": True, "timeout": 5}
         )
         assert sc["status_code"] == 200
@@ -181,7 +183,7 @@ async def test_connection_close_without_response_is_error_flow(odda_session) -> 
             b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
         )
 
-        sc = await h.call("request_send", {"name": "close-no-resp", "timeout": 5})
+        sc = await h.call_json("request_send", {"name": "close-no-resp", "timeout": 5})
         assert sc["status_code"] is None
         assert "connection closed" in (sc.get("error") or "")
 
@@ -210,7 +212,7 @@ async def test_excluded_content_type_body_is_stored(odda_session) -> None:
             + b"Connection: close\r\n\r\n",
         )
 
-        sc = await h.call(
+        sc = await h.call_json(
             "request_send", {"name": "img-test", "insecure": True, "timeout": 10}
         )
         assert sc["status_code"] == 200

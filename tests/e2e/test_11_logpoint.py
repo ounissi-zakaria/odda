@@ -40,7 +40,7 @@ async def test_logpoint_plant_record_list_and_remove(odda_session) -> None:
         out = await h.eval(bid, tid, "String(window.__oddaLogpointFixture('world'))")
         assert out == "hello world"
 
-        r = await h.call("logpoint_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_dump", {"browser_id": bid, "tab_id": tid})
         assert len(r) >= 1
         rec = r[0]
         assert all(k in rec for k in ("logpoint", "url", "line", "col"))
@@ -48,7 +48,7 @@ async def test_logpoint_plant_record_list_and_remove(odda_session) -> None:
         assert (rec["line"], rec["col"]) == (2, 0)
         assert rec["value"] == "hello world" and rec["error"] is None
 
-        r = await h.call("logpoint_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_list", {"browser_id": bid, "tab_id": tid})
         assert len(r) == 1
         assert "/logpoint.js" in r[0]["url"]
         assert (r[0]["line"], r[0]["col"], r[0]["expr"]) == (2, 0, "greeting")
@@ -69,7 +69,7 @@ async def test_logpoint_plant_record_list_and_remove(odda_session) -> None:
         r = await h.call("logpoint_clear", {"browser_id": bid, "tab_id": tid})
         assert r["status"] == "cleared" and r["count"] >= 0
         await h.eval(bid, tid, "String(window.__oddaLogpointFixture('world'))")
-        r = await h.call("logpoint_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_dump", {"browser_id": bid, "tab_id": tid})
         errs = [x for x in r if x.get("error")]
         assert errs and errs[0]["value"] is None
         assert "ReferenceError" in errs[0]["error"]
@@ -78,7 +78,7 @@ async def test_logpoint_plant_record_list_and_remove(odda_session) -> None:
         await h.call("logpoint_clear", {"browser_id": bid, "tab_id": tid})
         await h.eval(bid, tid, "String(window.__oddaLogpointFixture('first'))")
         await h.eval(bid, tid, "String(window.__oddaLogpointFixture('second'))")
-        r = await h.call("logpoint_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_dump", {"browser_id": bid, "tab_id": tid})
         vals = [x for x in r if x.get("value") in ("hello first", "hello second")]
         assert len(vals) == 2
 
@@ -86,30 +86,30 @@ async def test_logpoint_plant_record_list_and_remove(odda_session) -> None:
         # registry persists (ADR-0004).
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaLogpointFixture === 'function'")
-        r = await h.call("logpoint_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_dump", {"browser_id": bid, "tab_id": tid})
         assert r == []
         await h.eval(bid, tid, "String(window.__oddaLogpointFixture('after-nav'))")
-        r = await h.call("logpoint_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x.get("value") == "hello after-nav" for x in r)
-        r = await h.call("logpoint_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_list", {"browser_id": bid, "tab_id": tid})
         assert sorted(lp["expr"] for lp in r) == ["greeting", "noSuchLocal"]
 
         # Remove noSuchLocal by id; only greeting remains and records.
-        r = await h.call("logpoint_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_list", {"browser_id": bid, "tab_id": tid})
         lpid = next(lp["id"] for lp in r if lp["expr"] == "noSuchLocal")
         r = await h.call(
             "logpoint_remove",
             {"browser_id": bid, "tab_id": tid, "lp_id": lpid},
         )
         assert (r["status"], r["id"]) == ("removed", lpid)
-        r = await h.call("logpoint_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_list", {"browser_id": bid, "tab_id": tid})
         assert [lp["expr"] for lp in r] == ["greeting"]
 
         await h.call("logpoint_clear", {"browser_id": bid, "tab_id": tid})
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaLogpointFixture === 'function'")
         await h.eval(bid, tid, "String(window.__oddaLogpointFixture('after-remove'))")
-        r = await h.call("logpoint_dump", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x.get("value") == "hello after-remove" for x in r)
         assert not any(x.get("error") for x in r)
 
@@ -192,5 +192,5 @@ async def test_logpoint_warnings_errors_and_tab_session(odda_session) -> None:
         r = await h.call("tabs_open", {"browser_id": bid, "url": url})
         tid = r["tab_id"]
         await h.wait_for(bid, tid, "typeof window.__oddaLogpointFixture === 'function'")
-        r = await h.call("logpoint_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("logpoint_list", {"browser_id": bid, "tab_id": tid})
         assert r == []

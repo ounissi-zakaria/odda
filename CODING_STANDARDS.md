@@ -13,10 +13,13 @@ The CLI stays thin; automation logic belongs in library modules (`browser.py`,
 
 ## Tool results and errors
 
-Tool results are pure natural types (`dict` passes through; `list`/`str` get the SDK's
-`{"result": ...}` wrap; `Any` is text-only). Anticipated errors
-(`BrowserOperationError`, `ToolParamError`, `ValueError`) convert to `ToolError` with
-the message verbatim via `@odda_tool`; everything else stays an SDK crash.
+Tool results are text-first (`dict` passes through — structuredContent is the dict
+itself, which omp-style clients dedupe against the text block; str/list/union
+returns are annotated `-> Any`, text-only, because the SDK's `{"result": ...}` wrap
+channel would be re-appended by omp's client and double the payload — ADR 0023).
+Anticipated errors (`BrowserOperationError`, `ToolParamError`, `ValueError`) convert
+to `ToolError` with the message verbatim via `@odda_tool`; everything else stays an
+SDK crash.
 
 ## Release consistency
 

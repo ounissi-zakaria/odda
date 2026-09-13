@@ -41,7 +41,7 @@ async def test_repeat_h2_five_concurrent_copies(odda_session, tmp_path) -> None:
                 b"user-agent: odda-test\r\naccept: */*\r\n\r\n"
             ),
         )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {"name": "h2-race", "repeat": 5, "insecure": True, "timeout": 10},
         )
@@ -51,7 +51,7 @@ async def test_repeat_h2_five_concurrent_copies(odda_session, tmp_path) -> None:
 
         # single-packet property: clear the file first, send, spread < 50ms
         (race_dir / "h2").unlink(missing_ok=True)
-        await h.call(
+        await h.call_json(
             "request_send",
             {"name": "h2-race", "repeat": 5, "insecure": True, "timeout": 10},
         )
@@ -71,7 +71,7 @@ async def test_repeat_h1_parallel_connections(odda_session, tmp_path) -> None:
                 f"Connection: close\r\n\r\n"
             ).encode(),
         )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {"name": "h1-race", "repeat": 5, "insecure": True, "timeout": 10},
         )
@@ -95,7 +95,7 @@ async def test_repeat_h2_post_body_single_packet(odda_session, tmp_path) -> None
             ).encode(),
         )
         (race_dir / "h2post").unlink(missing_ok=True)
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {"name": "h2-post", "repeat": 4, "insecure": True, "timeout": 10},
         )
@@ -120,7 +120,7 @@ async def test_repeat_h2_large_body(odda_session, tmp_path) -> None:
             ).encode()
             + body,
         )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {"name": "h2-big", "repeat": 3, "insecure": True, "timeout": 10},
         )
@@ -143,7 +143,7 @@ async def test_repeat_fix_content_length_allowed(odda_session, tmp_path) -> None
                 f'{{"k":"v"}}'
             ).encode(),
         )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {
                 "name": "cl-repeat",
@@ -195,7 +195,7 @@ async def test_repeat_one_is_single_shot(odda_session, tmp_path) -> None:
             "h2-race",
             b"GET /a?body=ok&status=200&race=h2 HTTP/2\r\nuser-agent: odda-test\r\n\r\n",
         )
-        r = await h.call(
+        r = await h.call_json(
             "request_send",
             {"name": "h2-race", "repeat": 1, "insecure": True, "timeout": 10},
         )

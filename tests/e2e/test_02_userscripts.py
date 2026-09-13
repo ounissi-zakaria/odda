@@ -42,7 +42,7 @@ async def test_userscript_install_source_and_file_modes(odda_session, tmp_path) 
         v = await h.wait_for(bid, tid, "window.__usFromFile__", timeout=5)
         assert v == "file-ran"
 
-        r = await h.call("userscript_list", {"browser_id": bid})
+        r = await h.call_json("userscript_list", {"browser_id": bid})
         names = {s["name"] for s in r}
         # Containment only: wraps live as __odda-wrap__* userscripts too.
         assert {"helper", "fromfile"} <= names
@@ -88,7 +88,7 @@ async def test_userscript_install_validation_errors(odda_session, tmp_path) -> N
         assert err == "Browser 9999 not found."
 
         # list is a read: a missing browser yields an empty list, not an error.
-        r = await h.call("userscript_list", {"browser_id": 9999})
+        r = await h.call_json("userscript_list", {"browser_id": 9999})
         assert r == []
 
 

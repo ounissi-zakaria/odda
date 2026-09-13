@@ -33,11 +33,11 @@ async def test_wrap_scope_is_per_browser(odda_session) -> None:
         )
 
         # Fresh browser 2: no wraps from browser 1's scope.
-        r = await h.call("wrap_list", {"browser_id": bid2, "tab_id": tid2})
+        r = await h.call_json("wrap_list", {"browser_id": bid2, "tab_id": tid2})
         assert r == []
 
         # Browser 1 still has its own wrap.
-        r = await h.call("wrap_list", {"browser_id": bid1, "tab_id": tid1})
+        r = await h.call_json("wrap_list", {"browser_id": bid1, "tab_id": tid1})
         assert any(w["name"] == "leaktest" for w in r)
 
         # A wrap installed on browser 2 does not appear on browser 1.
@@ -50,16 +50,16 @@ async def test_wrap_scope_is_per_browser(odda_session) -> None:
                 "expr": "JSON.parse",
             },
         )
-        r = await h.call("wrap_list", {"browser_id": bid1, "tab_id": tid1})
+        r = await h.call_json("wrap_list", {"browser_id": bid1, "tab_id": tid1})
         assert not any(w["name"] == "b2wrap" for w in r)
-        r = await h.call("wrap_list", {"browser_id": bid2, "tab_id": tid2})
+        r = await h.call_json("wrap_list", {"browser_id": bid2, "tab_id": tid2})
         assert any(w["name"] == "b2wrap" for w in r)
 
         # With wraps installed on browser 1, browser 2's userscript_list must
         # not carry the wrap's userscript either (containment absence, not an
         # exact list — only default userscripts like logpoint-helpers.js
         # may appear).
-        r = await h.call("userscript_list", {"browser_id": bid2})
+        r = await h.call_json("userscript_list", {"browser_id": bid2})
         assert not any(s["name"] == WRAP_PREFIX + "leaktest" for s in r)
 
 
@@ -77,10 +77,10 @@ async def test_userscript_scope_is_per_browser(odda_session, tmp_path) -> None:
             {"browser_id": bid1, "name": "us1", "file": str(us_file)},
         )
 
-        r = await h.call("userscript_list", {"browser_id": bid2})
+        r = await h.call_json("userscript_list", {"browser_id": bid2})
         assert not any(s["name"] == "us1" for s in r)
 
-        r = await h.call("userscript_list", {"browser_id": bid1})
+        r = await h.call_json("userscript_list", {"browser_id": bid1})
         assert {"us1"} <= {s["name"] for s in r}
 
         # Behavioral: the userscript must not run in browser 2's tab.

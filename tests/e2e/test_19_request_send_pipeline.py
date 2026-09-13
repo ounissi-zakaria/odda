@@ -36,7 +36,7 @@ async def test_multiname_sequential_two_records(odda_session, tmp_path) -> None:
                     f"Connection: keep-alive\r\n\r\n"
                 ).encode(),
             )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {"names": ["pipe-a", "pipe-b"], "insecure": True, "timeout": 10},
         )
@@ -62,7 +62,7 @@ async def test_single_name_stays_a_dict(odda_session, tmp_path) -> None:
                 f"Connection: keep-alive\r\n\r\n"
             ).encode(),
         )
-        r = await h.call(
+        r = await h.call_json(
             "request_send", {"name": "pipe-a", "insecure": True, "timeout": 10}
         )
         assert isinstance(r, dict)
@@ -82,7 +82,7 @@ async def test_pipelining_two_records(odda_session, tmp_path) -> None:
                     f"Connection: keep-alive\r\n\r\n"
                 ).encode(),
             )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {
                 "names": ["pipe-a", "pipe-b"],
@@ -156,7 +156,7 @@ async def test_connect_fail_aborts_both_records(odda_session, tmp_path) -> None:
                 ).encode(),
             )
         before = h.flow_count()
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {"names": ["pipe-hang-a", "pipe-hang-b"], "insecure": True, "timeout": 3},
         )
@@ -188,7 +188,7 @@ async def test_mid_sequence_close(odda_session, tmp_path) -> None:
                 f"Connection: keep-alive\r\n\r\n"
             ).encode(),
         )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {
                 "names": ["pipe-close-1", "pipe-close-2"],
@@ -229,7 +229,7 @@ async def test_pipelining_close_abort_triad(odda_session, tmp_path) -> None:
                     f"Connection: keep-alive\r\n\r\n"
                 ).encode(),
             )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {
                 "names": ["pipe-abort-1", "pipe-abort-2", "pipe-abort-3"],
@@ -260,7 +260,7 @@ async def test_pipelining_clean_keepalive_regression(odda_session, tmp_path) -> 
                     f"Connection: keep-alive\r\n\r\n"
                 ).encode(),
             )
-        recs = await h.call(
+        recs = await h.call_json(
             "request_send",
             {
                 "names": ["pipe-clean-1", "pipe-clean-2", "pipe-clean-3"],

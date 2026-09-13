@@ -76,7 +76,7 @@ async def test_custom_terminator_preserves_crlf_into_h2_frame(
                 f"GET /foo\r\nX-Evil:yes HTTP/2\x00Host: 127.0.0.1:{echo.port}\x00\x00"
             ).encode(),
         )
-        rec = await h.call(
+        rec = await h.call_json(
             "request_send", {"name": "h2smuggle", "insecure": True, "timeout": 10}
         )
         assert rec["status_code"] == 200
@@ -108,7 +108,7 @@ async def test_h1_ignores_custom_terminator(odda_session, tmp_path) -> None:
                 f"Connection: close\r\n\r\n"
             ).encode(),
         )
-        rec = await h.call(
+        rec = await h.call_json(
             "request_send", {"name": "h1-lt", "insecure": True, "timeout": 10}
         )
         assert rec["status_code"] == 200

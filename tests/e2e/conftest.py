@@ -251,12 +251,12 @@ class Harness:
     """One MCP session + one data dir; the assertion conventions every test shares.
 
     ``call`` asserts the tool *succeeded* and returns the natural value:
-    dict/list results pass through, ``{"result": ...}`` SDK wraps (list/
-    str annotations) are unwrapped, and Any-annotated tools (eval,
-    wait_for) come back as their text. ``call_error`` asserts the call
-    *failed* and returns the error text — the #03 contract: odda
-    messages verbatim after the SDK's ``Error executing tool <name>: ``
-    prefix, param names never ``--flag`` spellings.
+    dict results pass through (structuredContent); Any-annotated tools
+    (eval, wait_for, and the text-first str/list/union tools — ADR 0023)
+    come back as their text, which ``call_json`` parses. ``call_error``
+    asserts the call *failed* and returns the error text — the #03
+    contract: odda messages verbatim after the SDK's ``Error executing
+    tool <name>: `` prefix, param names never ``--flag`` spellings.
     """
 
     def __init__(self, client: Client, data_dir: Path) -> None:
@@ -264,16 +264,22 @@ class Harness:
         self.data_dir = data_dir
 
     async def call(self, name: str, args: dict | None = None) -> object:
-        """Call a tool, assert success, return the natural value (SDK wraps unwrapped)."""
+        """Call a tool, assert success, return the natural value (dict via
+        structuredContent; text-first tools as their text — use call_json)."""
         r = await self.client.call_tool(name, args or {})
         assert not r.is_error, f"{name} errored: {[c.text for c in r.content]}"
         sc = r.structured_content
-        if isinstance(sc, dict) and set(sc) == {"result"}:
-            sc = sc["result"]
         if sc is None and r.content:
-            # Any-annotated tools (eval/wait_for) are text-only.
+            # Any-annotated tools (eval, wait_for, the 13 text-first tools
+            # — ADR 0023) are text-only.
             return r.content[0].text
         return sc
+
+    async def call_json(self, name: str, args: dict | None = None) -> object:
+        """Call a text-first (Any-annotated) tool and parse its JSON text."""
+        text = await self.call(name, args)
+        assert isinstance(text, str), f"{name}: expected JSON text, got {type(text)}"
+        return json.loads(text)
 
     async def call_error(self, name: str, args: dict | None = None) -> str:
         """Call a tool, assert failure, return the error text (SDK prefix stripped)."""
@@ -322,7 +328,7 @@ class Harness:
         )
 
     async def page_snapshot(self, bid: int, tid: int) -> str:
-        """page_snapshot is str-annotated → arrives as {"result": ...}; call unwraps it."""
+        """page_snapshot is text-first (ADR 0023) → the tree arrives as text."""
         return await self.call("page_snapshot", {"browser_id": bid, "tab_id": tid})
 
     def write_request(self, name: str, raw: bytes) -> Path:
