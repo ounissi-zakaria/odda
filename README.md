@@ -15,7 +15,7 @@
 ## Installation
 
 ```bash
-uv tool install git+https://github.com/ounissi-zakaria/odda.git
+uv tool install odda
 ```
 
 This installs the `odda` command (an MCP server plus one helper subcommand, with `--version` for the version probe). Then register the server with your harness — one MCP config entry, and every odda capability becomes typed tools your agent can call.
