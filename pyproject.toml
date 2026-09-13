@@ -4,6 +4,17 @@ version = "0.44.0"
 description = "Browser automation and HTTP traffic capture for AI agents (MCP server)"
 readme = "README.md"
 requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Zakaria Ounissi", email = "ounissizakaria@gmail.com" }]
+keywords = ["browser-automation", "http-proxy", "mcp", "ai-agents", "traffic-capture", "bug-bounty", "pentest", "penetration-testing", "security-research"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Security",
+]
 dependencies = [
     "mitmproxy>=11.0.2",
     "patchright==1.62.1",
@@ -13,6 +24,11 @@ dependencies = [
 
 [project.scripts]
 odda = "odda.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ounissi-zakaria/odda"
+Repository = "https://github.com/ounissi-zakaria/odda"
+Issues = "https://github.com/ounissi-zakaria/odda/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -126,3 +142,6 @@ split-on-trailing-comma = false
 "tests/e2e/fixtures/slow_load_server.py" = ["INP001"]
 "tests/e2e/fixtures/close_after_first_server.py" = ["INP001", "S110"]
 "tests/e2e/fixtures/close_without_response_server.py" = ["INP001", "S110"]
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
