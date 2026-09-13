@@ -251,9 +251,10 @@ class Harness:
     """One MCP session + one data dir; the assertion conventions every test shares.
 
     ``call`` asserts the tool *succeeded* and returns the natural value:
-    dict results pass through (structuredContent); Any-annotated tools
-    (eval, wait_for, and the text-first str/list/union tools — ADR 0023)
-    come back as their text, which ``call_json`` parses. ``call_error``
+    dict results pass through (structuredContent); unstructured tools
+    (eval, wait_for as ``-> Any``; the 13 text-first tools via
+    ``structured_output=False`` — ADR 0023) come back as their text,
+    which ``call_json`` parses. ``call_error``
     asserts the call *failed* and returns the error text — the #03
     contract: odda messages verbatim after the SDK's ``Error executing
     tool <name>: `` prefix, param names never ``--flag`` spellings.
@@ -270,13 +271,13 @@ class Harness:
         assert not r.is_error, f"{name} errored: {[c.text for c in r.content]}"
         sc = r.structured_content
         if sc is None and r.content:
-            # Any-annotated tools (eval, wait_for, the 13 text-first tools
-            # — ADR 0023) are text-only.
+            # Unstructured tools (eval/wait_for as -> Any; the 13
+            # structured_output=False tools — ADR 0023) are text-only.
             return r.content[0].text
         return sc
 
     async def call_json(self, name: str, args: dict | None = None) -> object:
-        """Call a text-first (Any-annotated) tool and parse its JSON text."""
+        """Call a text-first (unstructured) tool and parse its JSON text."""
         text = await self.call(name, args)
         assert isinstance(text, str), f"{name}: expected JSON text, got {type(text)}"
         return json.loads(text)

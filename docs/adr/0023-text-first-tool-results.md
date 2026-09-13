@@ -18,14 +18,17 @@ decision (c)): **the wire carries the payload exactly once.**
   content is the dict itself, and omp's dedupe suppresses it because the
   text channel is the dict's own indented JSON. Other MCP clients keep
   genuine structured data where the value actually is an object.
-- `str` returns annotate `-> Any`: text-only, and the text is the raw
-  string (`page_snapshot`'s tree, `screenshot`'s path, `proxy_url`).
-- `list`/union returns annotate `-> Any` *and* return an explicit
-  `CallToolResult` via `_json_result()` (`mcp.py`): one indented-JSON
-  document, no structured channel. Bare `-> Any` list returns were
-  measured to render per-item — a 1-item list loses its array-ness and
-  an empty list emits no block at all — and the SDK passes an explicit
-  `CallToolResult` through verbatim.
+- `str`/`list`/union returns keep their **natural annotations** and pass
+  `structured_output=False` — the SDK's unstructured opt-out, which skips
+  output-schema derivation entirely, so the tool advertises no
+  `outputSchema` and nothing validates against a wrap. The text channel
+  is the payload: raw strings for the str tools (`page_snapshot`'s tree,
+  `screenshot`'s path, `proxy_url`).
+- `list`/union tools additionally return an explicit `CallToolResult`
+  via `_json_result()` (`mcp.py`): one indented-JSON document. Bare list
+  returns were measured to render per-item — a 1-item list loses its
+  array-ness and an empty list emits no block at all — and the SDK
+  passes an explicit `CallToolResult` through verbatim.
 
 Rejected: fixing only `page_snapshot` (leaves the contract half-natural
 for the rest); fixing omp's dedupe upstream (the general cure, but not

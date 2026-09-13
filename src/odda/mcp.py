@@ -8,12 +8,13 @@ contract is the one pinned in ticket #03 (``.scratch/odda-mcp/issues/
 03-targeting-result-error-contract.md``):
 
 - explicit required ``browser_id`` / ``tab_id`` params (no positional);
-- text-first return types — ``dict`` passes through (structuredContent is the
-  dict itself, which omp-style clients dedupe against the text block); str
-  returns are ``-> Any`` (raw text); list/union returns go through
-  ``_json_result`` — one JSON document, no structured channel, since the
-  SDK's ``{"result": ...}`` wrap is re-appended by omp's client and its
-  per-item list rendering loses array-ness (ADR 0023);
+- natural return types, text-first delivery — ``dict`` passes through
+  (structuredContent is the dict itself, which omp-style clients dedupe
+  against the text block); the str/list/union tools pass
+  ``structured_output=False`` — no structured channel, which omp would
+  re-append — and keep their declared types: str tools return raw text,
+  list/union tools wrap in ``_json_result`` (one JSON document, since
+  the SDK's per-item list rendering loses array-ness) (ADR 0023);
 - one ``@odda_tool`` decorator converts ``BrowserOperationError``,
   ``ToolParamError``, and the request/userscript/proxy-script
   libraries' ``ValueError``s to ``ToolError`` (message verbatim);
@@ -265,12 +266,12 @@ async def browser_close(browser_id: int, *, ctx: Context[OddaState]) -> dict[str
     return await ctx.request_context.lifespan_context.browser.close_instance(browser_id)
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
 async def browser_list(
     *,
     ctx: Context[OddaState],
-) -> Any:
+) -> list[dict[str, Any]]:
     """List every tracked browser with its tab count."""
     return _json_result(ctx.request_context.lifespan_context.browser.list_instances())
 
@@ -278,9 +279,11 @@ async def browser_list(
 # --- tab lifecycle ---
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
-async def tabs_list(browser_id: int | None = None, *, ctx: Context[OddaState]) -> Any:
+async def tabs_list(
+    browser_id: int | None = None, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
     """List open tabs, optionally filtered to one browser."""
     return _json_result(
         await ctx.request_context.lifespan_context.browser.list_tabs(browser_id)
@@ -446,7 +449,7 @@ async def wait_for(
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
 async def screenshot(
     browser_id: int,
@@ -454,7 +457,7 @@ async def screenshot(
     output: str | None = None,
     *,
     ctx: Context[OddaState],
-) -> Any:
+) -> str:
     """Capture a JPEG of the target tab's viewport.
 
     output: optional path to write the JPEG to (a temp file when
@@ -468,11 +471,11 @@ async def screenshot(
 # --- page interaction (snapshot + ref-driven actions) ---
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
 async def page_snapshot(
     browser_id: int, tab_id: int, *, ctx: Context[OddaState]
-) -> Any:
+) -> str:
     """Take an agent-readable snapshot of the page's accessibility tree.
 
     Snapshot to discover element refs (eN; f<frameSeq>eN inside an
@@ -603,11 +606,11 @@ async def page_upload(
 # --- introspection ---
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
 async def event_listeners(
     browser_id: int, tab_id: int, *, ctx: Context[OddaState]
-) -> Any:
+) -> list[dict[str, Any]]:
     """List JavaScript event listeners on window and document in the target tab."""
     return _json_result(
         await ctx.request_context.lifespan_context.browser.list_event_listeners(
@@ -674,7 +677,7 @@ async def request_new(  # noqa: PLR0913 — the tool mirrors request new's full 
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
 async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the tool's contract
     name: str | None = None,
@@ -686,7 +689,7 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
     insecure: bool = False,
     pipelining: bool = False,
     ctx: Context[OddaState],  # noqa: ARG001
-) -> Any:
+) -> dict[str, Any] | list[dict[str, Any]]:
     """Send editable request(s) and record each response as a flow.
 
     Modes by argument: single name → one flow record (a dict);
@@ -740,9 +743,9 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
-async def proxy_url(*, ctx: Context[OddaState]) -> Any:
+async def proxy_url(*, ctx: Context[OddaState]) -> str:
     """Return the HTTP proxy URL."""
     return ctx.request_context.lifespan_context.proxy.proxy_url
 
@@ -831,9 +834,11 @@ async def wrap_access_add(
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
-async def wrap_list(browser_id: int, tab_id: int, *, ctx: Context[OddaState]) -> Any:
+async def wrap_list(
+    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
     """List installed wraps (name, type, expr) for the browser."""
     return _json_result(
         await ctx.request_context.lifespan_context.browser.wrap_list(browser_id, tab_id)
@@ -854,11 +859,11 @@ async def wrap_remove(
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
 async def wrap_dump(
     browser_id: int, tab_id: int, name: str | None = None, *, ctx: Context[OddaState]
-) -> Any:
+) -> list[dict[str, Any]]:
     """Read the per-tab wrap record array.
 
     Each record: wrap name, type (call/access), this, args, ret,
@@ -910,11 +915,11 @@ async def logpoint_add(  # noqa: PLR0913 — targeting + url/line/col/expr is th
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
 async def logpoint_list(
     browser_id: int, tab_id: int, *, ctx: Context[OddaState]
-) -> Any:
+) -> list[dict[str, Any]]:
     """List planted logpoints on the target tab."""
     return _json_result(
         await ctx.request_context.lifespan_context.browser.logpoint_list(
@@ -934,11 +939,11 @@ async def logpoint_remove(
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
 async def logpoint_dump(
     browser_id: int, tab_id: int, *, ctx: Context[OddaState]
-) -> Any:
+) -> list[dict[str, Any]]:
     """Read the per-tab logpoint record array.
 
     Each record: logpoint id, url, line, col, value (null when the
@@ -1006,9 +1011,11 @@ async def userscript_install(
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
-async def userscript_list(browser_id: int, *, ctx: Context[OddaState]) -> Any:
+async def userscript_list(
+    browser_id: int, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
     """List installed userscripts for one browser (name, size)."""
     return _json_result(
         ctx.request_context.lifespan_context.browser.list_userscripts(browser_id)
@@ -1056,9 +1063,9 @@ async def proxy_script_install(
     return ctx.request_context.lifespan_context.proxy.install_script(name, py)
 
 
-@mcp_server.tool()
+@mcp_server.tool(structured_output=False)
 @odda_tool
-async def proxy_script_list(*, ctx: Context[OddaState]) -> Any:
+async def proxy_script_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
     """List installed proxy-scripts (from disk, annotated with live state)."""
     return _json_result(ctx.request_context.lifespan_context.proxy.list_scripts())
 
