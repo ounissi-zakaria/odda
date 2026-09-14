@@ -729,7 +729,7 @@ wheels = [
 
 [[package]]
 name = "odda"
-version = "0.44.1"
+version = "0.45.0"
 source = { editable = "." }
 dependencies = [
     { name = "h2" },
