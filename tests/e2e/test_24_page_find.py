@@ -1,15 +1,15 @@
-"""Page find + scoped/deep/boxed snapshots: locating targets without
-the full tree.
+"""Page find + deep/boxed snapshots: locating targets without the
+full tree.
 
 page_find searches a fresh AI-mode snapshot with a regex and returns
 matched lines with context and the ancestor path from the tree root —
 not the whole tree (upstream browser_find shape, grep -C 3 semantics,
-regex-only per the plan). page_snapshot grows ``target`` (a snapshot
-ref, or any Playwright selector so a subtree can be snapshotted with
-no prior full snapshot), ``depth`` (boundary nodes render childless),
-and ``boxes`` ([box=x,y,w,h] per line — the Ref -> Coordinate bridge:
-find a box, click its center). The bad-argument contracts (invalid
-regex, unresolvable target) error cleanly with odda messages verbatim.
+regex-only per the plan). page_snapshot caps render depth
+(``depth``: boundary nodes render childless while the walk still
+stamps every ref) and can attach geometry (``boxes``:
+[box=x,y,w,h] per line — the Ref -> Coordinate bridge: find a box,
+click its center). Bad arguments (invalid regex) error cleanly with
+odda messages verbatim.
 """
 
 from __future__ import annotations
@@ -159,48 +159,42 @@ async def test_page_find_reaches_into_iframes(odda_session) -> None:
         assert out == "iframe result: clicked"
 
 
-async def test_page_snapshot_scoped_by_target_and_limited_by_depth(
+async def test_page_snapshot_depth_caps_render_but_keeps_refs_alive(
     odda_session,
 ) -> None:
-    """target scopes the snapshot to one subtree — by selector (no prior
-    snapshot needed) or by ref — and depth caps how deep it renders."""
+    """depth caps rendering only: boundary nodes render childless and
+    deep leaves disappear from the text, but the walk still visits and
+    stamps the whole page — a ref discovered in a full snapshot stays
+    actionable after a depth-capped one."""
     async with (
         odda_session() as h,
         fixture_site(["page-find.html", "page-find-inner.html"]) as fx,
     ):
         bid, tid = await h.open_browser(f"{fx.base}/page-find.html")
 
-        # Selector target: the signup form subtree, without the banner.
-        form = await h.call(
-            "page_snapshot",
-            {"browser_id": bid, "tab_id": tid, "target": "#signup"},
+        full = await h.page_snapshot(bid, tid)
+        # The textbox's own line (not its label's text: child) carries
+        # the ref.
+        deep_line = next(
+            l for l in full.splitlines() if "Deep username" in l and "[ref=" in l
         )
-        assert isinstance(form, str)
-        assert "Signup form" in form
-        assert "Create account" in form
-        assert "Deep username" in form
-        assert "Pricing overview" not in form
+        deep_ref = re.search(r"\[ref=(e\d+)\]", deep_line).group(1)
 
-        # Depth cap: boundary node present, deep leaf gone.
         shallow = await h.call(
-            "page_snapshot",
-            {"browser_id": bid, "tab_id": tid, "target": "#signup", "depth": 1},
+            "page_snapshot", {"browser_id": bid, "tab_id": tid, "depth": 1}
         )
         assert isinstance(shallow, str)
-        assert "Create account" in shallow or "Email address" in shallow
-        assert "Deep username" not in shallow
+        assert shallow  # boundary nodes still render
+        assert "Deep username" not in shallow  # beyond the cap
 
-        # Ref target: same subtree scoping via a ref from a full snapshot
-        # (the first "Download report" in document order is the nav link).
-        full = await h.page_snapshot(bid, tid)
-        ref = _pluck_ref(full, "Download report", r"\[ref=(e\d+)\]")
-        leaf = await h.call(
-            "page_snapshot", {"browser_id": bid, "tab_id": tid, "target": ref}
+        # The capped walk still stamped the deep element's ref: the
+        # full-snapshot ref drives a fill with no re-snapshot between.
+        await h.call(
+            "page_fill",
+            {"browser_id": bid, "tab_id": tid, "ref": deep_ref, "value": "alice"},
         )
-        assert isinstance(leaf, str)
-        assert "Download report" in leaf
-        assert "Pricing overview" not in leaf
-        assert "Open archive" not in leaf  # other match's subtree
+        out = await h.eval(bid, tid, "document.getElementById('deep-username').value")
+        assert out == "alice"
 
 
 async def test_page_find_boxes_feed_a_coordinate_click(odda_session) -> None:
@@ -255,23 +249,3 @@ async def test_page_find_invalid_regex_errors_cleanly(odda_session) -> None:
             "page_find", {"browser_id": bid, "tab_id": tid, "regex": "([unclosed"}
         )
         assert err.startswith("Invalid regex:")
-
-
-async def test_page_snapshot_unresolvable_target_errors_cleanly(odda_session) -> None:
-    """A target that resolves to nothing (stale ref shape, unknown
-    selector) errors with the snapshot error message, not a crash."""
-    async with (
-        odda_session() as h,
-        fixture_site(["page-find.html", "page-find-inner.html"]) as fx,
-    ):
-        bid, tid = await h.open_browser(f"{fx.base}/page-find.html")
-        err = await h.call_error(
-            "page_snapshot", {"browser_id": bid, "tab_id": tid, "target": "e99999"}
-        )
-        assert err.startswith("Snapshot error:")
-
-        err = await h.call_error(
-            "page_snapshot",
-            {"browser_id": bid, "tab_id": tid, "target": ".does-not-exist"},
-        )
-        assert err.startswith("Snapshot error:")

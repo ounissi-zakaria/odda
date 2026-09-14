@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import shutil
 import subprocess
 import tempfile
@@ -17,7 +16,6 @@ from patchright.async_api import (
     BrowserContext,
     CDPSession,
     Dialog,
-    Locator,
     Page,
     Playwright,
     async_playwright,
@@ -32,16 +30,14 @@ from odda import (
 from odda.chrome_args import build_chrome_args
 
 if TYPE_CHECKING:
+    import re
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-# A snapshot ref (``e5``) optionally frame-prefixed (``f1e12``) — the
-# target forms page_snapshot routes to the aria-ref engine; anything
-# else is parsed as a Playwright selector.
-_REF_LIKE = re.compile(r"(?:f\d+)?e\d+")
 # Context lines around each page_find match (upstream parity: grep -C 3).
 _FIND_CONTEXT_LINES = 3
+
 
 BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
 
@@ -989,7 +985,6 @@ class BrowserInstance:
         self,
         tab_id: int,
         *,
-        target: str | None = None,
         depth: int | None = None,
         boxes: bool = False,
     ) -> str:
@@ -999,27 +994,21 @@ class BrowserInstance:
         a YAML-ish serialization of the a11y tree with ``[ref=eN]`` tags
         (or ``[ref=f<frameSeq>eN]`` inside iframes). The agent greps the
         text for the element it wants and passes the ref to ``click``,
-        ``fill``, ``hover``, or ``upload``.
-
-        ``target`` scopes the snapshot to one element's subtree: a ref
-        (``e5``, frame-prefixed ``f1e12``) resolved via the ``aria-ref``
-        engine, or any other string parsed as a Playwright selector —
-        so a subtree can be snapshotted without a prior full snapshot.
-        ``depth`` caps the tree depth (boundary nodes render without
-        children); ``boxes`` adds ``[box=x,y,width,height]`` per line
-        (source for coordinate clicks).
+        ``fill``, ``hover``, or ``upload``. Every call walks the whole
+        page — never a subtree — so the page-side ref map is always
+        complete and refs from any snapshot stay valid until their
+        element leaves the DOM. ``depth`` caps the rendered tree depth
+        (boundary nodes render without children; the walk still visits
+        and stamps everything below the cap); ``boxes`` adds
+        ``[box=x,y,width,height]`` per line (source for coordinate
+        clicks).
         """
         page = self._require_ready_tab(tab_id)
-        root: Page | Locator = page
-        if target is not None:
-            if _REF_LIKE.fullmatch(target):
-                root = page.locator(f"aria-ref={target}")
-            else:
-                root = page.locator(target)
         return await self._run_action(
             tab_id,
             "snapshot",
-            lambda: root.aria_snapshot(mode="ai", depth=depth, boxes=boxes or None),
+            # boxes or None: False must serialize as absent, not disabled.
+            lambda: page.aria_snapshot(mode="ai", depth=depth, boxes=boxes or None),
             lambda e: BrowserOperationError(f"Snapshot error: {e!s}"),
         )
 
@@ -1768,13 +1757,12 @@ class BrowserManager:
         browser_id: int,
         tab_id: int,
         *,
-        target: str | None = None,
         depth: int | None = None,
         boxes: bool = False,
     ) -> str:
         """Return the page's accessibility tree as agent-readable text."""
         inst = self._require_instance(browser_id)
-        return await inst.page_snapshot(tab_id, target=target, depth=depth, boxes=boxes)
+        return await inst.page_snapshot(tab_id, depth=depth, boxes=boxes)
 
     async def page_find(
         self,
