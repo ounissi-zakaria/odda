@@ -199,14 +199,14 @@ mcp_server = MCPServer[OddaState](
 
 
 def _register_doc_resources() -> None:
-    """Register the seven static ``odda://docs/<slug>`` markdown resources.
+    """Register the six static ``odda://docs/<slug>`` markdown resources.
 
     The concept references agents read for orientation: request
     crafting, flow capture, dynamic analysis, userscripts,
-    proxy-scripts, the upstream proxy, and worked recipes. Content
-    lives in the ``odda.docs`` package (``src/odda/docs/``); read at
-    registration time — these are server-instructions-scale documents,
-    not lazily generated state.
+    proxy-scripts, and worked recipes. Content lives in the
+    ``odda.docs`` package (``src/odda/docs/``); read at registration
+    time — these are server-instructions-scale documents, not lazily
+    generated state.
     """
     docs = {
         "request-crafting": "Craft and send raw HTTP requests byte-for-byte.",
@@ -217,10 +217,6 @@ def _register_doc_resources() -> None:
         ),
         "proxy-scripts": (
             "mitmproxy addons at the proxy layer; format, scope, failure model."
-        ),
-        "upstream-proxy": (
-            "Chaining the proxy through an upstream forward proxy; scope, "
-            "auth, loopback rule."
         ),
         "recipes": "Worked examples composing the tools into full investigations.",
     }
@@ -748,7 +744,9 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
     ``pipelining`` for send-all-then-read-all; H2: concurrent
     streams); repeat >= 2 with a single name → N concurrent
     copies, one flow each. Errors are recorded as error flows
-    (status_code null + error message), not tool errors. See
+    (status_code null + error message), not tool errors. Requests
+    dial direct from this machine's own IP — they never traverse
+    odda's proxy or a proxy_upstream chain. See
     odda://docs/request-crafting for the full semantics.
     """
     if repeat is not None and names is not None:
@@ -816,8 +814,11 @@ async def proxy_upstream_set(
     (no SOCKS); no credentials in the URL — Basic auth goes in
     ``auth`` as 'username:password'. Loopback targets cannot be
     reached through a remote upstream: clear it before driving
-    127.0.0.1 targets. The change applies to new connections and
-    lasts for this session only (never persisted).
+    127.0.0.1 targets. Crafted requests (request_send) always dial
+    direct from this machine regardless. An unreachable or refusing
+    upstream fails per-flow: plain-http targets get a 502 naming the
+    upstream, https targets get a dead TLS handshake — check
+    flow.error in flows.jsonl. Applies to new connections; per-session.
     """
     return await ctx.request_context.lifespan_context.proxy.set_upstream(url, auth)
 

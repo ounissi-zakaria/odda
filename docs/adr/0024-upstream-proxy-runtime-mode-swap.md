@@ -58,9 +58,11 @@ browsers opened before/after a flip different behavior. So under an
 upstream, loopback targets fail loudly (the CONNECT dies at the
 upstream; `flow.error` records the refusal) instead of silently losing
 local capture — loud failures are agent-debuggable, absent flows are
-not. The rule lives in the tool descriptions and the
-`odda://docs/upstream-proxy` resource: clear the upstream before
-driving 127.0.0.1 targets.
+not. The rule lives in the tool descriptions (`proxy_upstream_set`
+carries it, together with the request_send vantage split and the
+per-flow failure shapes): clear the upstream before driving 127.0.0.1
+targets. No odda://docs resource was spun up for this feature — the
+tools plus their descriptions are the whole agent-facing surface.
 
 **Basic auth only, via `upstream_auth`.** mitmproxy's grammar has no
 credentials field in the server spec (userinfo in the URL is a hard
