@@ -12,6 +12,7 @@ no further upstream log entries.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -89,7 +90,7 @@ async def test_http_traffic_traverses_upstream(odda_session, tmp_path) -> None:
         r = await h.call("proxy_upstream_set", {"url": upstream_url})
         assert r["upstream"] == upstream_url
         assert r["auth_set"] is False
-        assert "new connections" in r["note"]
+        assert "open connections were closed" in r["note"]
 
         proxy = await h.call("proxy_url", {})
         res = await curl(
@@ -198,7 +199,7 @@ async def test_clear_restores_direct(odda_session, tmp_path) -> None:
         r = await h.call("proxy_upstream_clear", {})
         assert r["upstream"] is None
         assert r["auth_set"] is False
-        assert "new connections" in r["note"]
+        assert "open connections were closed" in r["note"]
 
         res = await curl(
             f"{site.base}/?marker=up-clear-b",
@@ -211,3 +212,48 @@ async def test_clear_restores_direct(odda_session, tmp_path) -> None:
             "upstream": None,
             "auth_set": False,
         }
+
+
+async def test_flip_closes_live_pooled_connection(
+    odda_session, tmp_path
+) -> None:
+    """The tester's scenario: a browser with an established (pooled)
+    connection keeps the old vantage until the connection dies. The
+    flip must close it — deterministic check with a raw client socket
+    held open across proxy_upstream_set."""
+    async with odda_session() as h:
+        proxy = str(await h.call("proxy_url", {}))
+        port = int(proxy.rsplit(":", 1)[1])
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await asyncio.sleep(0.25)  # let mitmproxy register the handler
+        r = await h.call(
+            "proxy_upstream_set", {"url": "http://127.0.0.1:1"}
+        )
+        assert r["closed_connections"] >= 1
+        data = await asyncio.wait_for(reader.read(), timeout=5)
+        assert data == b""  # our socket was closed by the flip
+        writer.close()
+
+
+async def test_flip_applies_to_pooled_browser(odda_session, tmp_path) -> None:
+    """End-to-end form of the tester's scenario: navigate (establishing
+    Chrome's pooled connection), flip, navigate again — the second
+    navigation must traverse the upstream, not the old pooled path."""
+    log_path = tmp_path / "upstream.jsonl"
+    async with (
+        odda_session() as h,
+        dyn_server() as dyn,
+        upstream_proxy(log_path) as fp,
+    ):
+        bid, tid = await h.open_browser()
+        await h.navigate(bid, tid, f"{dyn.tls_base}/?body=pre-flip-vantage")
+
+        r = await h.call("proxy_upstream_set", {"url": f"http://127.0.0.1:{fp.port}"})
+        assert r["closed_connections"] >= 1
+
+        await h.navigate(bid, tid, f"{dyn.tls_base}/?body=post-flip-vantage")
+        await h.wait_flow("post-flip-vantage")
+        connects = [e for e in log_lines(log_path) if e["kind"] == "connect"]
+        assert any(f"CONNECT 127.0.0.1:{dyn.port}" in e["line"] for e in connects), (
+            connects
+        )

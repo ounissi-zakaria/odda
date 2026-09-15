@@ -22,9 +22,21 @@ synchronously on assignment, rolls back on a bad one, rebuilds the
 listener as a loop task (stop-before-start: the port is briefly
 unbound), and only connections accepted after the rebind use the new
 mode. odda awaits the rebind with a data-less TCP probe before the tool
-returns, so callers never race the window. Keep-alives finishing on the
-old path are acceptable — each new request re-dials — and the tool
-results carry that note verbatim (`_FLIP_NOTE`).
+returns, so callers never race that window.
+
+**Flips drain live connections.** The original decision stopped at
+"applies to new connections" with a note; field testing overturned it:
+browsers pool HTTP/2 connections (and CONNECT tunnels) for minutes, so
+revisited hosts kept the old vantage indefinitely — the note was a lie
+with extra steps. `set_upstream`/`clear_upstream` now close every live
+client connection after the rebind, walking the proxyserver addon's
+live-handler registry (`connections` → `transports[...].writer`, the
+same state its `proxyserver.active_connections` command reports), so
+the client's next request dials into the new mode. Chrome reconnects
+transparently; the cost is that in-flight requests on closed sockets
+abort — acceptable for a deliberate vantage switch, and reached via
+`getattr` so a mitmproxy shape change degrades to new-connections-only
+instead of crashing.
 
 **Config is tools-only and per-session.** Env vars were rejected twice
 over: mitmproxy never consults `http_proxy`-style variables for its

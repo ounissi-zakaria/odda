@@ -16,11 +16,13 @@ from mitmproxy.tools.dump import DumpMaster
 from odda.flowstore import FlowFileAddon
 from odda.proxyscript import ProxyScriptManager
 
-# Returned by set_upstream/clear_upstream: a mode swap only affects
-# connections accepted after the listener rebinds (keep-alives finish
-# on the previous path; mitmproxy rebinds stop-before-start).
+# Returned by set_upstream/clear_upstream: a flip rebinds the listener
+# and then closes live client connections, so the new vantage applies
+# to the very next request a client dials (in-flight requests on the
+# closed sockets are aborted).
 _FLIP_NOTE = (
-    "applies to new connections; in-flight requests complete on the previous path"
+    "open connections were closed so the new path applies immediately; "
+    "in-flight requests on them are aborted"
 )
 
 # _await_listener_rebound's deadline; generous — the rebind is a local
@@ -138,7 +140,8 @@ class ProxyServer:
         ``OptionsError`` and rolls the options back — odda converts it
         to ``ValueError`` (the tool layer's anticipated-error type).
         The listener rebind is asynchronous, so this awaits it before
-        returning.
+        returning, then closes live client connections so the flip
+        converges on the client's very next request.
 
         URL userinfo (``user:pass@host``) is rejected: mitmproxy's
         server-spec grammar has no credentials field — auth belongs in
@@ -192,9 +195,14 @@ class ProxyServer:
             # upstream_state() never lies about what the listener is doing.
             self._restore_options(previous_mode, previous_auth)
             raise ValueError(str(exc)) from exc
+        closed = self._drain_client_connections()
         self._upstream_url = url
         self._upstream_auth = auth
-        return {**self.upstream_state(), "note": _FLIP_NOTE}
+        return {
+            **self.upstream_state(),
+            "closed_connections": closed,
+            "note": _FLIP_NOTE,
+        }
 
     async def clear_upstream(self) -> dict[str, Any]:
         """Drop the upstream chain and return to direct egress.
@@ -212,9 +220,14 @@ class ProxyServer:
         except TimeoutError as exc:
             self._restore_options(previous_mode, previous_auth)
             raise ValueError(str(exc)) from exc
+        closed = self._drain_client_connections()
         self._upstream_url = None
         self._upstream_auth = None
-        return {**self.upstream_state(), "note": _FLIP_NOTE}
+        return {
+            **self.upstream_state(),
+            "closed_connections": closed,
+            "note": _FLIP_NOTE,
+        }
 
     def upstream_state(self) -> dict[str, Any]:
         """Report the current upstream configuration.
@@ -228,6 +241,41 @@ class ProxyServer:
             "upstream": self._upstream_url,
             "auth_set": self._upstream_auth is not None,
         }
+
+    def _drain_client_connections(self) -> int:
+        """Close every live client connection so a mode flip converges now.
+
+        The mode is stamped onto a connection at accept time, and
+        browsers pool connections (HTTP/2 especially) for minutes — a
+        flip that only affects future accepts would leave revisited
+        hosts on the old path indefinitely. Closing the client sockets
+        makes the client re-dial into the new mode on its next request;
+        Chrome reconnects transparently.
+
+        Walks the proxyserver addon's live-handler registry (the same
+        state its ``proxyserver.active_connections`` command reports)
+        and closes each transport writer. Everything is reached via
+        ``getattr``: if a future mitmproxy changes the shape, the flip
+        degrades to affecting new connections only instead of crashing.
+
+        Returns:
+            Number of live writers closed.
+        """
+        proxyserver = self.m.addons.get("proxyserver")
+        connections = getattr(proxyserver, "connections", None) or {}
+        closed = 0
+        for handler in list(connections.values()):
+            transports = getattr(handler, "transports", {})
+            for io in list(transports.values()):
+                writer = getattr(io, "writer", None)
+                if writer is None:
+                    continue
+                is_closing = getattr(writer, "is_closing", None)
+                if callable(is_closing) and is_closing():
+                    continue
+                writer.close()
+                closed += 1
+        return closed
 
     def _restore_options(self, mode: list[str], auth: str | None) -> None:
         """Best-effort restore after a failed flip so state matches egress."""

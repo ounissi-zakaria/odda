@@ -818,7 +818,9 @@ async def proxy_upstream_set(
     direct from this machine regardless. An unreachable or refusing
     upstream fails per-flow: plain-http targets get a 502 naming the
     upstream, https targets get a dead TLS handshake — check
-    flow.error in flows.jsonl. Applies to new connections; per-session.
+    flow.error in flows.jsonl. Open connections are closed so the new
+    path applies on the very next request — even over pooled HTTP/2
+    (in-flight requests on them abort). Per-session.
     """
     return await ctx.request_context.lifespan_context.proxy.set_upstream(url, auth)
 
@@ -828,8 +830,9 @@ async def proxy_upstream_set(
 async def proxy_upstream_clear(*, ctx: Context[OddaState]) -> dict[str, Any]:
     """Remove the upstream proxy and return to direct egress.
 
-    Applies to new connections; in-flight requests complete on the
-    previous path. Session-scoped like proxy_upstream_set.
+    Open connections are closed so direct egress applies on the very
+    next request (in-flight requests on them abort); browsers
+    reconnect transparently. Session-scoped like proxy_upstream_set.
     """
     return await ctx.request_context.lifespan_context.proxy.clear_upstream()
 
