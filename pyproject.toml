@@ -1,7 +1,6 @@
 [project]
 name = "odda"
-version = "0.45.0"
-description = "Browser automation and HTTP traffic capture for AI agents (MCP server)"
+version = "0.46.0"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
