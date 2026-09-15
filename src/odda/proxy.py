@@ -25,6 +25,11 @@ _FLIP_NOTE = (
     "in-flight requests on them are aborted"
 )
 
+_FLIP_NOTE_DEGRADED = (
+    "existing connections could not be closed (connection registry "
+    "unavailable); the new path applies to new connections only"
+)
+
 # _await_listener_rebound's deadline; generous — the rebind is a local
 # stop-then-start, normally sub-100ms.
 _REBIND_TIMEOUT = 5.0
@@ -154,7 +159,10 @@ class ProxyServer:
 
         Returns:
             The new upstream state dict (see :meth:`upstream_state`) plus
-            a ``note`` about the new-connections-only scope.
+            ``closed_connections`` and a ``note``: open connections are
+            closed so the flip applies immediately (in-flight requests
+            abort); the note flags degradation when the drain could not
+            inspect the connection registry.
         """
         if "@" in url:
             raise ValueError(
@@ -179,55 +187,15 @@ class ProxyServer:
             mode_specs.ProxyMode.parse(spec)
         except (ValueError, mitmproxy_exceptions.OptionsError) as exc:
             raise ValueError(f"invalid upstream proxy URL {url!r}: {exc}") from exc
-        previous_mode = list(self.options.mode)
-        previous_auth: str | None = self.options.upstream_auth
-        try:
-            if auth is not None:
-                self.options.upstream_auth = auth
-            self.options.mode = [spec]
-        except mitmproxy_exceptions.OptionsError as exc:
-            self._restore_options(previous_mode, previous_auth)
-            raise ValueError(f"invalid upstream proxy configuration: {exc}") from exc
-        try:
-            await self._await_listener_rebound()
-        except TimeoutError as exc:
-            # The swap may actually be live — restore the previous mode so
-            # upstream_state() never lies about what the listener is doing.
-            self._restore_options(previous_mode, previous_auth)
-            raise ValueError(str(exc)) from exc
-        closed = self._drain_client_connections()
-        self._upstream_url = url
-        self._upstream_auth = auth
-        return {
-            **self.upstream_state(),
-            "closed_connections": closed,
-            "note": _FLIP_NOTE,
-        }
+        return await self._flip_upstream(spec, auth, url)
 
     async def clear_upstream(self) -> dict[str, Any]:
         """Drop the upstream chain and return to direct egress.
 
         Swaps the listener back to regular mode and clears
-        ``upstream_auth``. "regular" always parses, so the only failure
-        path is the rebind wait, which restores the previous mode.
+        ``upstream_auth`` via the shared flip procedure.
         """
-        previous_mode = list(self.options.mode)
-        previous_auth: str | None = self.options.upstream_auth
-        self.options.mode = ["regular"]
-        self.options.upstream_auth = None
-        try:
-            await self._await_listener_rebound()
-        except TimeoutError as exc:
-            self._restore_options(previous_mode, previous_auth)
-            raise ValueError(str(exc)) from exc
-        closed = self._drain_client_connections()
-        self._upstream_url = None
-        self._upstream_auth = None
-        return {
-            **self.upstream_state(),
-            "closed_connections": closed,
-            "note": _FLIP_NOTE,
-        }
+        return await self._flip_upstream("regular", None, None)
 
     def upstream_state(self) -> dict[str, Any]:
         """Report the current upstream configuration.
@@ -242,7 +210,54 @@ class ProxyServer:
             "auth_set": self._upstream_auth is not None,
         }
 
-    def _drain_client_connections(self) -> int:
+    async def _flip_upstream(
+        self, spec: str, auth: str | None, url: str | None
+    ) -> dict[str, Any]:
+        """Shared flip procedure: apply, rebind, drain, commit.
+
+        Snapshots the current options, assigns ``upstream_auth`` then
+        ``mode`` (auth first, and unconditionally — a re-set without
+        auth must clear stale credentials), restores the snapshot on
+        any failure so the options never half-apply, then drains live
+        client connections and commits the mirror state.
+
+        Args:
+            spec: Complete mode spec to swap the listener to.
+            auth: Upstream auth to set (``None`` clears stale credentials).
+            url: Upstream URL to record in state (``None`` = direct).
+
+        Returns:
+            The state dict (see :meth:`upstream_state`) plus the flip
+            ``note``, and ``closed_connections`` unless the drain could
+            not inspect the connection registry.
+        """
+        previous_mode = list(self.options.mode)
+        previous_auth: str | None = self.options.upstream_auth
+        try:
+            self.options.upstream_auth = auth
+            self.options.mode = [spec]
+        except mitmproxy_exceptions.OptionsError as exc:
+            self._restore_options(previous_mode, previous_auth)
+            raise ValueError(f"invalid upstream proxy configuration: {exc}") from exc
+        try:
+            await self._await_listener_rebound()
+        except TimeoutError as exc:
+            # The swap may actually be live — restore the previous mode so
+            # upstream_state() never lies about what the listener is doing.
+            self._restore_options(previous_mode, previous_auth)
+            raise ValueError(str(exc)) from exc
+        closed = self._drain_client_connections()
+        self._upstream_url = url
+        self._upstream_auth = auth
+        result = {
+            **self.upstream_state(),
+            "note": _FLIP_NOTE if closed is not None else _FLIP_NOTE_DEGRADED,
+        }
+        if closed is not None:
+            result["closed_connections"] = closed
+        return result
+
+    def _drain_client_connections(self) -> int | None:
         """Close every live client connection so a mode flip converges now.
 
         The mode is stamped onto a connection at accept time, and
@@ -259,10 +274,13 @@ class ProxyServer:
         degrades to affecting new connections only instead of crashing.
 
         Returns:
-            Number of live writers closed.
+            Number of live writers closed, or ``None`` when the registry
+            could not be inspected (callers flag the degradation).
         """
         proxyserver = self.m.addons.get("proxyserver")
-        connections = getattr(proxyserver, "connections", None) or {}
+        if proxyserver is None or not hasattr(proxyserver, "connections"):
+            return None
+        connections = proxyserver.connections
         closed = 0
         for handler in list(connections.values()):
             transports = getattr(handler, "transports", {})

@@ -214,9 +214,7 @@ async def test_clear_restores_direct(odda_session, tmp_path) -> None:
         }
 
 
-async def test_flip_closes_live_pooled_connection(
-    odda_session, tmp_path
-) -> None:
+async def test_flip_closes_live_pooled_connection(odda_session, tmp_path) -> None:
     """The tester's scenario: a browser with an established (pooled)
     connection keeps the old vantage until the connection dies. The
     flip must close it — deterministic check with a raw client socket
@@ -226,9 +224,7 @@ async def test_flip_closes_live_pooled_connection(
         port = int(proxy.rsplit(":", 1)[1])
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         await asyncio.sleep(0.25)  # let mitmproxy register the handler
-        r = await h.call(
-            "proxy_upstream_set", {"url": "http://127.0.0.1:1"}
-        )
+        r = await h.call("proxy_upstream_set", {"url": "http://127.0.0.1:1"})
         assert r["closed_connections"] >= 1
         data = await asyncio.wait_for(reader.read(), timeout=5)
         assert data == b""  # our socket was closed by the flip
@@ -257,3 +253,39 @@ async def test_flip_applies_to_pooled_browser(odda_session, tmp_path) -> None:
         assert any(f"CONNECT 127.0.0.1:{dyn.port}" in e["line"] for e in connects), (
             connects
         )
+
+
+async def test_reset_without_auth_drops_stale_credentials(
+    odda_session, tmp_path
+) -> None:
+    """Re-setting an upstream without auth must clear the old Basic
+    credentials — otherwise they leak to the new upstream host while
+    auth_set reports false. The auth-requiring fixture answers 407
+    without credentials, so a stale credential would show as 200."""
+    log_path = tmp_path / "upstream.jsonl"
+    async with (
+        odda_session() as h,
+        fixture_site(index_body="auth-drop-body") as site,
+        upstream_proxy(log_path, require_auth="me:secret") as fp,
+    ):
+        url = f"http://127.0.0.1:{fp.port}"
+        await h.call("proxy_upstream_set", {"url": url, "auth": "me:secret"})
+        proxy = await h.call("proxy_url", {})
+        res = await curl(
+            f"{site.base}/?marker=up-auth-drop-ok",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert res.stdout == "200"
+
+        await h.call("proxy_upstream_set", {"url": url})
+        assert await h.call("proxy_upstream_get", {}) == {
+            "upstream": url,
+            "auth_set": False,
+        }
+        res = await curl(
+            f"{site.base}/?marker=up-auth-drop-stale",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert res.stdout == "407"
