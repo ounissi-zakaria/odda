@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import platform
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import suppress
@@ -30,7 +33,6 @@ from odda import (
 from odda.chrome_args import build_chrome_args
 
 if TYPE_CHECKING:
-    import re
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
@@ -123,6 +125,47 @@ def _find_chrome_executable() -> str:
             return path
     msg = "No Chrome or Chromium executable found on PATH"
     raise RuntimeError(msg)
+
+
+def _headless_launch_user_agent(chrome_executable: str) -> str | None:
+    """Build a headed-Chrome UA from the installed binary, or ``None``.
+
+    Chrome brands ``--headless`` sessions ``HeadlessChrome/<version>`` and
+    some origins reset such connections outright, so headless launches hand
+    patchright a headed-shaped UA (same major version, Chrome's reduced
+    form, headed token). The
+    driver applies it via ``Emulation.setUserAgentOverride``, covering the
+    wire header and page-visible ``navigator.userAgent`` for every page in
+    the context. The version is probed from the actual binary; any failure
+    returns ``None`` and the launch proceeds without an override.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [chrome_executable, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"\d+(?:\.\d+){3}", proc.stdout)
+    if match is None:
+        return None
+    # Chrome's UA reduction: the UA string carries major.0.0.0; the full
+    # build surfaces only in high-entropy client hints.
+    version = f"{match.group(0).split('.')[0]}.0.0.0"
+    if sys.platform.startswith("win"):
+        ua_platform = "Windows NT 10.0; Win64; x64"
+    elif sys.platform == "darwin":
+        ua_platform = "Macintosh; Intel Mac OS X 10_15_7"
+    else:
+        machine = platform.machine() or "x86_64"
+        ua_platform = f"X11; Linux {machine}"
+    return (
+        f"Mozilla/5.0 ({ua_platform}) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
+    )
 
 
 def _prepare_user_data_dir() -> str:
@@ -1638,11 +1681,19 @@ class BrowserManager:
         user_data_dir = _prepare_user_data_dir()
         chrome_executable = _find_chrome_executable()
 
+        # Headless UA normalization: probe once, off the event loop.
+        user_agent = (
+            await asyncio.to_thread(_headless_launch_user_agent, chrome_executable)
+            if headless
+            else None
+        )
         playwright = await async_playwright().start()
         context = await playwright.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             executable_path=chrome_executable,
             headless=headless,
+            # Headed UA, applied driver-side context-wide (see helper).
+            user_agent=user_agent,
             proxy=proxy_config,
             ignore_https_errors=True,
             # ignore_default_args=True (bool) so Chrome receives only our
