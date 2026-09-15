@@ -101,7 +101,7 @@ A real Chrome (via patchright/Playwright), headless by default:
 
 ### Capture every flow
 
-A transparent mitmproxy sits between Chrome and the network; driving the browser *is* traffic capture. Every request/response is saved under `.odda/flows/<id>/`; the index is `.odda/flows/flows.jsonl`. See the `odda://docs/flows` resource for the file layout and schema.
+A transparent mitmproxy sits between Chrome and the network; driving the browser *is* traffic capture. Every request/response is saved under `.odda/flows/<id>/`; the index is `.odda/flows/flows.jsonl`. The proxy can also chain through an upstream forward proxy (`proxy_upstream_set`) to change the session's network vantage — see the `odda://docs/upstream-proxy` resource. See the `odda://docs/flows` resource for the file layout and schema.
 
 ### Observe JS in progress
 

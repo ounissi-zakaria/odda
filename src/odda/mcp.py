@@ -199,14 +199,14 @@ mcp_server = MCPServer[OddaState](
 
 
 def _register_doc_resources() -> None:
-    """Register the six static ``odda://docs/<slug>`` markdown resources.
+    """Register the seven static ``odda://docs/<slug>`` markdown resources.
 
     The concept references agents read for orientation: request
     crafting, flow capture, dynamic analysis, userscripts,
-    proxy-scripts, and worked recipes. Content lives in the
-    ``odda.docs`` package (``src/odda/docs/``); read at registration
-    time — these are server-instructions-scale documents, not lazily
-    generated state.
+    proxy-scripts, the upstream proxy, and worked recipes. Content
+    lives in the ``odda.docs`` package (``src/odda/docs/``); read at
+    registration time — these are server-instructions-scale documents,
+    not lazily generated state.
     """
     docs = {
         "request-crafting": "Craft and send raw HTTP requests byte-for-byte.",
@@ -217,6 +217,10 @@ def _register_doc_resources() -> None:
         ),
         "proxy-scripts": (
             "mitmproxy addons at the proxy layer; format, scope, failure model."
+        ),
+        "upstream-proxy": (
+            "Chaining the proxy through an upstream forward proxy; scope, "
+            "auth, loopback rule."
         ),
         "recipes": "Worked examples composing the tools into full investigations.",
     }
@@ -794,6 +798,51 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
 async def proxy_url(*, ctx: Context[OddaState]) -> str:
     """Return the HTTP proxy URL."""
     return ctx.request_context.lifespan_context.proxy.proxy_url
+
+
+@mcp_server.tool()
+@odda_tool
+async def proxy_upstream_set(
+    url: str,
+    auth: str | None = None,
+    *,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Route the proxy's upstream traffic through a chained HTTP(S) proxy.
+
+    Chrome still connects to odda's proxy; every request odda forwards
+    goes via the upstream instead of direct (mitmproxy upstream mode).
+    ``url`` is the upstream proxy, ``http://`` or ``https://`` only
+    (no SOCKS); no credentials in the URL — Basic auth goes in
+    ``auth`` as 'username:password'. Loopback targets cannot be
+    reached through a remote upstream: clear it before driving
+    127.0.0.1 targets. The change applies to new connections and
+    lasts for this session only (never persisted).
+    """
+    return await ctx.request_context.lifespan_context.proxy.set_upstream(url, auth)
+
+
+@mcp_server.tool()
+@odda_tool
+async def proxy_upstream_clear(*, ctx: Context[OddaState]) -> dict[str, Any]:
+    """Remove the upstream proxy and return to direct egress.
+
+    Applies to new connections; in-flight requests complete on the
+    previous path. Session-scoped like proxy_upstream_set.
+    """
+    return await ctx.request_context.lifespan_context.proxy.clear_upstream()
+
+
+@mcp_server.tool()
+@odda_tool
+async def proxy_upstream_get(*, ctx: Context[OddaState]) -> dict[str, Any]:
+    """Report the current upstream proxy configuration.
+
+    Returns ``upstream`` (the URL, or ``None`` when direct) and
+    ``auth_set`` (whether credentials are configured; the secret is
+    never echoed back).
+    """
+    return ctx.request_context.lifespan_context.proxy.upstream_state()
 
 
 # --- dynamic analysis: coverage ---

@@ -142,6 +142,7 @@ split-on-trailing-comma = false
 "tests/e2e/fixtures/slow_load_server.py" = ["INP001"]
 "tests/e2e/fixtures/close_after_first_server.py" = ["INP001", "S110"]
 "tests/e2e/fixtures/close_without_response_server.py" = ["INP001", "S110"]
+"tests/e2e/fixtures/forward_proxy.py" = ["INP001"]
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"

@@ -4,14 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import time
 from contextlib import suppress
 from typing import Any
 
+from mitmproxy import exceptions as mitmproxy_exceptions
 from mitmproxy.options import Options
+from mitmproxy.proxy import mode_specs
 from mitmproxy.tools.dump import DumpMaster
 
 from odda.flowstore import FlowFileAddon
 from odda.proxyscript import ProxyScriptManager
+
+# Returned by set_upstream/clear_upstream: a mode swap only affects
+# connections accepted after the listener rebinds (keep-alives finish
+# on the previous path; mitmproxy rebinds stop-before-start).
+_FLIP_NOTE = (
+    "applies to new connections; in-flight requests complete on the previous path"
+)
+
+# _await_listener_rebound's deadline; generous — the rebind is a local
+# stop-then-start, normally sub-100ms.
+_REBIND_TIMEOUT = 5.0
 
 
 class ProxyServer:
@@ -27,6 +41,11 @@ class ProxyServer:
             host: Host to bind to.
         """
         self.m = None
+        # Upstream-proxy state: None = direct egress (the default).
+        # Changed at runtime via set_upstream/clear_upstream — the
+        # configuration surface is per-session only, never persisted.
+        self._upstream_url: str | None = None
+        self._upstream_auth: str | None = None
         port = self._pick_port(host)
         self.options = Options(
             listen_port=port,
@@ -105,6 +124,145 @@ class ProxyServer:
             HTTP proxy URL string.
         """
         return f"http://{self.options.listen_host}:{self.options.listen_port}"
+
+    # --- upstream proxy ------------------------------------------------
+
+    async def set_upstream(self, url: str, auth: str | None = None) -> dict[str, Any]:
+        """Chain all server-side traffic through an upstream HTTP(S) proxy.
+
+        Swaps the single listener's mitmproxy mode to ``upstream:<url>``
+        (pinned to odda's own listen host/port via the mode-spec ``@``
+        suffix) and sets ``upstream_auth`` (HTTP Basic) before the flip,
+        so no unauthenticated CONNECT reaches the upstream. mitmproxy
+        validates synchronously on assignment: a bad spec raises
+        ``OptionsError`` and rolls the options back — odda converts it
+        to ``ValueError`` (the tool layer's anticipated-error type).
+        The listener rebind is asynchronous, so this awaits it before
+        returning.
+
+        URL userinfo (``user:pass@host``) is rejected: mitmproxy's
+        server-spec grammar has no credentials field — auth belongs in
+        the ``auth`` parameter. Only ``http://`` and ``https://``
+        upstreams exist; there is no SOCKS support to fall back to.
+
+        Args:
+            url: Upstream proxy URL (``http://`` or ``https://`` host:port).
+            auth: Optional ``username:password`` for HTTP Basic auth.
+
+        Returns:
+            The new upstream state dict (see :meth:`upstream_state`) plus
+            a ``note`` about the new-connections-only scope.
+        """
+        if "@" in url:
+            raise ValueError(
+                "upstream URL must not embed credentials (user:pass@host) — "
+                "pass them via the auth parameter as 'username:password'"
+            )
+        if "://" not in url:
+            raise ValueError(
+                f"upstream URL {url!r} must include a scheme: only "
+                "http:// and https:// upstreams are supported (no SOCKS)"
+            )
+        scheme = url.split("://", 1)[0].lower()
+        if scheme not in ("http", "https"):
+            raise ValueError(
+                f"unsupported upstream proxy scheme {scheme!r}: only "
+                "http:// and https:// upstreams are supported (no SOCKS)"
+            )
+        if auth is not None and ":" not in auth:
+            raise ValueError("auth must be 'username:password'")
+        spec = f"upstream:{url}@{self.options.listen_host}:{self.options.listen_port}"
+        try:
+            mode_specs.ProxyMode.parse(spec)
+        except (ValueError, mitmproxy_exceptions.OptionsError) as exc:
+            raise ValueError(f"invalid upstream proxy URL {url!r}: {exc}") from exc
+        previous_mode = list(self.options.mode)
+        previous_auth: str | None = self.options.upstream_auth
+        try:
+            if auth is not None:
+                self.options.upstream_auth = auth
+            self.options.mode = [spec]
+        except mitmproxy_exceptions.OptionsError as exc:
+            self._restore_options(previous_mode, previous_auth)
+            raise ValueError(f"invalid upstream proxy configuration: {exc}") from exc
+        try:
+            await self._await_listener_rebound()
+        except TimeoutError as exc:
+            # The swap may actually be live — restore the previous mode so
+            # upstream_state() never lies about what the listener is doing.
+            self._restore_options(previous_mode, previous_auth)
+            raise ValueError(str(exc)) from exc
+        self._upstream_url = url
+        self._upstream_auth = auth
+        return {**self.upstream_state(), "note": _FLIP_NOTE}
+
+    async def clear_upstream(self) -> dict[str, Any]:
+        """Drop the upstream chain and return to direct egress.
+
+        Swaps the listener back to regular mode and clears
+        ``upstream_auth``. "regular" always parses, so the only failure
+        path is the rebind wait, which restores the previous mode.
+        """
+        previous_mode = list(self.options.mode)
+        previous_auth: str | None = self.options.upstream_auth
+        self.options.mode = ["regular"]
+        self.options.upstream_auth = None
+        try:
+            await self._await_listener_rebound()
+        except TimeoutError as exc:
+            self._restore_options(previous_mode, previous_auth)
+            raise ValueError(str(exc)) from exc
+        self._upstream_url = None
+        self._upstream_auth = None
+        return {**self.upstream_state(), "note": _FLIP_NOTE}
+
+    def upstream_state(self) -> dict[str, Any]:
+        """Report the current upstream configuration.
+
+        Returns:
+            ``upstream``: the configured upstream URL, or ``None`` when
+            direct. ``auth_set``: whether credentials are configured —
+            the secret itself is never echoed back.
+        """
+        return {
+            "upstream": self._upstream_url,
+            "auth_set": self._upstream_auth is not None,
+        }
+
+    def _restore_options(self, mode: list[str], auth: str | None) -> None:
+        """Best-effort restore after a failed flip so state matches egress."""
+        with suppress(mitmproxy_exceptions.OptionsError):
+            self.options.mode = mode
+            self.options.upstream_auth = auth
+
+    async def _await_listener_rebound(self) -> None:
+        """Wait until the listener socket answers again after a mode swap.
+
+        ``Servers.update`` rebuilds listeners as a loop task (stops
+        before starts — the port is briefly unbound); callers must not
+        race that window. The probe connection carries no data and
+        creates no flow.
+        """
+        deadline = time.monotonic() + _REBIND_TIMEOUT
+        last: OSError | None = None
+        while time.monotonic() < deadline:
+            try:
+                _, writer = await asyncio.open_connection(
+                    self.options.listen_host, self.options.listen_port
+                )
+            except OSError as exc:
+                last = exc
+                await asyncio.sleep(0.02)
+            else:
+                writer.close()
+                with suppress(Exception):
+                    await writer.wait_closed()
+                return
+        raise TimeoutError(
+            f"proxy listener on {self.options.listen_host}:"
+            f"{self.options.listen_port} did not come back after the mode "
+            f"swap within {_REBIND_TIMEOUT}s: {last}"
+        )
 
     # --- proxy-scripts ------------------------------------------------
 
