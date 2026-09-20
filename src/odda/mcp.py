@@ -480,6 +480,7 @@ async def page_snapshot(
     depth: int | None = None,
     *,
     boxes: bool = False,
+    diff: bool = False,
     ctx: Context[OddaState],
 ) -> str:
     """Take an agent-readable snapshot of the page's accessibility tree.
@@ -498,6 +499,16 @@ async def page_snapshot(
     fits under the cap is returned without any such annotation.
     boxes: include [box=x,y,width,height] per line — geometry source
     for page_click/page_hover coordinates.
+    diff: return only what changed since this tab's previous same-
+    depth snapshot — "-"/"+" lines (fresh refs on "+", old render's
+    on "-") under an ancestor-path header per hunk; unchanged content
+    is never re-sent. Comparison ignores refs, boxes, and cap tags,
+    so scrolling never reads as change. Every page_snapshot becomes
+    the baseline for its depth (diffs chain); navigation clears the
+    tab's baselines; nothing changed returns the sentinel
+    "(no changes since previous snapshot)"; a first diff returns the
+    full tree, announced by a note. Prefer diff over a full re-read
+    after every action.
     On a large page, prefer page_find (search without the full tree).
     """
     return await ctx.request_context.lifespan_context.browser.page_snapshot(
@@ -505,6 +516,7 @@ async def page_snapshot(
         tab_id,
         depth=depth,
         boxes=boxes,
+        diff=diff,
     )
 
 

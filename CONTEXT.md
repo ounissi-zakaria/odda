@@ -31,12 +31,16 @@ Driving the browser to trigger behavior — clicking, filling, hovering, uploadi
 _Avoid_: browser action, actuation, page automation, interaction layer
 
 **Snapshot**:
-A text serialization of the page's accessibility tree returned by the `page_snapshot` tool (Playwright's `page.aria_snapshot(mode="ai")`). Lists page elements with their roles, names, and a per-element **Ref** in `[ref=eN]` tags. Reaches into iframes transparently (iframe elements get refs of the form `f<frameSeq>e<elemNum>`). Always the whole page — never a subtree; capping render depth or asking for element boxes yields still just a Snapshot. A depth-capped Snapshot announces its cap: lines at the cut carry the hidden subtree depth and the result notes the tree's real depth, so a partial tree is never mistaken for the whole page. The agent reads the snapshot to find elements, or uses **Find** to search it without pulling the whole tree; the Snapshot itself is never filtered.
+A text serialization of the page's accessibility tree returned by the `page_snapshot` tool (Playwright's `page.aria_snapshot(mode="ai")`). Lists page elements with their roles, names, and their per-element **Ref** in `[ref=eN]` tags. Reaches into iframes transparently (iframe elements get refs of the form `f<frameSeq>e<elemNum>`). Always the whole page — never a subtree; capping render depth or asking for element boxes yields still just a Snapshot. A depth-capped Snapshot announces its cap: lines at the cut carry the hidden subtree depth and the result notes the tree's real depth, so a partial tree is never mistaken for the whole page. The agent reads the snapshot to find elements, uses **Find** to search it without pulling the whole tree, or **Diff** to re-read only what changed; the tree behind all three is never filtered.
 _Avoid_: aria snapshot, accessibility tree, page snapshot, DOM dump
 
 **Find**:
 A search over a freshly taken Snapshot: the agent supplies a regex, odda returns the matching regions with surrounding context and their Refs — not the whole tree. The cheap way to locate a target, and its Ref, on a large page. Opt-in narrowing of what the agent reads; the Snapshot itself stays unfiltered.
 _Avoid_: snapshot grep, search, filter
+
+**Diff**:
+A re-read of a Snapshot that returns only what changed since the tab's previous same-depth Snapshot: `-` lines from the previous render, `+` lines from the fresh one (their refs are the fresh, actionable ones), each hunk headed by its ancestor path. Unchanged content is never re-sent; nothing changed returns a one-line sentinel rather than an empty result. Every `page_snapshot` becomes the new baseline for its depth; navigation clears a tab's baselines, and **Find** never touches them. A Diff with no baseline (first call, or first after navigation) returns the whole tree, announced as such.
+_Avoid_: delta, incremental snapshot, change report
 
 **Ref**:
 A short-lived name (`eN`, or `f<frameSeq>eN` inside an iframe) for one element in a snapshot. The agent passes `eN` as the `ref` parameter to `page_click`, `page_fill`, `page_hover`, and `page_upload` to identify the target; odda resolves it to the element via Playwright's `aria-ref` selector engine. A ref is valid as long as its element remains in the DOM; if the element is removed (SPA content swap, navigation), the action errors cleanly. Re-snapshot to discover refs for new elements; existing refs continue to work without re-snapshotting.

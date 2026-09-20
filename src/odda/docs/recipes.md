@@ -89,6 +89,18 @@ To cap how deep the tree renders (boundary nodes render without children), pass 
 page_snapshot(browser_id=B, tab_id=T, depth=2)
 ```
 
+After an action, re-read only what changed instead of the whole tree:
+
+```
+page_snapshot(browser_id=B, tab_id=T, diff=True)
+# returns only the changed lines: "-" from the previous snapshot,
+# "+" from the current one (fresh [ref=eN] tags, directly actionable),
+# each hunk headed by its ancestor path; "(no changes since previous
+# snapshot)" when nothing moved
+```
+
+Every `page_snapshot` stores the baseline for its depth, so consecutive diffs chain; navigating clears them (the next diff returns the full tree, announced by a note). Geometry and refs never read as change — scrolling is not a diff.
+
 Refs are valid until the element leaves the DOM (navigation, SPA swap). Re-snapshot (or re-find) after any content change; existing refs keep working without re-snapshotting.
 
 ### 3. Fill form fields by ref

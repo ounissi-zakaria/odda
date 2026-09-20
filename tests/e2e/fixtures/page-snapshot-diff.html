@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head><title>Snapshot diff</title><style>body { min-height: 2500px; }</style></head>
+<body>
+<main>
+  <h1>Diff target</h1>
+  <ul id="items">
+    <li>alpha item</li>
+    <li>beta item</li>
+  </ul>
+  <button id="add" onclick="const li=document.createElement('li'); li.innerHTML='<button id=&quot;gamma&quot; onclick=&quot;document.getElementById(\'status\').textContent=\'gamma clicked\'&quot;>gamma action</button>'; document.getElementById('items').appendChild(li);">Add item</button>
+  <button id="remove-first" onclick="document.querySelector('#items li').remove()">Remove first item</button>
+  <button id="retitle" onclick="document.querySelector('h1').textContent='Renamed heading'">Rename heading</button>
+  <p id="status">idle</p>
+</main>
+</body>
+</html>

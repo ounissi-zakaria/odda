@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import platform
 import re
@@ -276,6 +277,96 @@ _DEPTH_NOTE = (
 
 _PROP_LINE = re.compile(r"^\s*- /")
 _BOX_TAG = re.compile(r"\s*\[box=[^\]]*\]")
+_REF_TAG = re.compile(r"\s*\[ref=[^\]]*\]")
+_DEEPER_TAG = re.compile(r"\s*\[deeper=\d+\]")
+
+# Snapshot diff sentinels (ADR-0026). The no-baseline note precedes the
+# full tree; the no-change sentinel is the whole result.
+_NO_BASELINE_NOTE = (
+    "(no previous snapshot for this depth — full tree stored as diff baseline)"
+)
+_NO_CHANGES = "(no changes since previous snapshot)"
+
+
+def _diffable_lines(text: str) -> tuple[list[str], list[str]]:
+    """Raw tree lines and their change-comparable forms, index-aligned.
+
+    Blanks and the ADR-0025 cap note are dropped from both lists — the
+    note is best-effort annotation, and a diff that reports the note
+    instead of the tree is noise. Each remaining line's ``[ref=…]``,
+    ``[box=…]``, and ``[deeper=…]`` tags are stripped for comparison:
+    boxes are viewport-relative and churn on every scroll, and the cap
+    tags shift with the annotation, not the tree (the ADR-0025 forward
+    note). Refs are sticky (the aria-ref counter is monotonic per page),
+    so stripping them is a safety net, not a correctness requirement.
+    """
+    raw: list[str] = []
+    keys: list[str] = []
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("[snapshot capped"):
+            continue
+        key = _BOX_TAG.sub("", _REF_TAG.sub("", _DEEPER_TAG.sub("", line)))
+        raw.append(line)
+        keys.append(key)
+    return raw, keys
+
+
+def _ancestor_chain(lines: list[str], idx: int) -> list[str]:
+    """Root-to-node ancestor crumbs for snapshot line ``idx``.
+
+    Walks upward collecting strictly-dedenting non-blank lines —
+    YAML indentation is the tree structure. Crumbs keep their
+    ``[ref=eN]`` tags (ancestor refs are valid scoping targets),
+    minus the list marker and trailing container colon.
+    """
+    chain: list[str] = []
+    indent = len(lines[idx]) - len(lines[idx].lstrip(" "))
+    for line in reversed(lines[:idx]):
+        if not line.strip():
+            continue
+        line_indent = len(line) - len(line.lstrip(" "))
+        if line_indent < indent:
+            crumb = line.strip().removeprefix("- ")
+            chain.append(crumb.rstrip(":"))
+            indent = line_indent
+    chain.reverse()
+    return chain
+
+
+def _render_snapshot_diff(old: str, new: str) -> str | None:
+    """`-`/`+` fragment of the changed lines between two renders.
+
+    Lines are the diff unit: an LCS over the tag-stripped forms decides
+    what changed, and output lines are the raw renders verbatim behind
+    the marker (fresh refs and boxes on ``+``, the old render's on
+    ``-``). Each contiguous hunk is headed by the ancestor path in
+    page_find's ``[n] a > b > c`` convention — from the new tree when
+    the hunk adds lines, from the old tree for pure deletions, the only
+    render that still contains the removed lines' ancestors. None when
+    nothing changed.
+    """
+    old_raw, old_keys = _diffable_lines(old)
+    new_raw, new_keys = _diffable_lines(new)
+    sm = difflib.SequenceMatcher(a=old_keys, b=new_keys, autojunk=False)
+    hunks: list[list[str]] = []
+    prev_equal = True
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            prev_equal = True
+            continue
+        lines = ["-" + ln for ln in old_raw[i1:i2]] + [
+            "+" + ln for ln in new_raw[j1:j2]
+        ]
+        if prev_equal:
+            source, idx = (new_raw, j1) if j2 > j1 else (old_raw, i1)
+            header = " > ".join(_ancestor_chain(source, idx))
+            hunks.append([f"[{len(hunks) + 1}] {header}", *lines])
+        else:
+            hunks[-1].extend(lines)
+        prev_equal = False
+    if not hunks:
+        return None
+    return "\n".join(line for hunk in hunks for line in hunk)
 
 
 def _snapshot_error(e: BaseException) -> BrowserOperationError:
@@ -447,6 +538,13 @@ class BrowserInstance:
         # (cleared in _on_page_close).
         self._logpoints: dict[int, list[dict[str, Any]]] = {}
         self._logpoint_counter: int = 0
+        # Per-tab snapshot diff baselines (ADR-0026): ``{tab_id: {depth:
+        # rendered tree text}}``. Keyed by effective depth alone — boxes
+        # take part in neither the key nor the comparison (tags are
+        # stripped). Every page_snapshot (diff or not) stores its render
+        # under its depth; wiped on any frame navigation and on tab
+        # close. page_find renders without touching this.
+        self._snapshot_baselines: dict[int, dict[int | None, str]] = {}
         self._browser_cdp_session: CDPSession | None = None
         # Per-tab open-dialog registry (ADR-0022): ``{tab_id: {type,
         # message, default_value, dialog, probe_task}}``. Keyed by tab
@@ -532,7 +630,16 @@ class BrowserInstance:
         Only the records (in ``window.__oddaLogpoint``) wipe on
         navigation — the default logpoint userscript re-initializes the
         array on each ``document_start``.
+
+        Snapshot diff baselines (ADR-0026) wipe on ANY frame navigation
+        — main frame or iframe: after a main-frame load every old ref is
+        dead (a cross-navigation diff would emit the whole old tree as
+        ``-`` plus the whole new tree as ``+``, double a full snapshot),
+        and an iframe load invalidates that subtree's ``f<seq>`` refs.
+        Same-document history changes never reach this handler; a diff
+        just reports their DOM delta.
         """
+        self._snapshot_baselines.pop(tab_id, None)
         if frame.parent_frame is None:
             self._script_maps.get(tab_id, {}).clear()
 
@@ -560,6 +667,7 @@ class BrowserInstance:
         self._script_maps.pop(tab_id, None)
         self._coverage_recording.pop(tab_id, None)
         self._coverage_accumulators.pop(tab_id, None)
+        self._snapshot_baselines.pop(tab_id, None)
         # Per ADR-0004, logpoints do not survive tab close. The CDP
         # session is detached above so the breakpoints are gone; clear
         # the registry so `logpoint list` on a reopened tab is empty.
@@ -1152,6 +1260,7 @@ class BrowserInstance:
         *,
         depth: int | None = None,
         boxes: bool = False,
+        diff: bool = False,
     ) -> str:
         """Return the page's accessibility tree as agent-readable text.
 
@@ -1176,6 +1285,43 @@ class BrowserInstance:
         under the cap is returned untouched, and if the re-render fails
         or drifts (page mutated in between) the capped tree is returned
         as-is rather than annotated with stale numbers.
+
+        With ``diff=True`` the result carries only the lines that changed
+        since this tab's previous snapshot at the same depth (ADR-0026):
+        ``-`` lines from the previous render, ``+`` lines from this one
+        (their refs are the fresh, actionable ones), each contiguous
+        hunk headed by the ancestor path, unchanged content never
+        re-sent. Comparison strips ``[ref=…]``/``[box=…]``/``[deeper=k]``
+        tags — boxes are viewport-relative and churn on every scroll, so
+        geometry never reads as change. Every call (diff or not) stores
+        its render as the new baseline for its depth, so consecutive
+        diffs chain; navigation wipes a tab's baselines and the next
+        diff degrades to the full tree; nothing changed returns the
+        one-line sentinel ``(no changes since previous snapshot)``. A
+        first diff (no baseline for the depth yet) returns the full tree
+        announced by ``(no previous snapshot for this depth — full tree
+        stored as diff baseline)``.
+        """
+        text = await self._render_snapshot(tab_id, depth=depth, boxes=boxes)
+        # depth=0 is falsy in the driver (uncapped) — one baseline shape
+        # for "uncapped", keyed None, so 0/None calls share it.
+        key: int | None = depth if depth and depth >= 1 else None
+        baselines = self._snapshot_baselines.setdefault(tab_id, {})
+        baseline = baselines.get(key)
+        baselines[key] = text
+        if not diff:
+            return text
+        if baseline is None:
+            return f"{_NO_BASELINE_NOTE}\n{text}"
+        return _render_snapshot_diff(baseline, text) or _NO_CHANGES
+
+    async def _render_snapshot(
+        self, tab_id: int, *, depth: int | None = None, boxes: bool = False
+    ) -> str:
+        """Render (and depth-annotate) the tree; no baseline side effects.
+
+        The shared render path for page_snapshot and page_find — find is
+        a read, so it must never store a diff baseline (ADR-0026).
         """
         page = self._require_ready_tab(tab_id)
         text = await self._run_action(
@@ -1210,9 +1356,10 @@ class BrowserInstance:
         full ``mode="ai"`` snapshot is still taken server-side, but only
         the matched lines (each with a few lines of context, overlapping
         windows coalesced, and the match's ancestor path from the tree
-        root prepended) come back.
+        root prepended) come back. The render is baseline-neutral: find
+        never stores or consumes snapshot diff baselines (ADR-0026).
         """
-        text = await self.page_snapshot(tab_id, boxes=boxes)
+        text = await self._render_snapshot(tab_id, boxes=boxes)
         lines = text.splitlines()
         matched = [i for i, line in enumerate(lines) if pattern.search(line)]
         if not matched:
@@ -1231,32 +1378,10 @@ class BrowserInstance:
         blocks = []
         for w, (lo, hi) in enumerate(windows, 1):
             first_match = next(i for i in matched if lo <= i <= hi)
-            chain = self._ancestor_chain(lines, first_match)
+            chain = _ancestor_chain(lines, first_match)
             body = "\n".join(lines[lo : hi + 1])
             blocks.append(f"[{w}] {' > '.join(chain)}\n{body}")
         return "\n\n".join(blocks)
-
-    @staticmethod
-    def _ancestor_chain(lines: list[str], idx: int) -> list[str]:
-        """Root-to-node ancestor crumbs for snapshot line ``idx``.
-
-        Walks upward collecting strictly-dedenting non-blank lines —
-        YAML indentation is the tree structure. Crumbs keep their
-        ``[ref=eN]`` tags (ancestor refs are valid scoping targets),
-        minus the list marker and trailing container colon.
-        """
-        chain: list[str] = []
-        indent = len(lines[idx]) - len(lines[idx].lstrip(" "))
-        for line in reversed(lines[:idx]):
-            if not line.strip():
-                continue
-            line_indent = len(line) - len(line.lstrip(" "))
-            if line_indent < indent:
-                crumb = line.strip().removeprefix("- ")
-                chain.append(crumb.rstrip(":"))
-                indent = line_indent
-        chain.reverse()
-        return chain
 
     def _ref_convert(
         self, ref: str, verb: str, timeout_ms: float
@@ -1956,10 +2081,11 @@ class BrowserManager:
         *,
         depth: int | None = None,
         boxes: bool = False,
+        diff: bool = False,
     ) -> str:
         """Return the page's accessibility tree as agent-readable text."""
         inst = self._require_instance(browser_id)
-        return await inst.page_snapshot(tab_id, depth=depth, boxes=boxes)
+        return await inst.page_snapshot(tab_id, depth=depth, boxes=boxes, diff=diff)
 
     async def page_find(
         self,
