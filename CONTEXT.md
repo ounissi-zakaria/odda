@@ -31,7 +31,7 @@ Driving the browser to trigger behavior — clicking, filling, hovering, uploadi
 _Avoid_: browser action, actuation, page automation, interaction layer
 
 **Snapshot**:
-A text serialization of the page's accessibility tree returned by the `page_snapshot` tool (Playwright's `page.aria_snapshot(mode="ai")`). Lists page elements with their roles, names, and a per-element **Ref** in `[ref=eN]` tags. Reaches into iframes transparently (iframe elements get refs of the form `f<frameSeq>e<elemNum>`). Always the whole page — never a subtree; capping render depth or asking for element boxes yields still just a Snapshot. The agent reads the snapshot to find elements, or uses **Find** to search it without pulling the whole tree; the Snapshot itself is never filtered.
+A text serialization of the page's accessibility tree returned by the `page_snapshot` tool (Playwright's `page.aria_snapshot(mode="ai")`). Lists page elements with their roles, names, and a per-element **Ref** in `[ref=eN]` tags. Reaches into iframes transparently (iframe elements get refs of the form `f<frameSeq>e<elemNum>`). Always the whole page — never a subtree; capping render depth or asking for element boxes yields still just a Snapshot. A depth-capped Snapshot announces its cap: lines at the cut carry the hidden subtree depth and the result notes the tree's real depth, so a partial tree is never mistaken for the whole page. The agent reads the snapshot to find elements, or uses **Find** to search it without pulling the whole tree; the Snapshot itself is never filtered.
 _Avoid_: aria snapshot, accessibility tree, page snapshot, DOM dump
 
 **Find**:

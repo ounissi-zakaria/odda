@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head><title>Snapshot Depth Test</title></head>
+<body>
+  <main>
+    <h1>Docs</h1>
+    <nav><a href="#home">Home</a></nav>
+    <section>
+      <h2>Topics</h2>
+      <ul>
+        <li><button id="alpha">Alpha</button></li>
+        <li><button id="beta">Beta</button></li>
+      </ul>
+    </section>
+  </main>
+  <div id="alpha-result">not clicked</div>
+  <script>
+    document.getElementById('alpha').addEventListener('click', () => {
+      document.getElementById('alpha-result').textContent = 'clicked';
+    });
+  </script>
+</body>
+</html>

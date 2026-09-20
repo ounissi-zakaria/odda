@@ -266,6 +266,128 @@ def _is_dialog_already_closed_error(exc: BaseException) -> bool:
     )
 
 
+# --- snapshot depth capping ----------------------------------------
+
+_DEPTH_NOTE = (
+    "[snapshot capped at depth {depth} — tree is {real} levels deep, "
+    "{hidden} lines hidden; raise depth to see everything, "
+    "or page_find to search without the full tree]"
+)
+
+_PROP_LINE = re.compile(r"^\s*- /")
+_BOX_TAG = re.compile(r"\s*\[box=[^\]]*\]")
+
+
+def _snapshot_error(e: BaseException) -> BrowserOperationError:
+    """Uniform error mapping for both snapshot renders."""
+    return BrowserOperationError(f"Snapshot error: {e!s}")
+
+
+def _raw_indent(line: str) -> int:
+    """Leading-whitespace width of a render line (2 per depth level)."""
+    stripped = line.lstrip()
+    return len(line) - len(stripped)
+
+
+def _content_indent(line: str) -> int | None:
+    """Indent of a node/text line, or None for prop lines.
+
+    The renderer writes props at ``indent(depth + 1)`` with no depth
+    check, so at-cap nodes carry prop lines one level past the cap —
+    they must not count toward "the tree reaches the cap".
+    """
+    if _PROP_LINE.match(line):
+        return None
+    if not line.lstrip().startswith("- "):
+        return None
+    return _raw_indent(line)
+
+
+def _max_content_depth(lines: list[str]) -> int:
+    """Deepest node/text line in a rendered tree, in depth levels."""
+    deepest = 0
+    for line in lines:
+        ind = _content_indent(line)
+        if ind is not None:
+            deepest = max(deepest, ind // 2)
+    return deepest
+
+
+def _align_lines(
+    capped_lines: list[str], full_lines: list[str]
+) -> dict[int, int] | None:
+    """Map each capped line to its uncapped counterpart's index.
+
+    Both renders walk the same page, so lines appear in the same order.
+    Comparison ignores box tags (the probe renders without geometry, and
+    rect values may jitter between renders) and the trailing colon a
+    node gains when its children render. None = drift: a capped line has
+    no counterpart, so the page changed between renders.
+    """
+
+    def key(line: str) -> str:
+        return _BOX_TAG.sub("", line).removesuffix(":")
+
+    match: dict[int, int] = {}
+    j = 0
+    for i, line in enumerate(capped_lines):
+        while j < len(full_lines) and key(full_lines[j]) != key(line):
+            j += 1
+        if j >= len(full_lines):
+            return None
+        match[i] = j
+        j += 1
+    return match
+
+
+def _hidden_levels(full_lines: list[str], full_idx: int, boundary_indent: int) -> int:
+    """Levels hidden below the cap under the at-cap node at ``full_idx``."""
+    deeper = 0
+    for line in full_lines[full_idx + 1 :]:
+        if not line.lstrip().startswith("- ") or _raw_indent(line) <= boundary_indent:
+            break  # subtree ended (next sibling / ancestor line)
+        ind = _content_indent(line)
+        if ind is not None and ind > boundary_indent:
+            deeper = max(deeper, (ind - boundary_indent) // 2)
+    return deeper
+
+
+def _annotate_capped_snapshot(capped: str, full: str, *, depth: int) -> str:
+    """Tag boundary lines and append the cap note to a depth-capped tree.
+
+    ``full`` is the uncapped render of the same tree. A boundary line is
+    a depth-``depth`` capped line whose uncapped counterpart has hidden
+    content (the renderer prints cut nodes childless, identical to
+    genuine leaves). Returns ``capped`` untouched when nothing is hidden
+    (false alarm) or the renders drifted (page mutated in between) —
+    capping stays silent rather than lying or erroring.
+    """
+    capped_lines = capped.splitlines()
+    full_lines = full.splitlines()
+    match = _align_lines(capped_lines, full_lines)
+    if match is None:
+        return capped
+    boundary_indent = depth * 2  # boundary lines live exactly here
+    real = max(depth, _max_content_depth(full_lines))
+    boundary: dict[int, int] = {}
+    for i, line in enumerate(capped_lines):
+        if _content_indent(line) == boundary_indent:
+            deeper = _hidden_levels(full_lines, match[i], boundary_indent)
+            if deeper:
+                boundary[i] = deeper
+    if not boundary:
+        return capped
+    tagged = list(capped_lines)
+    for i, deeper in boundary.items():
+        line = tagged[i]
+        colon = line.endswith(":")
+        body = line[:-1] if colon else line
+        tagged[i] = f"{body} [deeper={deeper}]" + (":" if colon else "")
+    hidden = len(full_lines) - len(capped_lines)
+    note = _DEPTH_NOTE.format(depth=depth, real=real, hidden=hidden)
+    return "\n".join(tagged) + "\n\n" + note
+
+
 def _discard_task_result(task: asyncio.Task[Any] | None) -> None:
     """Discard a parked task's eventual result/exception.
 
@@ -1045,15 +1167,39 @@ class BrowserInstance:
         and stamps everything below the cap); ``boxes`` adds
         ``[box=x,y,width,height]`` per line (source for coordinate
         clicks).
+
+        When ``depth`` is set and the tree actually reaches the cap, the
+        result says so: each boundary node line is tagged with its hidden
+        subtree depth (``[deeper=k]``) and a trailing note gives the
+        tree's real depth and hidden line count. The facts come from one
+        uncapped re-render whose text is discarded; a tree that fits
+        under the cap is returned untouched, and if the re-render fails
+        or drifts (page mutated in between) the capped tree is returned
+        as-is rather than annotated with stale numbers.
         """
         page = self._require_ready_tab(tab_id)
-        return await self._run_action(
+        text = await self._run_action(
             tab_id,
             "snapshot",
             # boxes or None: False must serialize as absent, not disabled.
             lambda: page.aria_snapshot(mode="ai", depth=depth, boxes=boxes or None),
-            lambda e: BrowserOperationError(f"Snapshot error: {e!s}"),
+            _snapshot_error,
         )
+        if not depth or depth < 1:
+            # No cap in force (depth=0 is falsy in the driver — uncapped).
+            return text
+        if _max_content_depth(text.splitlines()) < depth:
+            return text  # every rendered line sits above the cap: tree fits
+        try:
+            full = await self._run_action(
+                tab_id,
+                "snapshot",
+                lambda: page.aria_snapshot(mode="ai", boxes=None),
+                _snapshot_error,
+            )
+        except Exception:
+            return text  # degrade to the silent cap, never fail the snapshot
+        return _annotate_capped_snapshot(text, full, depth=depth)
 
     async def page_find(
         self, tab_id: int, pattern: re.Pattern[str], *, boxes: bool = False

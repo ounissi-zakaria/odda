@@ -491,6 +491,11 @@ async def page_snapshot(
     earlier refs; re-snapshot after a navigation. Prefer this over
     screenshot for finding elements; use screenshot for visual layout.
     depth: cap tree depth; boundary nodes render without children.
+    When the tree actually reaches the cap, each boundary line is
+    tagged with its hidden subtree depth ([deeper=k]) and the result
+    ends with a note stating the tree's real depth and how many lines
+    are hidden (raise depth, or page_find, to see them); a tree that
+    fits under the cap is returned without any such annotation.
     boxes: include [box=x,y,width,height] per line — geometry source
     for page_click/page_hover coordinates.
     On a large page, prefer page_find (search without the full tree).
