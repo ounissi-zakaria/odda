@@ -23,6 +23,7 @@ contract is the one pinned in ticket #03 (``.scratch/odda-mcp/issues/
 
 from __future__ import annotations
 
+import base64
 import functools
 import json
 import re
@@ -42,7 +43,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context  # noqa: TC002
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resources import TextResource
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
 from odda.browser import BrowserManager, BrowserOperationError
@@ -457,15 +458,33 @@ async def screenshot(
     tab_id: int,
     output: str | None = None,
     *,
+    return_image: bool = True,
     ctx: Context[OddaState],
-) -> str:
+) -> str | CallToolResult:
     """Capture a JPEG of the target tab's viewport.
 
     output: optional path to write the JPEG to (a temp file when
-    omitted). Returns the written path.
+    omitted). The written path is always the first text block.
+    return_image: inline the JPEG as an image content block after the
+    path text (default) — a vision-capable harness sees the
+    pixels without re-reading the file; a text-only harness collapses
+    the image block to a placeholder while the path survives for
+    on-demand reads. false returns the path alone.
     """
-    return await ctx.request_context.lifespan_context.browser.screenshot(
+    path = await ctx.request_context.lifespan_context.browser.screenshot(
         browser_id, tab_id, output
+    )
+    if not return_image:
+        return path
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=path),
+            ImageContent(
+                type="image",
+                data=base64.b64encode(Path(path).read_bytes()).decode(),
+                mimeType="image/jpeg",
+            ),
+        ]
     )
 
 

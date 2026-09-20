@@ -9,6 +9,7 @@ pins. Everything else asserts on the structured tool results.
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -110,6 +111,35 @@ async def test_screenshot_default_and_output_path(odda_session, tmp_path) -> Non
         )
         assert str(shot) == str(target)
         assert target.is_file()
+
+
+async def test_screenshot_inline_pixels_default_and_opt_out(odda_session) -> None:
+    """By default screenshot returns the path as the first text block
+    followed by an inline JPEG image block whose bytes are the written
+    file; return_image=False restores the bare path-only result."""
+    async with odda_session() as h, fixture_site(["index.html"]) as fx:
+        bid, tid = await h.open_browser(f"{fx.base}/")
+
+        r = await h.client.call_tool("screenshot", {"browser_id": bid, "tab_id": tid})
+        assert not r.is_error
+        assert [b.type for b in r.content] == ["text", "image"]
+        path = r.content[0].text
+        assert path.endswith(".jpeg")
+        assert Path(path).is_file()
+        img = r.content[1]
+        assert img.mime_type == "image/jpeg"
+        # The inline block is the persisted file, verbatim — no re-encode.
+        assert base64.b64decode(img.data) == Path(path).read_bytes()
+
+        r = await h.client.call_tool(
+            "screenshot",
+            {"browser_id": bid, "tab_id": tid, "return_image": False},
+        )
+        assert not r.is_error
+        assert [b.type for b in r.content] == ["text"]
+        assert r.content[0].text.endswith(".jpeg")
+
+        await h.call("browser_close", {"browser_id": bid})
 
 
 async def test_event_listeners_lists_window_and_document_types(odda_session) -> None:

@@ -42,6 +42,9 @@ snapshot in the primary harness).
   `wrap_dump`, `logpoint_list`, `logpoint_dump`, `userscript_list`,
   `proxy_script_list`, `request_send`) advertise no `outputSchema` — the
   lost schemas only ever described the `{"result": ...}` wrap.
+- Amended by ADR 0027: `screenshot` additionally inlines the JPEG as an
+  image block by default (`return_image` opt-out); its text channel is
+  still the path.
 - A programmatic (non-LLM) MCP client loses the structured channel on
   those 13 tools; dict tools keep it.
 - The e2e harness reads these tools' text channel (`Harness.call_json`,

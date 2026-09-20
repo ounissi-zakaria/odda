@@ -50,6 +50,10 @@ _Avoid_: element reference, aria-ref, handle, snapshot ref, locator
 The alternative to Ref for `page_click` and `page_hover`: the agent passes viewport coordinates (`x`/`y`, CSS pixels from the viewport's top-left) instead of a ref, and odda dispatches a raw trusted mouse event at that point — no element resolution, no actionability checks, no timeout. The event lands on whatever renders there (iframes included); clicking empty space succeeds as a no-op. Coordinates come from a Snapshot's element boxes, a screenshot, or a `getBoundingClientRect` read. Use it when the a11y tree can't name the target: canvas, custom hit-testing, elements behind overlays, deliberate off-center clicks.
 _Avoid_: pixel targeting, mouse targeting, coord click, position click
 
+**Screenshot**:
+A JPEG of a tab's viewport returned by the `screenshot` tool — pixels for reading visual layout, the counterpart of a **Snapshot** (which names actionable elements). The written path is always the result's text handle; the pixels are additionally returned inline by default, with `return_image=False` collapsing the result to the path alone.
+_Avoid_: picture, screen capture, page image, snapshot (reserved for the accessibility-tree Snapshot)
+
 ## Dynamic analysis
 
 **Dynamic analysis**:

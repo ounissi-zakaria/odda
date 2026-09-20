@@ -19,7 +19,9 @@ str/list/union tools pass `structured_output=False`, keep their natural
 annotations, and carry no structured channel — the SDK's `{"result": ...}` wrap
 would be re-appended by omp's client and double the payload. Str tools return raw
 text; list/union tools wrap in `mcp.py:_json_result` (one JSON document — the
-SDK's per-item list rendering loses array-ness). See ADR 0023. Anticipated errors
+SDK's per-item list rendering loses array-ness). `screenshot` is the one
+exception: its default result is a native `CallToolResult` — the path text
+plus the inline JPEG image block (ADR 0027). See ADR 0023. Anticipated errors
 (`BrowserOperationError`, `ToolParamError`, `ValueError`) convert to `ToolError`
 with the message verbatim via `@odda_tool`; everything else stays an SDK crash.
 

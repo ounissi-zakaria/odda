@@ -37,7 +37,8 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
         assert title == "Listener Test"
 
         # screenshot writes a JPEG and returns the path (text-first →
-        # the raw path arrives as the single text block).
+        # the raw path arrives as the first text block; the default
+        # result also carries an inline image block — ADR 0027).
         shot = await h.call("screenshot", {"browser_id": bid, "tab_id": tid})
         assert str(shot).endswith(".jpeg")
 
