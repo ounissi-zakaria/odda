@@ -471,11 +471,12 @@ async def screenshot(
     pixels without re-reading the file; a text-only harness collapses
     the image block to a placeholder while the path survives for
     on-demand reads. false returns the path alone.
-    annotate: draw every Ref's bounding box + [ref=eN] label
-    onto the image — the visual counterpart of page_snapshot's
-    boxes=true; pairs with coordinate clicks (canvas, overlays,
-    elements the a11y tree can't name). Drawn onto the captured
-    pixels client-side; nothing is injected into the page.
+    annotate: draw every Ref's bounding box, [ref=eN] label, and
+    box-origin coordinates onto the image — the visual counterpart
+    of page_snapshot's boxes=true; pairs with coordinate clicks
+    (canvas, overlays, elements the a11y tree can't name). Drawn
+    onto the captured pixels client-side; nothing is injected into
+    the page.
     """
     path = await ctx.request_context.lifespan_context.browser.screenshot(
         browser_id, tab_id, output, annotate=annotate

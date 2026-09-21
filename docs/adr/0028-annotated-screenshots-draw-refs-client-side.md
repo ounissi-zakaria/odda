@@ -39,7 +39,11 @@ The decisions:
   plus the inline image when `return_image`), and a zero-ref annotate is
   visually self-evident to the model reading the pixels.
 - **Chips use the snapshot syntax** — `[ref=e3]`, `[ref=f2e5]` — so the label
-  on the pixels is exactly the value the agent passes to `page_click`.
+  on the pixels is exactly the value the agent passes to `page_click`. The
+  box origin joins it in named form (`x=340,y=182`): named like the tools'
+  `x`/`y` parameters so the chip is copy-pasteable as a call and
+  transposition can't bite, and — read as text rather than perceived as
+  position — invariant to any harness-side image downscaling.
 
 ## Considered options
 

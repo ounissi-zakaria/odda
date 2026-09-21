@@ -61,7 +61,9 @@ def _draw_annotations(
     """Draw Ref boxes onto a captured image, save as JPEG.
 
     Every ``[ref=eN] [box=…]`` pair in ``snapshot_text`` is drawn onto
-    ``img`` and the result is saved as JPEG at ``target``. Pure
+    ``img`` and the result is saved as JPEG at ``target``. The chip
+    carries the ref plus the box origin (``x=…,y=…`` — CSS px, the
+    values ``page_click``/``page_hover`` take). Pure
     client-side compositing — the page is never touched (ADR-0028).
     Boxes are viewport CSS px; the screenshot rasterizes at the device
     scale factor, so coordinates, stroke, and font all scale by ``dsf``.
@@ -86,7 +88,7 @@ def _draw_annotations(
         draw.rectangle(box, outline=_ANNOTATION_COLOR, width=stroke_w)
         # Label chip at the box's top-left, clamped into the image so
         # edge elements keep readable labels.
-        label = f"[ref={ref}]"
+        label = f"[ref={ref}] x={x},y={y}"
         tb = draw.textbbox((0, 0), label, font=font)
         pad = max(1, round(2 * dsf))
         chip_w = tb[2] - tb[0] + 2 * pad
@@ -1296,11 +1298,12 @@ class BrowserInstance:
             output_path: Optional path to write the JPEG to. When None,
                 a temp file path under the system temp dir is generated
                 (legacy behavior). When given, the directory must exist.
-            annotate: Draw every Ref's bounding box + its
-                ``[ref=eN]`` label onto the image — the visual
-                counterpart of ``page_snapshot(boxes=True)``. Pure
-                client-side compositing over the captured pixels; the
-                page is never touched (ADR-0028).
+            annotate: Draw every Ref's bounding box, its
+                ``[ref=eN]`` label and origin coordinates onto the
+                image — the visual counterpart of
+                ``page_snapshot(boxes=True)``. Pure client-side
+                compositing over the captured pixels; the page is
+                never touched (ADR-0028).
         """
         page = self._require_ready_tab(tab_id)
         if output_path is not None:
