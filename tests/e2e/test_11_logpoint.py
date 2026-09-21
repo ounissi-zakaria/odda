@@ -183,8 +183,10 @@ async def test_logpoint_warnings_errors_and_tab_session(odda_session) -> None:
             },
         )
         assert err == f"Tab 9999 not found in browser {bid}."
-        err = await h.call_error("logpoint_list", {"browser_id": 9999, "tab_id": tid})
-        assert err == "Browser 9999 not found."
+        err = await h.call_error(
+            "logpoint_list", {"browser_id": "zzzzz", "tab_id": tid}
+        )
+        assert err == "Browser zzzzz not found."
 
         # Per-tab-session (ADR-0004): closing the tab drops the
         # installations; a fresh tab starts with an empty registry.

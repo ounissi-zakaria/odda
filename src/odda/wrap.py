@@ -50,7 +50,7 @@ def _wrap_userscript_name(name: str) -> str:
     return f"{WRAP_USERSCRIPT_PREFIX}{name}"
 
 
-def _wrap_meta_path(browser_id: int, userscript_name: str) -> Path:
+def _wrap_meta_path(browser_id: str, userscript_name: str) -> Path:
     """Return the path to the wrap's ``wrap-meta.json`` sidecar."""
     return userscript.userscripts_dir(browser_id) / userscript_name / "wrap-meta.json"
 
@@ -351,7 +351,7 @@ def generate_access_wrapper(name: str, expr: str) -> str:
 # --- Install / remove / list (disk state) ----------------------------------
 
 
-def _write_meta(browser_id: int, userscript_name: str, meta: dict[str, Any]) -> None:
+def _write_meta(browser_id: str, userscript_name: str, meta: dict[str, Any]) -> None:
     """Write the wrap-meta.json sidecar for a wrap userscript."""
     _wrap_meta_path(browser_id, userscript_name).write_text(
         json.dumps(meta), encoding="utf-8"
@@ -359,7 +359,7 @@ def _write_meta(browser_id: int, userscript_name: str, meta: dict[str, Any]) -> 
 
 
 def _install(
-    browser_id: int,
+    browser_id: str,
     name: str,
     wrap_type: str,
     expr: str,
@@ -388,7 +388,7 @@ def _install(
     return result
 
 
-def install_call(browser_id: int, name: str, expr: str) -> dict[str, Any]:
+def install_call(browser_id: str, name: str, expr: str) -> dict[str, Any]:
     """Install a call wrap as a named userscript and write its meta sidecar.
 
     Args:
@@ -402,7 +402,7 @@ def install_call(browser_id: int, name: str, expr: str) -> dict[str, Any]:
     return _install(browser_id, name, "call", expr, generate_call_wrapper)
 
 
-def install_access(browser_id: int, name: str, expr: str) -> dict[str, Any]:
+def install_access(browser_id: str, name: str, expr: str) -> dict[str, Any]:
     """Install an access wrap as a named userscript and write its meta sidecar.
 
     Args:
@@ -416,7 +416,7 @@ def install_access(browser_id: int, name: str, expr: str) -> dict[str, Any]:
     return _install(browser_id, name, "access", expr, generate_access_wrapper)
 
 
-def remove(browser_id: int, name: str) -> dict[str, Any]:
+def remove(browser_id: str, name: str) -> dict[str, Any]:
     """Remove a wrap's userscript (and its meta sidecar).
 
     Args:
@@ -432,7 +432,7 @@ def remove(browser_id: int, name: str) -> dict[str, Any]:
     return result
 
 
-def list_wraps(browser_id: int) -> list[dict[str, Any]]:
+def list_wraps(browser_id: str) -> list[dict[str, Any]]:
     """List installed wraps for one browser by scanning for ``__odda-wrap__*`` userscripts.
 
     Args:

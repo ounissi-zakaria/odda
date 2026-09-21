@@ -31,6 +31,7 @@ One JSON object per line, in completion order:
   "host": "example.com",
   "port": 443,
   "path": "/",
+  "browser_id": "kqzfm",
   "status_code": 200,
   "total_duration_ms": 12.3,
   "body_file": "flows/00042/response_body.json",
@@ -40,6 +41,7 @@ One JSON object per line, in completion order:
 
 - `id` — zero-padded flow id matching the directory name; lets you re-sort by capture order with `sort`.
 - `scheme` / `port` — request scheme (`http`/`https`) and port. Populated for new captures and `request_send` flows; absent on records written by older odda versions (treat as `https`/`443`).
+- `browser_id` — the token of the browser the flow came from (each browser's proxy credentials carry it). `null` for non-browser traffic (hand-routed curl through `proxy_url`, `request_send`), for browser traffic dialed before attribution was seeded at `browser_open`, and for all browser traffic while the session routes through an upstream proxy. Absent on records written by older odda versions.
 - `status_code` — `null` for errored flows (the `error` field holds the message instead).
 - `body_file` — path relative to `.odda`; read it as `read ".odda/$body_file"`. `null` when the body was excluded (images/video/audio/fonts) or empty. **Note:** the exclusion only applies to browser-captured flows. `request_send` always stores the response body regardless of `Content-Type` — a hand-built request exists to see its body (e.g. a path-traversal file mislabeled `image/jpeg`), so `body_file` is non-null for any non-empty `request_send` response.
 - `error` — `null` for completed flows; the error message for failed flows.

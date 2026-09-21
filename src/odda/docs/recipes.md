@@ -11,17 +11,17 @@ The workflow: Wrap confirms the API touch, Coverage finds the code path, Logpoin
 ### 1. Wrap `addEventListener` to confirm a `message` handler is registered and capture the handler reference
 
 ```
-wrap_calls_add(browser_id=1, tab_id=1, name="ael", expr="EventTarget.prototype.addEventListener")
-navigate(browser_id=1, tab_id=1, url="http://target/")   # re-navigate so the wrap runs
-wrap_dump(browser_id=1, tab_id=1)   # look for a call with args[0]=="message"; args[1] is the handler (its source is in the record)
+wrap_calls_add(browser_id="kqzfm", tab_id=1, name="ael", expr="EventTarget.prototype.addEventListener")
+navigate(browser_id="kqzfm", tab_id=1, url="http://target/")   # re-navigate so the wrap runs
+wrap_dump(browser_id="kqzfm", tab_id=1)   # look for a call with args[0]=="message"; args[1] is the handler (its source is in the record)
 ```
 
 ### 2. Coverage to find which code path the handler runs when a message arrives
 
 ```
-coverage_start(browser_id=1, tab_id=1)
-eval(browser_id=1, tab_id=1, js="window.postMessage({type: 'probe'}, '*')")
-coverage_stop(browser_id=1, tab_id=1)   # find the script URL + block ranges that ran
+coverage_start(browser_id="kqzfm", tab_id=1)
+eval(browser_id="kqzfm", tab_id=1, js="window.postMessage({type: 'probe'}, '*')")
+coverage_stop(browser_id="kqzfm", tab_id=1)   # find the script URL + block ranges that ran
 ```
 
 ### 3. Read the handler source to find the origin-check line
@@ -31,9 +31,9 @@ Read the handler source from the captured flow body (the script URL from coverag
 ### 4. Logpoint at that line to read the locals the check operates on
 
 ```
-logpoint_add(browser_id=1, tab_id=1, url=<script-url>, line=<n>, col=<n>, expr="event.origin")
-eval(browser_id=1, tab_id=1, js="window.postMessage({type: 'probe'}, 'https://evil/')")
-logpoint_dump(browser_id=1, tab_id=1)   # read the captured origin value
+logpoint_add(browser_id="kqzfm", tab_id=1, url=<script-url>, line=<n>, col=<n>, expr="event.origin")
+eval(browser_id="kqzfm", tab_id=1, js="window.postMessage({type: 'probe'}, 'https://evil/')")
+logpoint_dump(browser_id="kqzfm", tab_id=1)   # read the captured origin value
 ```
 
 ### 5. Verdict
@@ -46,11 +46,11 @@ The same recipe composes with the `page_*` tools when the behavior is triggered 
 
 1. **Snapshot** to find the target:
    ```
-   page_snapshot(browser_id=1, tab_id=1)   # find the ref for the submit button
+   page_snapshot(browser_id="kqzfm", tab_id=1)   # find the ref for the submit button
    ```
 2. **Wrap** `EventTarget.prototype.addEventListener` (as above), then **click** the button to trigger the handler:
    ```
-   page_click(browser_id=1, tab_id=1, ref="e2")   # click the submit button by ref
+   page_click(browser_id="kqzfm", tab_id=1, ref="e2")   # click the submit button by ref
    ```
 3. **Coverage** to find which code path ran as a result of the click, **Logpoint** to read locals at the interesting line — same as above.
 
@@ -160,9 +160,9 @@ The workflow: capture the target request, clone it as an editable request, fire 
 Navigate and trigger the action once (e.g. apply a coupon) so the request is captured as a flow. Find the flow in `.odda/flows/flows.jsonl` (e.g. `rg '"method":"POST".*"path":"/cart/coupon"' .odda/flows/flows.jsonl`).
 
 ```
-navigate(browser_id=1, tab_id=1, url="https://target/")
+navigate(browser_id="kqzfm", tab_id=1, url="https://target/")
 # ... trigger the action in the page (click the apply-coupon button) ...
-page_click(browser_id=1, tab_id=1, ref=<button-ref>)
+page_click(browser_id="kqzfm", tab_id=1, ref=<button-ref>)
 ```
 
 ### 2. Clone the flow as an editable request

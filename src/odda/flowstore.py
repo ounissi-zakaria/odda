@@ -104,6 +104,16 @@ DATA_DIR: Path = Path.cwd() / ".odda"
 
 _READ_ONLY = 0o444
 
+# flow.metadata key the browser-auth addon (proxy.py) stamps with the parsed
+# proxy credentials: (username, password). The username is the browser's
+# browser_id token (ADR-0031).
+PROXYAUTH_METADATA_KEY = "proxyauth"
+
+# flow.metadata key marking flows the auth addon synthesized itself (the
+# canary seeding challenge and its acknowledgment). FlowFileAddon skips
+# tagged flows entirely: no flow id, no directory, no jsonl line.
+AUTH_CHALLENGE_TAG = "odda_auth_challenge"
+
 
 def set_data_dir(path: Path | str) -> None:
     """Set the directory used for flow storage.
@@ -352,6 +362,7 @@ class FlowRecordWriter:
         content_type: str | None,
         total_duration_ms: float | None,
         keep_body: bool = False,
+        browser_id: str | None = None,
     ) -> dict[str, Any]:
         """Write response files and append the jsonl line for a completed flow.
 
@@ -371,6 +382,10 @@ class FlowRecordWriter:
                 ``request_send`` (which always passes True) where the
                 body is the payload the caller asked for; the
                 browser-capture addon path never sets this.
+            browser_id: Browser identifier token when the flow rode a
+                browser's proxy credentials (ADR-0031); ``None`` for
+                non-browser traffic and records written before this
+                field existed.
 
         Returns:
             The flows.jsonl record that was appended.
@@ -393,6 +408,7 @@ class FlowRecordWriter:
             "host": meta.host,
             "port": meta.port,
             "path": meta.path,
+            "browser_id": browser_id,
             "status_code": status_code,
             "total_duration_ms": total_duration_ms,
             "body_file": body_file,
@@ -407,6 +423,7 @@ class FlowRecordWriter:
         flow_id: str,
         meta: RequestMeta,
         error_msg: str,
+        browser_id: str | None = None,
     ) -> dict[str, Any]:
         """Write an error file and append the jsonl line for a failed flow.
 
@@ -414,6 +431,9 @@ class FlowRecordWriter:
             flow_id: Flow id.
             meta: Request metadata.
             error_msg: Error message describing the failure.
+            browser_id: Browser identifier token when the flow rode a
+                browser's proxy credentials (ADR-0031); ``None``
+                otherwise.
 
         Returns:
             The flows.jsonl record that was appended.
@@ -427,6 +447,7 @@ class FlowRecordWriter:
             "host": meta.host,
             "port": meta.port,
             "path": meta.path,
+            "browser_id": browser_id,
             "status_code": None,
             "total_duration_ms": None,
             "body_file": None,
@@ -474,7 +495,9 @@ class FlowFileAddon:
     def __init__(self) -> None:
         """Initialize the addon and bind to the shared flow record writer."""
         self._writer = get_writer()
-        self._pending_flows: dict[int, str] = {}
+        # flow.id -> (flow_id, browser_id token or None). The token comes
+        # from the auth addon's proxyauth metadata stamp (ADR-0031).
+        self._pending_flows: dict[int, tuple[str, str | None]] = {}
 
     def request(self, flow) -> None:
         """Handle request - create flow dir and write the request + meta files.
@@ -483,9 +506,17 @@ class FlowFileAddon:
         immediately, even if no response ever arrives. The flows.jsonl line
         is appended only when the flow completes (response or error).
 
+        Flows tagged ``AUTH_CHALLENGE_TAG`` are the auth addon's own canary
+        seeding exchanges (proxy.py) — plumbing, not target traffic — and
+        are dropped before anything is allocated.
+
         Args:
             flow: mitmproxy flow object.
         """
+        if flow.metadata.get(AUTH_CHALLENGE_TAG):
+            return
+        auth = flow.metadata.get(PROXYAUTH_METADATA_KEY)
+        browser_id: str | None = auth[0] if auth else None
         flow_id = self._writer.alloc_flow_id()
         self._writer.write_request(flow_id, _build_request_bytes(flow))
         self._writer.write_meta(
@@ -494,7 +525,7 @@ class FlowFileAddon:
             host=flow.request.host,
             port=flow.request.port,
         )
-        self._pending_flows[flow.id] = flow_id
+        self._pending_flows[flow.id] = (flow_id, browser_id)
 
     def response(self, flow) -> None:
         """Handle response - write response files and append the jsonl line.
@@ -502,9 +533,10 @@ class FlowFileAddon:
         Args:
             flow: mitmproxy flow object.
         """
-        flow_id = self._pending_flows.pop(flow.id, None)
-        if flow_id is None:
+        pending = self._pending_flows.pop(flow.id, None)
+        if pending is None:
             return
+        flow_id, browser_id = pending
 
         response = flow.response
         request = flow.request
@@ -532,6 +564,7 @@ class FlowFileAddon:
             body_bytes=body_bytes,
             content_type=content_type,
             total_duration_ms=total_duration_ms,
+            browser_id=browser_id,
         )
 
     def error(self, flow) -> None:
@@ -540,9 +573,10 @@ class FlowFileAddon:
         Args:
             flow: mitmproxy flow object with ``flow.error`` populated.
         """
-        flow_id = self._pending_flows.pop(flow.id, None)
-        if flow_id is None:
+        pending = self._pending_flows.pop(flow.id, None)
+        if pending is None:
             return
+        flow_id, browser_id = pending
 
         msg = flow.error.msg if flow.error else "unknown error"
         meta = RequestMeta(
@@ -552,4 +586,6 @@ class FlowFileAddon:
             port=flow.request.port,
             path=flow.request.path,
         )
-        self._writer.write_error(flow_id=flow_id, meta=meta, error_msg=msg)
+        self._writer.write_error(
+            flow_id=flow_id, meta=meta, error_msg=msg, browser_id=browser_id
+        )

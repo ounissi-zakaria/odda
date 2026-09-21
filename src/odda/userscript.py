@@ -48,22 +48,27 @@ MANIFEST_JSON = """{
 """
 
 
-def _browser_dir(browser_id: int) -> Path:
+def browsers_root() -> Path:
+    """Return the root dir holding per-browser data dirs (ADR-0030)."""
+    return flowstore.DATA_DIR / BROWSERS_DIR_NAME
+
+
+def _browser_dir(browser_id: str) -> Path:
     """Return the per-browser data dir for ``browser_id``."""
-    return flowstore.DATA_DIR / BROWSERS_DIR_NAME / str(browser_id)
+    return browsers_root() / browser_id
 
 
-def userscripts_dir(browser_id: int) -> Path:
+def userscripts_dir(browser_id: str) -> Path:
     """Return the per-browser userscripts dir for ``browser_id``."""
     return _browser_dir(browser_id) / USERSCRIPTS_DIR_NAME
 
 
-def extension_dir(browser_id: int) -> Path:
+def extension_dir(browser_id: str) -> Path:
     """Return the per-browser userscript extension dir for ``browser_id``."""
     return _browser_dir(browser_id) / USERSCRIPTS_EXTENSION_DIR_NAME
 
 
-def install(browser_id: int, name: str, source: str) -> dict[str, Any]:
+def install(browser_id: str, name: str, source: str) -> dict[str, Any]:
     """Install a userscript, overwriting any existing one, and resync the extension.
 
     Args:
@@ -80,7 +85,7 @@ def install(browser_id: int, name: str, source: str) -> dict[str, Any]:
     return {"name": name, "size": len(source)}
 
 
-def remove(browser_id: int, name: str) -> dict[str, Any]:
+def remove(browser_id: str, name: str) -> dict[str, Any]:
     """Remove a userscript and resync the extension.
 
     Args:
@@ -99,7 +104,7 @@ def remove(browser_id: int, name: str) -> dict[str, Any]:
     return {"name": name, "removed": True}
 
 
-def list_scripts(browser_id: int) -> list[dict[str, Any]]:
+def list_scripts(browser_id: str) -> list[dict[str, Any]]:
     """List all installed userscripts for one browser from disk."""
     d = userscripts_dir(browser_id)
     if not d.exists():
@@ -128,7 +133,7 @@ def _read_default_scripts() -> list[tuple[str, str]]:
     ]
 
 
-def sync_extension(browser_id: int) -> Path:
+def sync_extension(browser_id: str) -> Path:
     """Regenerate one browser's extension from installed and default userscripts.
 
     Default userscripts are inlined first so they establish globals before any

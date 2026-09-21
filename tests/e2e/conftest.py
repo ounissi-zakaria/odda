@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -290,15 +291,16 @@ class Harness:
         prefix = f"Error executing tool {name}: "
         return text.removeprefix(prefix)
 
-    async def open_browser(self, url: str | None = None) -> tuple[int, int]:
+    async def open_browser(self, url: str | None = None) -> tuple[str, int]:
         """Open a browser; optionally navigate its initial tab; return (browser_id, tab_id)."""
         r = await self.call("browser_open", {"headless": True})
         bid, tid = r["browser_id"], r["tab_id"]
+        assert re.fullmatch(r"[a-z]{5}", bid), f"browser_id not a token: {bid!r}"
         if url is not None:
             await self.call("navigate", {"browser_id": bid, "tab_id": tid, "url": url})
         return bid, tid
 
-    async def eval(self, bid: int, tid: int, js: str) -> str:
+    async def eval(self, bid: str, tid: int, js: str) -> str:
         """eval is Any-annotated → text-only; assert not-error and return the text."""
         r = await self.client.call_tool(
             "eval", {"browser_id": bid, "tab_id": tid, "js": js}
@@ -307,7 +309,7 @@ class Harness:
         return r.content[0].text
 
     async def wait_for(
-        self, bid: int, tid: int, expression: str, timeout: float = 10
+        self, bid: str, tid: int, expression: str, timeout: float = 10
     ) -> str:
         """wait_for is Any-annotated → text-only."""
         r = await self.client.call_tool(
@@ -322,13 +324,13 @@ class Harness:
         assert not r.is_error, f"wait_for errored: {[c.text for c in r.content]}"
         return r.content[0].text
 
-    async def navigate(self, bid: int, tid: int, url: str, **kwargs: object) -> dict:
+    async def navigate(self, bid: str, tid: int, url: str, **kwargs: object) -> dict:
         """navigate (default wait_until=load); extra kwargs pass through."""
         return await self.call(
             "navigate", {"browser_id": bid, "tab_id": tid, "url": url, **kwargs}
         )
 
-    async def page_snapshot(self, bid: int, tid: int) -> str:
+    async def page_snapshot(self, bid: str, tid: int) -> str:
         """page_snapshot is text-first (ADR 0023) → the tree arrives as text."""
         return await self.call("page_snapshot", {"browser_id": bid, "tab_id": tid})
 

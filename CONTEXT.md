@@ -20,6 +20,10 @@ _Avoid_: project dir, state dir, .odda dir
 
 ## Browser sessions
 
+**Browser identifier**:
+A five-letter lowercase token (`a`–`z`) that names one Browser. Unique for the Data dir's lifetime and never reused: flows and per-browser storage outlive the MCP session that created them, and a record from a past session must never collide with a future browser. Tool input is case-insensitive and normalized to lowercase; odda always emits lowercase. The scope key for per-browser state (installed Userscripts, userscript extension).
+_Avoid_: browser number, session browser id, numeric id
+
 **UA normalization**:
 Launch-time behavior of headless browsers: odda derives a headed Chrome User-Agent from the installed Chrome's real version and the driver applies it across the whole browser context, so the wire User-Agent header and page-visible `navigator.userAgent` both present a headed browser. Covers every page of a headless browser, including tabs opened later; headed launches keep Chrome's own UA.
 _Avoid_: UA spoofing, stealth mode, user-agent override

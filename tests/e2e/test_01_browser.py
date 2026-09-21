@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from pathlib import Path
 
 from tests.e2e.conftest import fixture_site
@@ -18,28 +19,29 @@ from tests.e2e.conftest import fixture_site
 
 async def test_browser_list_rows_and_closing(odda_session) -> None:
     """browser_list returns one {browser_id, tab_count} row per browser; a
-    second browser gets id 2, and closing it restores single-browser state."""
+    second browser gets a distinct token, and closing it restores single-browser state."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         bid, tid = await h.open_browser(f"{fx.base}/")
-        assert (bid, tid) == (1, 1)
+        assert tid == 1
 
         r = await h.call_json("browser_list", {})
-        assert r == [{"browser_id": 1, "tab_count": 1}]
+        assert r == [{"browser_id": bid, "tab_count": 1}]
 
         bid2, tid2 = await h.open_browser()
-        assert (bid2, tid2) == (2, 1)
+        assert tid2 == 1
+        assert bid2 != bid
         r = await h.call_json("browser_list", {})
         assert r == [
-            {"browser_id": 1, "tab_count": 1},
-            {"browser_id": 2, "tab_count": 1},
+            {"browser_id": bid, "tab_count": 1},
+            {"browser_id": bid2, "tab_count": 1},
         ]
 
-        await h.call("browser_close", {"browser_id": 2})
+        await h.call("browser_close", {"browser_id": bid2})
         assert await h.call_json("browser_list", {}) == [
-            {"browser_id": 1, "tab_count": 1}
+            {"browser_id": bid, "tab_count": 1}
         ]
 
-        await h.call("browser_close", {"browser_id": 1})
+        await h.call("browser_close", {"browser_id": bid})
         assert await h.call_json("browser_list", {}) == []
 
 

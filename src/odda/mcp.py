@@ -253,17 +253,17 @@ async def browser_open(
 ) -> dict[str, Any]:
     """Open a new Chrome browser window with one blank tab.
 
-    Returns browser_id and the initial tab_id used to target every
-    other tool. All browser traffic is captured as flows under
-    .odda/flows/ — driving the browser is traffic capture (see
-    odda://docs/flows).
+    Returns browser_id (a five-letter token, unique for the data dir's
+    lifetime) and the initial tab_id used to target every other tool.
+    All browser traffic is captured as flows under .odda/flows/ —
+    driving the browser is traffic capture (see odda://docs/flows).
     """
     return await ctx.request_context.lifespan_context.browser.open(headless=headless)
 
 
 @mcp_server.tool()
 @odda_tool
-async def browser_close(browser_id: int, *, ctx: Context[OddaState]) -> dict[str, Any]:
+async def browser_close(browser_id: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
     """Close a browser instance by id."""
     return await ctx.request_context.lifespan_context.browser.close_instance(browser_id)
 
@@ -284,7 +284,7 @@ async def browser_list(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def tabs_list(
-    browser_id: int | None = None, *, ctx: Context[OddaState]
+    browser_id: str | None = None, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """List open tabs, optionally filtered to one browser."""
     return _json_result(
@@ -295,7 +295,7 @@ async def tabs_list(
 @mcp_server.tool()
 @odda_tool
 async def tabs_open(
-    browser_id: int,
+    browser_id: str,
     url: str | None = None,
     *,
     ctx: Context[OddaState],
@@ -312,7 +312,7 @@ async def tabs_open(
 @mcp_server.tool()
 @odda_tool
 async def tabs_close(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Close a tab in a browser.
 
@@ -327,7 +327,7 @@ async def tabs_close(
 @mcp_server.tool()
 @odda_tool
 async def dialog_handle(
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     action: Literal["accept", "dismiss"],
     prompt_text: str | None = None,
@@ -357,7 +357,7 @@ async def dialog_handle(
 @mcp_server.tool()
 @odda_tool
 async def navigate(
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     url: str,
     timeout: float = 30.0,
@@ -400,7 +400,7 @@ def _read_payload_file(file: str) -> str:
 @mcp_server.tool()
 @odda_tool
 async def eval(
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     js: str | None = None,
     file: str | None = None,
@@ -432,7 +432,7 @@ async def eval(
 @mcp_server.tool()
 @odda_tool
 async def wait_for(
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     expression: str,
     timeout: float = 30.0,
@@ -454,7 +454,7 @@ async def wait_for(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def screenshot(
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     output: str | None = None,
     *,
@@ -506,7 +506,7 @@ async def screenshot(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def page_snapshot(
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     depth: int | None = None,
     *,
@@ -555,7 +555,7 @@ async def page_snapshot(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def page_find(
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     regex: str,
     *,
@@ -589,7 +589,7 @@ async def page_find(
 @mcp_server.tool()
 @odda_tool
 async def page_click(  # noqa: PLR0913 — targeting + ref/coords union is the tool's contract
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     ref: str | None = None,
     x: float | None = None,
@@ -619,7 +619,7 @@ async def page_click(  # noqa: PLR0913 — targeting + ref/coords union is the t
 @mcp_server.tool()
 @odda_tool
 async def page_fill(  # noqa: PLR0913 — value xor file is the tool's contract
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     ref: str,
     value: str | None = None,
@@ -650,7 +650,7 @@ async def page_fill(  # noqa: PLR0913 — value xor file is the tool's contract
 @mcp_server.tool()
 @odda_tool
 async def page_hover(  # noqa: PLR0913 — targeting + ref/coords union is the tool's contract
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     ref: str | None = None,
     x: float | None = None,
@@ -679,7 +679,7 @@ async def page_hover(  # noqa: PLR0913 — targeting + ref/coords union is the t
 @mcp_server.tool()
 @odda_tool
 async def page_upload(
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     ref: str,
     files: list[str],
@@ -705,7 +705,7 @@ async def page_upload(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def event_listeners(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """List JavaScript event listeners on window and document in the target tab."""
     return _json_result(
@@ -905,7 +905,7 @@ async def proxy_upstream_get(*, ctx: Context[OddaState]) -> dict[str, Any]:
 @mcp_server.tool()
 @odda_tool
 async def coverage_start(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Enable block-level coverage on the target tab.
 
@@ -920,7 +920,7 @@ async def coverage_start(
 @mcp_server.tool()
 @odda_tool
 async def coverage_snapshot(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Read per-block hit counts on the target tab without stopping.
 
@@ -935,7 +935,7 @@ async def coverage_snapshot(
 @mcp_server.tool()
 @odda_tool
 async def coverage_stop(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Take a final coverage snapshot and stop recording.
 
@@ -953,7 +953,7 @@ async def coverage_stop(
 @mcp_server.tool()
 @odda_tool
 async def wrap_calls_add(
-    browser_id: int, tab_id: int, name: str, expr: str, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, name: str, expr: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Install a call wrap on a named function.
 
@@ -970,7 +970,7 @@ async def wrap_calls_add(
 @mcp_server.tool()
 @odda_tool
 async def wrap_access_add(
-    browser_id: int, tab_id: int, name: str, expr: str, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, name: str, expr: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Install an access wrap on a property accessor.
 
@@ -986,7 +986,7 @@ async def wrap_access_add(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def wrap_list(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """List installed wraps (name, type, expr) for the browser."""
     return _json_result(
@@ -997,7 +997,7 @@ async def wrap_list(
 @mcp_server.tool()
 @odda_tool
 async def wrap_remove(
-    browser_id: int, tab_id: int, name: str, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, name: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Remove a wrap; it stops recording on future navigations.
 
@@ -1011,7 +1011,7 @@ async def wrap_remove(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def wrap_dump(
-    browser_id: int, tab_id: int, name: str | None = None, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, name: str | None = None, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """Read the per-tab wrap record array.
 
@@ -1029,7 +1029,7 @@ async def wrap_dump(
 @mcp_server.tool()
 @odda_tool
 async def wrap_clear(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Zero the per-tab wrap record array without navigating."""
     return await ctx.request_context.lifespan_context.browser.wrap_clear(
@@ -1043,7 +1043,7 @@ async def wrap_clear(
 @mcp_server.tool()
 @odda_tool
 async def logpoint_add(  # noqa: PLR0913 — targeting + url/line/col/expr is the tool's contract
-    browser_id: int,
+    browser_id: str,
     tab_id: int,
     url: str,
     line: int,
@@ -1067,7 +1067,7 @@ async def logpoint_add(  # noqa: PLR0913 — targeting + url/line/col/expr is th
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def logpoint_list(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """List planted logpoints on the target tab."""
     return _json_result(
@@ -1080,7 +1080,7 @@ async def logpoint_list(
 @mcp_server.tool()
 @odda_tool
 async def logpoint_remove(
-    browser_id: int, tab_id: int, lp_id: str, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, lp_id: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Remove a planted logpoint by its id."""
     return await ctx.request_context.lifespan_context.browser.logpoint_remove(
@@ -1091,7 +1091,7 @@ async def logpoint_remove(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def logpoint_dump(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """Read the per-tab logpoint record array.
 
@@ -1108,7 +1108,7 @@ async def logpoint_dump(
 @mcp_server.tool()
 @odda_tool
 async def logpoint_clear(
-    browser_id: int, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Zero the per-tab logpoint record array without navigating."""
     return await ctx.request_context.lifespan_context.browser.logpoint_clear(
@@ -1137,7 +1137,7 @@ def _read_install_source(file: str | None, source: str | None, what: str) -> str
 @mcp_server.tool()
 @odda_tool
 async def userscript_install(
-    browser_id: int,
+    browser_id: str,
     name: str,
     file: str | None = None,
     source: str | None = None,
@@ -1163,7 +1163,7 @@ async def userscript_install(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def userscript_list(
-    browser_id: int, *, ctx: Context[OddaState]
+    browser_id: str, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """List installed userscripts for one browser (name, size)."""
     return _json_result(
@@ -1174,7 +1174,7 @@ async def userscript_list(
 @mcp_server.tool()
 @odda_tool
 async def userscript_remove(
-    browser_id: int, name: str, *, ctx: Context[OddaState]
+    browser_id: str, name: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Remove a userscript; it stops running on new navigations."""
     return await ctx.request_context.lifespan_context.browser.remove_userscript(

@@ -325,13 +325,15 @@ async def test_page_fill_hover_upload_and_stale_ref(
         assert err == f"Tab 9999 not found in browser {bid}."
         err = await h.call_error(
             "page_fill",
-            {"browser_id": 9999, "tab_id": tid, "ref": "e1", "value": "x"},
+            {"browser_id": "zzzzz", "tab_id": tid, "ref": "e1", "value": "x"},
         )
-        assert err == "Browser 9999 not found."
+        assert err == "Browser zzzzz not found."
         err = await h.call_error("page_snapshot", {"browser_id": bid, "tab_id": 9999})
         assert err == f"Tab 9999 not found in browser {bid}."
-        err = await h.call_error("page_snapshot", {"browser_id": 9999, "tab_id": tid})
-        assert err == "Browser 9999 not found."
+        err = await h.call_error(
+            "page_snapshot", {"browser_id": "zzzzz", "tab_id": tid}
+        )
+        assert err == "Browser zzzzz not found."
 
 
 _MAGENTA_RADIUS = 4

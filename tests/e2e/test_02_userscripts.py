@@ -83,12 +83,12 @@ async def test_userscript_install_validation_errors(odda_session, tmp_path) -> N
         assert err == "source is empty"
 
         err = await h.call_error(
-            "userscript_install", {"browser_id": 9999, "name": "x", "source": "1"}
+            "userscript_install", {"browser_id": "zzzzz", "name": "x", "source": "1"}
         )
-        assert err == "Browser 9999 not found."
+        assert err == "Browser zzzzz not found."
 
         # list is a read: a missing browser yields an empty list, not an error.
-        r = await h.call_json("userscript_list", {"browser_id": 9999})
+        r = await h.call_json("userscript_list", {"browser_id": "zzzzz"})
         assert r == []
 
 

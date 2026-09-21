@@ -7,7 +7,9 @@ import difflib
 import logging
 import platform
 import re
+import secrets
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
@@ -34,6 +36,7 @@ from odda import (
     wrap as wrap_mod,
 )
 from odda.chrome_args import build_chrome_args
+from odda.proxy import AUTH_CANARY_URL, PROXY_AUTH_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -584,7 +587,7 @@ class BrowserInstance:
 
     def __init__(
         self,
-        browser_id: int,
+        browser_id: str,
         playwright: Playwright,
         context: BrowserContext,
     ) -> None:
@@ -2015,29 +2018,53 @@ class BrowserManager:
         Args:
             proxy: Proxy server instance to share across browsers.
         """
-        self._instances: dict[int, BrowserInstance] = {}
-        self._next_id: int = 1
+        self._instances: dict[str, BrowserInstance] = {}
         self.proxy = proxy
+
+    def _new_browser_id(self) -> str:
+        """Generate a fresh browser identifier token (ADR-0030).
+
+        Five lowercase letters, unique for the data dir's lifetime:
+        checked against live instances *and* against on-disk
+        ``.odda/browsers/<token>/`` dirs, which persist across sessions
+        and must never be re-attached to a new browser.
+
+        Returns:
+            A ``^[a-z]{5}$`` token no live or past browser has used.
+        """
+        browsers_root = userscript_mod.browsers_root()
+        while True:
+            token = "".join(secrets.choice(string.ascii_lowercase) for _ in range(5))
+            if token in self._instances or (browsers_root / token).exists():
+                continue
+            return token
 
     def list_instances(self) -> list[dict]:
         """List open browser instances with tab counts.
 
         Backs the ``browser_list`` tool and the session's
-        shutdown sweep. Returns ``[{browser_id, tab_count}]`` with
-        ``tab_count`` as ``len(_tabs)`` (raw — may include pages whose
-        underlying Chrome has died if no close event fired).
+        shutdown sweep. Returns ``[{browser_id, tab_count}]`` in creation
+        order (tokens sort randomly, so insertion order — which the dict
+        preserves — is the only meaningful one), with ``tab_count`` as
+        ``len(_tabs)`` (raw — may include pages whose underlying Chrome
+        has died if no close event fired).
         """
         return [
             {
                 "browser_id": bid,
                 "tab_count": len(inst._tabs),  # noqa: SLF001
             }
-            for bid, inst in sorted(self._instances.items())
+            for bid, inst in self._instances.items()
         ]
 
-    def _require_instance(self, browser_id: int) -> BrowserInstance:
-        """Return the BrowserInstance for browser_id or raise."""
-        inst = self._instances.get(browser_id)
+    def _require_instance(self, browser_id: str) -> BrowserInstance:
+        """Return the BrowserInstance for browser_id or raise.
+
+        Input is case-insensitive (ADR-0030): tokens are stored and
+        emitted lowercase, and uppercased spellings resolve to the same
+        browser.
+        """
+        inst = self._instances.get(browser_id.lower())
         if inst is None:
             raise BrowserOperationError(f"Browser {browser_id} not found.")
         return inst
@@ -2048,12 +2075,21 @@ class BrowserManager:
         Registers the initial page (the one Chrome creates at launch) and
         returns the instance with at least one tab_id assigned.
         """
-        browser_id = self._next_id
-        self._next_id += 1
+        browser_id = self._new_browser_id()
 
+        # Proxy credentials whose username is the browser's identifier
+        # token: the proxy's auth addon stamps them onto flow metadata
+        # for flows.jsonl attribution (ADR-0031). The proxy *address* and
+        # the <-loopback> bypass travel on the command line instead
+        # (build_chrome_args) — ignore_default_args=True drops
+        # Playwright's option-derived proxy flags, so only ours survive.
         proxy_config = None
         if self.proxy:
-            proxy_config = {"server": self.proxy.proxy_url}
+            proxy_config = {
+                "server": self.proxy.proxy_url,
+                "username": browser_id,
+                "password": PROXY_AUTH_PASSWORD,
+            }
 
         user_data_dir = _prepare_user_data_dir()
         chrome_executable = _find_chrome_executable()
@@ -2099,6 +2135,24 @@ class BrowserManager:
         # Load the userscript extension (best-effort).
         await instance._load_userscript_extension()  # noqa: SLF001
 
+        # Seed proxy-auth attribution (ADR-0031): drive one canary request
+        # through the browser via in-page fetch. The proxy's auth addon
+        # challenges it, Playwright's auth handler answers with this
+        # browser's credentials, and Chrome caches them profile-wide —
+        # every later connection authenticates preemptively. Both canary
+        # legs are synthesized by the addon (reserved TLD, no DNS) and
+        # tagged so the flow writer drops them. A fetch, not a goto: it
+        # must not commit a main-frame navigation — the initial tab's
+        # first navigation belongs to the agent, and patchright's ai-mode
+        # refs go frame-prefixed (f<N>eN) once a frame has navigated more
+        # than once. Silent by design: a failure here degrades flows to
+        # null attribution, never wrong attribution.
+        with suppress(Exception):
+            await asyncio.wait_for(
+                initial_page.evaluate(f"fetch('{AUTH_CANARY_URL}').catch(() => 0)"),
+                15,
+            )
+
         # The initial page may have arrived before the context.on("page")
         # handler was wired, or it may re-fire; the handler guards against
         # double-registration by identity.
@@ -2124,7 +2178,7 @@ class BrowserManager:
             "status": "launched",
         }
 
-    async def close_instance(self, browser_id: int) -> dict[str, Any]:
+    async def close_instance(self, browser_id: str) -> dict[str, Any]:
         """Close a browser instance by ID.
 
         Returns:
@@ -2132,10 +2186,10 @@ class BrowserManager:
         """
         inst = self._require_instance(browser_id)
         await inst._close()  # noqa: SLF001
-        del self._instances[browser_id]
-        return {"browser_id": browser_id, "status": "closed"}
+        del self._instances[inst.browser_id]
+        return {"browser_id": inst.browser_id, "status": "closed"}
 
-    async def list_tabs(self, browser_id: int | None = None) -> list[dict]:
+    async def list_tabs(self, browser_id: str | None = None) -> list[dict]:
         """List tabs grouped by browser.
 
         Args:
@@ -2153,7 +2207,7 @@ class BrowserManager:
                 }
             ]
         result = []
-        for bid, inst in sorted(self._instances.items()):
+        for bid, inst in self._instances.items():
             result.append(
                 {
                     "browser_id": bid,
@@ -2162,7 +2216,7 @@ class BrowserManager:
             )
         return result
 
-    async def open_tab(self, browser_id: int, url: str | None = None) -> dict[str, Any]:
+    async def open_tab(self, browser_id: str, url: str | None = None) -> dict[str, Any]:
         """Open a new tab in a specific browser.
 
         Trigger tool when ``url`` is given (ADR-0022): a page that
@@ -2177,12 +2231,12 @@ class BrowserManager:
         inst = self._require_instance(browser_id)
         result = await inst.open_tab(url)
         if isinstance(result, dict):
-            return {"browser_id": browser_id, **result}
-        return {"browser_id": browser_id, "tab_id": result, "status": "opened"}
+            return {"browser_id": inst.browser_id, **result}
+        return {"browser_id": inst.browser_id, "tab_id": result, "status": "opened"}
 
     async def page_snapshot(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         *,
         depth: int | None = None,
@@ -2195,7 +2249,7 @@ class BrowserManager:
 
     async def page_find(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         pattern: re.Pattern[str],
         *,
@@ -2205,7 +2259,7 @@ class BrowserManager:
         inst = self._require_instance(browser_id)
         return await inst.page_find(tab_id, pattern, boxes=boxes)
 
-    async def close_tab(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+    async def close_tab(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Close a tab in a specific browser.
 
         If the closed tab had an open dialog (ADR-0022), the result
@@ -2234,7 +2288,7 @@ class BrowserManager:
 
     async def navigate(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         url: str,
         *,
@@ -2255,13 +2309,13 @@ class BrowserManager:
             tab_id, url, timeout_ms=timeout_ms, wait_until=wait_until
         )
 
-    async def eval_js(self, browser_id: int, tab_id: int, js_code: str) -> Any:
+    async def eval_js(self, browser_id: str, tab_id: int, js_code: str) -> Any:
         """Execute JavaScript in the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.eval_js(tab_id, js_code)
 
     async def wait_for(
-        self, browser_id: int, tab_id: int, expression: str, *, timeout_ms: float
+        self, browser_id: str, tab_id: int, expression: str, *, timeout_ms: float
     ) -> Any:
         """Poll a JS expression until truthy or timeout in the target tab."""
         inst = self._require_instance(browser_id)
@@ -2269,7 +2323,7 @@ class BrowserManager:
 
     async def screenshot(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         output_path: str | None = None,
         *,
@@ -2280,21 +2334,21 @@ class BrowserManager:
         return await inst.screenshot(tab_id, output_path, annotate=annotate)
 
     async def page_click(
-        self, browser_id: int, tab_id: int, ref: str, *, timeout_ms: float
+        self, browser_id: str, tab_id: int, ref: str, *, timeout_ms: float
     ) -> dict[str, Any]:
         """Click the element identified by ``ref`` in the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.page_click(tab_id, ref, timeout_ms=timeout_ms)
 
     async def page_click_coords(
-        self, browser_id: int, tab_id: int, *, x: float, y: float
+        self, browser_id: str, tab_id: int, *, x: float, y: float
     ) -> dict[str, Any]:
         """Click at viewport coordinates in the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.page_click_coords(tab_id, x=x, y=y)
 
     async def page_hover_coords(
-        self, browser_id: int, tab_id: int, *, x: float, y: float
+        self, browser_id: str, tab_id: int, *, x: float, y: float
     ) -> dict[str, Any]:
         """Hover at viewport coordinates in the target tab."""
         inst = self._require_instance(browser_id)
@@ -2302,7 +2356,7 @@ class BrowserManager:
 
     async def page_fill(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         ref: str,
         value: str,
@@ -2314,7 +2368,7 @@ class BrowserManager:
         return await inst.page_fill(tab_id, ref, value, timeout_ms=timeout_ms)
 
     async def page_hover(
-        self, browser_id: int, tab_id: int, ref: str, *, timeout_ms: float
+        self, browser_id: str, tab_id: int, ref: str, *, timeout_ms: float
     ) -> dict[str, Any]:
         """Hover the element identified by ``ref`` in the target tab."""
         inst = self._require_instance(browser_id)
@@ -2322,7 +2376,7 @@ class BrowserManager:
 
     async def page_upload(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         ref: str,
         files: list[str],
@@ -2333,56 +2387,61 @@ class BrowserManager:
         inst = self._require_instance(browser_id)
         return await inst.page_upload(tab_id, ref, files, timeout_ms=timeout_ms)
 
-    async def list_event_listeners(self, browser_id: int, tab_id: int) -> list[dict]:
+    async def list_event_listeners(self, browser_id: str, tab_id: int) -> list[dict]:
         """List JS event listeners in the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.list_event_listeners(tab_id)
 
-    async def coverage_start(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+    async def coverage_start(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Enable precise block-level coverage on the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.coverage_start(tab_id)
 
-    async def coverage_snapshot(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+    async def coverage_snapshot(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Read per-block hit counts on the target tab without stopping."""
         inst = self._require_instance(browser_id)
         return await inst.coverage_snapshot(tab_id)
 
-    async def coverage_stop(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+    async def coverage_stop(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Take a final coverage snapshot and stop recording on the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.coverage_stop(tab_id)
 
     async def install_userscript(
-        self, browser_id: int, name: str, source: str
+        self, browser_id: str, name: str, source: str
     ) -> dict[str, Any]:
         """Install a userscript into the given browser's scope and reload."""
         inst = self._require_instance(browser_id)
-        result = userscript_mod.install(browser_id, name, source)
+        result = userscript_mod.install(inst.browser_id, name, source)
         result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
-    async def remove_userscript(self, browser_id: int, name: str) -> dict[str, Any]:
+    async def remove_userscript(self, browser_id: str, name: str) -> dict[str, Any]:
         """Remove a userscript from the given browser's scope and reload."""
         inst = self._require_instance(browser_id)
-        result = userscript_mod.remove(browser_id, name)
+        result = userscript_mod.remove(inst.browser_id, name)
         result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
-    def list_userscripts(self, browser_id: int) -> list[dict[str, Any]]:
+    def list_userscripts(self, browser_id: str) -> list[dict[str, Any]]:
         """List installed userscripts for one browser from disk.
 
-        Returns ``[]`` for a browser that was never opened (its
-        per-browser dir doesn't exist). Unlike install/remove, this is
-        a read and does not validate the browser is currently open.
+        Args:
+            browser_id: Browser whose scope to list; case-insensitive.
+
+        Returns:
+            A list of ``{name, size}`` dicts. Returns ``[]`` for a
+            browser that was never opened (its per-browser dir doesn't
+            exist). Unlike install/remove, this is a read and does not
+            validate the browser is currently open.
         """
-        return userscript_mod.list_scripts(browser_id)
+        return userscript_mod.list_scripts(browser_id.lower())
 
     # --- wrap ----------------------------------------------------------
 
     async def _wrap_add(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         name: str,
         expr: str,
@@ -2401,12 +2460,12 @@ class BrowserManager:
         """
         inst = self._require_instance(browser_id)
         inst._require_tab(tab_id)  # noqa: SLF001
-        result = install_fn(browser_id, name, expr)
+        result = install_fn(inst.browser_id, name, expr)
         result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
     async def wrap_calls_add(
-        self, browser_id: int, tab_id: int, name: str, expr: str
+        self, browser_id: str, tab_id: int, name: str, expr: str
     ) -> dict[str, Any]:
         """Install a call wrap on a named function and reload the extension."""
         return await self._wrap_add(
@@ -2414,14 +2473,14 @@ class BrowserManager:
         )
 
     async def wrap_access_add(
-        self, browser_id: int, tab_id: int, name: str, expr: str
+        self, browser_id: str, tab_id: int, name: str, expr: str
     ) -> dict[str, Any]:
         """Install an access wrap on a property accessor and reload the extension."""
         return await self._wrap_add(
             browser_id, tab_id, name, expr, wrap_mod.install_access
         )
 
-    async def wrap_list(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
+    async def wrap_list(self, browser_id: str, tab_id: int) -> list[dict[str, Any]]:
         """List installed wraps for the given browser.
 
         Wraps are stored on disk as named userscripts scoped to the
@@ -2434,10 +2493,10 @@ class BrowserManager:
         """
         inst = self._require_instance(browser_id)
         inst._require_tab(tab_id)  # noqa: SLF001
-        return wrap_mod.list_wraps(browser_id)
+        return wrap_mod.list_wraps(inst.browser_id)
 
     async def wrap_remove(
-        self, browser_id: int, tab_id: int, name: str
+        self, browser_id: str, tab_id: int, name: str
     ) -> dict[str, Any]:
         """Remove a wrap from the given browser's scope and reload its extension.
 
@@ -2451,20 +2510,20 @@ class BrowserManager:
         inst = self._require_instance(browser_id)
         inst._require_tab(tab_id)  # noqa: SLF001
         try:
-            result = wrap_mod.remove(browser_id, name)
+            result = wrap_mod.remove(inst.browser_id, name)
         except ValueError as exc:
             raise BrowserOperationError(str(exc)) from exc
         result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
     async def wrap_dump(
-        self, browser_id: int, tab_id: int, name: str | None = None
+        self, browser_id: str, tab_id: int, name: str | None = None
     ) -> list[dict[str, Any]]:
         """Read the per-tab wrap record array, optionally filtered to one wrap."""
         inst = self._require_instance(browser_id)
         return await inst.wrap_dump(tab_id, name)
 
-    async def wrap_clear(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+    async def wrap_clear(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Zero the per-tab wrap record array without navigating."""
         inst = self._require_instance(browser_id)
         return await inst.wrap_clear(tab_id)
@@ -2473,7 +2532,7 @@ class BrowserManager:
 
     async def logpoint_add(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         url: str,
         line: int,
@@ -2484,23 +2543,23 @@ class BrowserManager:
         inst = self._require_instance(browser_id)
         return await inst.logpoint_add(tab_id, url, line, col, expr)
 
-    async def logpoint_list(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
+    async def logpoint_list(self, browser_id: str, tab_id: int) -> list[dict[str, Any]]:
         """List planted logpoints on the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.logpoint_list(tab_id)
 
-    async def logpoint_dump(self, browser_id: int, tab_id: int) -> list[dict[str, Any]]:
+    async def logpoint_dump(self, browser_id: str, tab_id: int) -> list[dict[str, Any]]:
         """Read the per-tab logpoint record array."""
         inst = self._require_instance(browser_id)
         return await inst.logpoint_dump(tab_id)
 
-    async def logpoint_clear(self, browser_id: int, tab_id: int) -> dict[str, Any]:
+    async def logpoint_clear(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Zero the per-tab logpoint record array without navigating."""
         inst = self._require_instance(browser_id)
         return await inst.logpoint_clear(tab_id)
 
     async def logpoint_remove(
-        self, browser_id: int, tab_id: int, lp_id: str
+        self, browser_id: str, tab_id: int, lp_id: str
     ) -> dict[str, Any]:
         """Remove a logpoint's CDP breakpoint and registry entry."""
         inst = self._require_instance(browser_id)
@@ -2508,7 +2567,7 @@ class BrowserManager:
 
     async def handle_dialog(
         self,
-        browser_id: int,
+        browser_id: str,
         tab_id: int,
         action: str,
         prompt_text: str | None = None,

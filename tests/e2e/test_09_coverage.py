@@ -56,8 +56,10 @@ async def test_coverage_start_snapshot_stop(odda_session) -> None:
         # Missing tab / browser.
         err = await h.call_error("coverage_start", {"browser_id": bid, "tab_id": 9999})
         assert err == f"Tab 9999 not found in browser {bid}."
-        err = await h.call_error("coverage_start", {"browser_id": 9999, "tab_id": tid})
-        assert err == "Browser 9999 not found."
+        err = await h.call_error(
+            "coverage_start", {"browser_id": "zzzzz", "tab_id": tid}
+        )
+        assert err == "Browser zzzzz not found."
 
 
 async def test_coverage_per_tab_and_survives_navigation(odda_session) -> None:

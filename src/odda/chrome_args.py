@@ -99,10 +99,14 @@ def build_chrome_args(
     ``about:blank`` is the positional URL and **must be last** (Chrome treats
     the first non-``--`` token as the URL; anything after it is ignored).
 
-    With a proxy, ``--proxy-bypass-list=<-loopback>`` *forces* loopback
-    (127.0.0.1) traffic through the proxy — load-bearing for odda's e2e
-    fixture/dyn servers, whose flows are captured through the proxy. Dropping
-    it silently breaks loopback flow capture.
+    With a proxy, ``--proxy-server`` / ``--proxy-bypass-list`` are emitted
+    here and MUST stay: ``ignore_default_args=True`` also drops Playwright's
+    option-derived proxy flags, so these are the only ones that reach
+    Chrome. ``--proxy-bypass-list=<-loopback>`` *forces* loopback (127.0.0.1)
+    traffic through the proxy — load-bearing for odda's e2e fixture/dyn
+    servers, whose flows are captured through the proxy. The proxy
+    *credentials* travel separately, via Playwright's ``proxy=`` option
+    (they drive the CDP auth handler, not the command line — ADR-0031).
 
     Args:
         user_data_dir: Chrome ``--user-data-dir`` target (temp profile).

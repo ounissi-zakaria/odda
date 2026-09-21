@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import socket
 import time
+import weakref
 from contextlib import suppress
 from typing import Any
 
-from mitmproxy import exceptions as mitmproxy_exceptions
+from mitmproxy import exceptions as mitmproxy_exceptions, http as mitmproxy_http
 from mitmproxy.options import Options
 from mitmproxy.proxy import mode_specs
 from mitmproxy.tools.dump import DumpMaster
 
-from odda.flowstore import FlowFileAddon
+from odda.flowstore import AUTH_CHALLENGE_TAG, PROXYAUTH_METADATA_KEY, FlowFileAddon
 from odda.proxyscript import ProxyScriptManager
+
+# Reserved TLD (RFC 2606) — unresolvable, collision-proof. browser_open
+# drives each fresh browser through one canary request; the addon below
+# challenges it so Playwright's auth handler seeds Chrome's profile-wide
+# proxy auth cache (ADR-0031). Both canary legs are synthesized locally:
+# no DNS, no upstream.
+AUTH_CANARY_HOST = "odda-seed.invalid"
+AUTH_CANARY_URL = f"http://{AUTH_CANARY_HOST}/canary"
+
+# The password half of the browser proxy credentials. Not a secret: the
+# listener is loopback-only and the addon accepts any credentials — the
+# username carries the identity (the browser_id token).
+PROXY_AUTH_PASSWORD = "odda"  # noqa: S105
 
 # Returned by set_upstream/clear_upstream: a flip rebinds the listener
 # and then closes live client connections, so the new vantage applies
@@ -33,6 +48,109 @@ _FLIP_NOTE_DEGRADED = (
 # _await_listener_rebound's deadline; generous — the rebind is a local
 # stop-then-start, normally sub-100ms.
 _REBIND_TIMEOUT = 5.0
+
+
+def _parse_basic_proxy_auth(header_value: str) -> tuple[str, str] | None:
+    """Decode a ``Proxy-Authorization: Basic`` header value.
+
+    Args:
+        header_value: Raw header value, or ``""`` when absent.
+
+    Returns:
+        ``(username, password)``, or ``None`` when the value is absent,
+        not Basic, or not valid base64.
+    """
+    try:
+        scheme, _, blob = header_value.partition(" ")
+        if scheme.lower() != "basic":
+            return None
+        user, _, pw = base64.b64decode(blob.strip()).decode("utf-8").partition(":")
+    except ValueError:
+        # binascii.Error (bad base64) and UnicodeDecodeError are both
+        # ValueError subclasses.
+        return None
+    return (user, pw) if user else None
+
+
+class BrowserAuthAddon:
+    """Attribute flows to browsers via their proxy credentials (ADR-0031).
+
+    Accepts everything: when a request carries ``Proxy-Authorization``,
+    the parsed identity is stamped onto ``flow.metadata["proxyauth"]``
+    for FlowFileAddon to write as ``browser_id``; the header itself is
+    always popped (it belongs to this proxy, never to the target or the
+    capture). No client is ever required to authenticate.
+
+    The single exception is the canary host: ``browser_open`` drives
+    each fresh browser through one unauthenticated canary request. The
+    addon challenges it (Playwright's auth handler answers with the
+    browser's credentials) and acknowledges the credentialed retry.
+    Both legs are tagged so FlowFileAddon drops them; the exchange
+    seeds Chrome's profile-wide auth cache, and every later browser
+    connection authenticates preemptively.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the per-connection credential cache."""
+        # HTTPS attribution: the credentials ride the CONNECT request, and
+        # the tunneled requests inside it carry no header of their own.
+        # Cache them per client connection (weak — dies with the
+        # connection) so every inner flow inherits the identity, the same
+        # shape mitmproxy's own proxyauth addon uses.
+        self._authenticated: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+    def http_connect(self, flow) -> None:
+        """Stamp and cache credentials from the CONNECT request."""
+        from_mitmproxy_mode = isinstance(
+            flow.client_conn.proxy_mode, mode_specs.UpstreamMode
+        )
+        creds = _parse_basic_proxy_auth(
+            flow.request.headers.get("Proxy-Authorization", "")
+        )
+        flow.request.headers.pop("Proxy-Authorization", None)
+        if from_mitmproxy_mode:
+            return
+        if creds is not None:
+            flow.metadata[PROXYAUTH_METADATA_KEY] = creds
+            self._authenticated[flow.client_conn] = creds
+
+    def requestheaders(self, flow) -> None:
+        """Stamp credentials and serve the canary exchange.
+
+        In upstream mode the ``Proxy-Authorization`` header belongs to the
+        upstream hop (mitmproxy's UpstreamAuth addon sets it after us in
+        the builtin chain) — attribution stays hands-off there.
+        """
+        if isinstance(flow.client_conn.proxy_mode, mode_specs.UpstreamMode):
+            return
+        creds = _parse_basic_proxy_auth(
+            flow.request.headers.get("Proxy-Authorization", "")
+        )
+        if creds is not None:
+            flow.request.headers.pop("Proxy-Authorization", None)
+        else:
+            # Tunneled HTTPS request: no header of its own; inherit the
+            # identity authenticated on this connection's CONNECT.
+            creds = self._authenticated.get(flow.client_conn)
+        if creds is not None:
+            flow.metadata[PROXYAUTH_METADATA_KEY] = creds
+
+        if flow.request.host == AUTH_CANARY_HOST:
+            if creds is None:
+                flow.metadata[AUTH_CHALLENGE_TAG] = True
+                flow.response = mitmproxy_http.Response.make(
+                    407,
+                    b"proxy auth seeding",
+                    {
+                        "Proxy-Authenticate": 'Basic realm="odda"',
+                        "Content-Type": "text/plain",
+                    },
+                )
+            else:
+                flow.metadata[AUTH_CHALLENGE_TAG] = True
+                flow.response = mitmproxy_http.Response.make(
+                    200, b"seeded", {"Content-Type": "text/plain"}
+                )
 
 
 class ProxyServer:
@@ -87,9 +205,15 @@ class ProxyServer:
         # returns after request is dispatched, not after response received.
         self.m.options.client_replay_concurrency = -1
 
-        # Initialize flow storage addon
+        # Initialize flow storage addon. The auth addon runs FIRST: its
+        # requestheaders stamp must precede FlowFileAddon's request hook
+        # for the token to be on the flow at capture time, and its
+        # synthesized canary responses must carry the challenge tag the
+        # writer skips. Both stay ahead of user proxy-scripts (ADR-0018:
+        # captures record the original request/response; user-script
+        # mutations affect what goes upstream, not what is captured).
         self.db_addon = FlowFileAddon()
-        self.m.addons.add(self.db_addon)
+        self.m.addons.add(BrowserAuthAddon(), self.db_addon)
 
         # Proxy-script manager: holds user-supplied mitmproxy addons.
         # Constructed after FlowFileAddon so FlowFileAddon stays ahead of

@@ -28,10 +28,10 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
         assert await h.call_json("browser_list", {}) == []
 
         bid, tid = await h.open_browser(f"{fx.base}/")
-        assert (bid, tid) == (1, 1)
+        assert tid == 1
 
         r = await h.call_json("browser_list", {})
-        assert r == [{"browser_id": 1, "tab_count": 1}]
+        assert r == [{"browser_id": bid, "tab_count": 1}]
 
         title = await h.eval(bid, tid, "document.title")
         assert title == "Listener Test"

@@ -237,8 +237,8 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
             {"browser_id": bid, "tab_id": 9999, "name": "x", "expr": "JSON.parse"},
         )
         assert err == f"Tab 9999 not found in browser {bid}."
-        err = await h.call_error("wrap_list", {"browser_id": 9999, "tab_id": tid})
-        assert err == "Browser 9999 not found."
+        err = await h.call_error("wrap_list", {"browser_id": "zzzzz", "tab_id": tid})
+        assert err == "Browser zzzzz not found."
         err = await h.call_error(
             "wrap_remove",
             {"browser_id": bid, "tab_id": tid, "name": "no-such-wrap"},
