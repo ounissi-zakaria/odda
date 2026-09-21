@@ -43,7 +43,9 @@ The decisions:
   box origin joins it in named form (`x=340,y=182`): named like the tools'
   `x`/`y` parameters so the chip is copy-pasteable as a call and
   transposition can't bite, and — read as text rather than perceived as
-  position — invariant to any harness-side image downscaling.
+  position — invariant to any harness-side image downscaling. A 1px (×DSF)
+  white outline keeps the chip a bounded sticker on dark or magenta-heavy
+  page backgrounds and keeps overlapping chips distinguishable.
 
 ## Considered options
 

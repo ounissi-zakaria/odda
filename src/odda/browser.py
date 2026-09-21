@@ -51,6 +51,7 @@ _REF_BOX_RE = re.compile(
 )
 _ANNOTATION_COLOR = (255, 0, 255)
 _ANNOTATION_TEXT_COLOR = (0, 0, 0)
+_ANNOTATION_CHIP_OUTLINE = (255, 255, 255)
 _ANNOTATION_STROKE_WIDTH = 2
 _ANNOTATION_FONT_SIZE = 13
 
@@ -95,7 +96,12 @@ def _draw_annotations(
         chip_h = tb[3] - tb[1] + 2 * pad
         cx = min(max(box[0], 0), img.width - chip_w)
         cy = min(max(box[1] - chip_h - pad, 0), img.height - chip_h)
-        draw.rectangle([cx, cy, cx + chip_w, cy + chip_h], fill=_ANNOTATION_COLOR)
+        draw.rectangle(
+            [cx, cy, cx + chip_w, cy + chip_h],
+            fill=_ANNOTATION_COLOR,
+            outline=_ANNOTATION_CHIP_OUTLINE,
+            width=max(1, round(dsf)),
+        )
         draw.text(
             (cx + pad - tb[0], cy + pad - tb[1]),
             label,
