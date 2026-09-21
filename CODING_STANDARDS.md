@@ -21,7 +21,8 @@ would be re-appended by omp's client and double the payload. Str tools return ra
 text; list/union tools wrap in `mcp.py:_json_result` (one JSON document — the
 SDK's per-item list rendering loses array-ness). `screenshot` is the one
 exception: its default result is a native `CallToolResult` — the path text
-plus the inline JPEG image block (ADR 0027). See ADR 0023. Anticipated errors
+plus the inline JPEG image block (ADR 0027), plus a CSV legend text block
+between them when `annotate=true` (ADR 0029). See ADR 0023. Anticipated errors
 (`BrowserOperationError`, `ToolParamError`, `ValueError`) convert to `ToolError`
 with the message verbatim via `@odda_tool`; everything else stays an SDK crash.
 

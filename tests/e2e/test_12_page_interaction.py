@@ -389,7 +389,12 @@ async def test_screenshot_annotate_draws_ref_boxes(odda_session) -> None:
 
         # Flag defaults off: the plain screenshot carries no annotation
         # and no legend block.
-        plain = await h.call("screenshot", {"browser_id": bid, "tab_id": tid})
+        plain_r = await h.client.call_tool(
+            "screenshot", {"browser_id": bid, "tab_id": tid}
+        )
+        assert not plain_r.is_error
+        assert [b.type for b in plain_r.content] == ["text", "image"]
+        plain = plain_r.content[0].text
         assert str(plain).endswith(".jpeg")
         plain_img = Image.open(BytesIO(Path(plain).read_bytes())).convert("RGB")
         assert not _magenta_at(plain_img, 100, 80)

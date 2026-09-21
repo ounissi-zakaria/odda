@@ -38,14 +38,11 @@ The decisions:
   no-op. Dropped: the result shape stays exactly the plain call's (path,
   plus the inline image when `return_image`), and a zero-ref annotate is
   visually self-evident to the model reading the pixels.
-- **Chips use the snapshot syntax** — `[ref=e3]`, `[ref=f2e5]` — so the label
-  on the pixels is exactly the value the agent passes to `page_click`. The
-  box origin joins it in named form (`x=340,y=182`): named like the tools'
-  `x`/`y` parameters so the chip is copy-pasteable as a call and
-  transposition can't bite, and — read as text rather than perceived as
-  position — invariant to any harness-side image downscaling. A 1px (×DSF)
-  white outline keeps the chip a bounded sticker on dark or magenta-heavy
-  page backgrounds and keeps overlapping chips distinguishable.
+- **Chips used the snapshot syntax** (`[ref=e3]`, later `x=…,y=…` origins in
+  the label) — **chip content superseded by ADR-0029**: chips now carry only
+  a marker number, and the ref + viewport box moved to a CSV legend block in
+  the response. The 1px (×DSF) white chip outline introduced along the way
+  stands.
 
 ## Considered options
 

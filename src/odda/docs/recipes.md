@@ -141,12 +141,13 @@ When the a11y tree can't name the target (canvas, custom hit-testing, elements b
 
 ```
 screenshot(browser_id=B, tab_id=T, annotate=true)
-# JPEG with every ref's bounding box + [ref=eN] label drawn onto the
-# pixels — read coordinates straight off the image
-page_click(browser_id=B, tab_id=T, x=..., y=...)   # viewport CSS px
+# JPEG with a numbered marker on every ref's box; the response's
+# CSV legend (n,ref,x,y,w,h) maps each marker number to its ref
+# and viewport box
+page_click(browser_id=B, tab_id=T, x=..., y=...)   # box coords from the legend
 ```
 
-`screenshot(annotate=true)` is the visual counterpart of `page_snapshot`'s `boxes: true` (the same geometry as `[box=x,y,w,h]` text). Coordinates are viewport CSS px from the viewport's top-left — the same space `page_click`/`page_hover` accept.
+`screenshot(annotate=true)` is the visual counterpart of `page_snapshot`'s `boxes: true` — the legend's boxes are the same geometry. Coordinates are viewport CSS px from the viewport's top-left — the same space `page_click`/`page_hover` accept.
 
 ## Recipe: race conditions / limit overrun (concurrent send)
 
