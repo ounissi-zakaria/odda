@@ -58,20 +58,21 @@ _ANNOTATION_FONT_SIZE = 13
 
 def _draw_annotations(
     img: Image.Image, snapshot_text: str, dsf: float, target: Path
-) -> None:
-    """Draw Ref boxes onto a captured image, save as JPEG.
+) -> str:
+    """Draw numbered markers onto a captured image, save as JPEG.
 
-    Every ``[ref=eN] [box=…]`` pair in ``snapshot_text`` is drawn onto
-    ``img`` and the result is saved as JPEG at ``target``. The chip
-    carries the ref plus the box origin (``x=…,y=…`` — CSS px, the
-    values ``page_click``/``page_hover`` take). Pure
-    client-side compositing — the page is never touched (ADR-0028).
-    Boxes are viewport CSS px; the screenshot rasterizes at the device
-    scale factor, so coordinates, stroke, and font all scale by ``dsf``.
+    Returns the CSV legend (``n,ref,x,y,w,h``, one row per drawn
+    marker, snapshot order) mapping marker numbers to refs and
+    viewport boxes — the text twin of the drawn pixels, generated in
+    the same loop so the two cannot desync. Pure client-side
+    compositing — the page is never touched (ADR-0028). Boxes are
+    viewport CSS px; the screenshot rasterizes at the device scale
+    factor, so coordinates, stroke, and font all scale by ``dsf``.
     """
     draw = ImageDraw.Draw(img)
     stroke_w = max(1, round(_ANNOTATION_STROKE_WIDTH * dsf))
     font = ImageFont.load_default(size=max(8, round(_ANNOTATION_FONT_SIZE * dsf)))
+    rows: list[str] = ["n,ref,x,y,w,h"]
     for line in snapshot_text.splitlines():
         m = _REF_BOX_RE.search(line)
         if m is None:
@@ -87,9 +88,11 @@ def _draw_annotations(
             round((y + h) * dsf),
         ]
         draw.rectangle(box, outline=_ANNOTATION_COLOR, width=stroke_w)
-        # Label chip at the box's top-left, clamped into the image so
+        # Marker chip at the box's top-left, clamped into the image so
         # edge elements keep readable labels.
-        label = f"[ref={ref}] x={x},y={y}"
+        n = len(rows)
+        label = str(n)
+        rows.append(f"{n},{ref},{x},{y},{w},{h}")
         tb = draw.textbbox((0, 0), label, font=font)
         pad = max(1, round(2 * dsf))
         chip_w = tb[2] - tb[0] + 2 * pad
@@ -109,6 +112,7 @@ def _draw_annotations(
             fill=_ANNOTATION_TEXT_COLOR,
         )
     img.convert("RGB").save(target, "JPEG", quality=80)
+    return "\n".join(rows)
 
 
 BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
@@ -1296,7 +1300,7 @@ class BrowserInstance:
 
     async def screenshot(
         self, tab_id: int, output_path: str | None = None, *, annotate: bool = False
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """Capture a JPEG screenshot of the target tab's viewport.
 
         Args:
@@ -1304,12 +1308,16 @@ class BrowserInstance:
             output_path: Optional path to write the JPEG to. When None,
                 a temp file path under the system temp dir is generated
                 (legacy behavior). When given, the directory must exist.
-            annotate: Draw every Ref's bounding box, its
-                ``[ref=eN]`` label and origin coordinates onto the
-                image — the visual counterpart of
+            annotate: Draw a numbered marker on every Ref's bounding
+                box — the visual counterpart of
                 ``page_snapshot(boxes=True)``. Pure client-side
                 compositing over the captured pixels; the page is
                 never touched (ADR-0028).
+
+        Returns:
+            ``(path, legend)``: the written JPEG's path, and the CSV
+            legend mapping marker numbers to refs and viewport boxes
+            (``None`` unless ``annotate`` found refs).
         """
         page = self._require_ready_tab(tab_id)
         if output_path is not None:
@@ -1318,10 +1326,10 @@ class BrowserInstance:
         else:
             target = Path(tempfile.gettempdir()) / f"screenshot_{int(time.time())}.jpeg"
 
-        async def _shoot() -> str:
+        async def _shoot() -> tuple[str, str | None]:
             if not annotate:
                 await page.screenshot(path=str(target), type="jpeg", full_page=False)
-                return str(target)
+                return str(target), None
             # Annotated: capture pixels into memory (single lossy encode
             # at save time), then read geometry + DSF. All in the same
             # _run_action: the dialog gate is this method's
@@ -1335,10 +1343,10 @@ class BrowserInstance:
             if not isinstance(dsf, (int, float)) or dsf <= 0:
                 dsf = 1.0
             snapshot_text = await page.aria_snapshot(mode="ai", depth=None, boxes=True)
-            _draw_annotations(
+            legend = _draw_annotations(
                 Image.open(BytesIO(png)), snapshot_text, float(dsf), target
             )
-            return str(target)
+            return str(target), (legend if "\n" in legend else None)
 
         return await self._run_action(
             tab_id,
@@ -2263,7 +2271,7 @@ class BrowserManager:
         output_path: str | None = None,
         *,
         annotate: bool = False,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """Capture a screenshot of the target tab's viewport."""
         inst = self._require_instance(browser_id)
         return await inst.screenshot(tab_id, output_path, annotate=annotate)

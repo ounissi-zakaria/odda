@@ -12,6 +12,9 @@ asserted here.
 
 from __future__ import annotations
 
+import base64
+import csv
+import io
 import json
 import re
 from io import BytesIO
@@ -371,9 +374,10 @@ def _has_chip(img: Image.Image, x: int, y: int) -> bool:
 
 
 async def test_screenshot_annotate_draws_ref_boxes(odda_session) -> None:
-    """annotate=True draws each ref's box stroke at its known viewport
-    position plus a filled label chip at the box's top-left; the flag
-    defaults off and the plain result is unannotated."""
+    """annotate=True draws a numbered marker on each ref's box and adds
+    a CSV legend block mapping markers to refs + viewport boxes — the
+    same values page_snapshot(boxes=true) reports for those refs. The
+    flag defaults off and the plain result stays path-only-shaped."""
     body = (
         '<button id="go" style="position:absolute;left:100px;top:80px;'
         'width:120px;height:40px;">Go</button>'
@@ -383,19 +387,51 @@ async def test_screenshot_annotate_draws_ref_boxes(odda_session) -> None:
     async with odda_session() as h, fixture_site(index_body=body) as fx:
         bid, tid = await h.open_browser(f"{fx.base}/")
 
-        # Flag defaults off: the plain screenshot carries no annotation.
+        # Flag defaults off: the plain screenshot carries no annotation
+        # and no legend block.
         plain = await h.call("screenshot", {"browser_id": bid, "tab_id": tid})
         assert str(plain).endswith(".jpeg")
         plain_img = Image.open(BytesIO(Path(plain).read_bytes())).convert("RGB")
         assert not _magenta_at(plain_img, 100, 80)
 
-        shot = await h.call(
-            "screenshot", {"browser_id": bid, "tab_id": tid, "annotate": True}
+        r = await h.client.call_tool(
+            "screenshot",
+            {"browser_id": bid, "tab_id": tid, "annotate": True},
         )
+        assert not r.is_error
+        assert [b.type for b in r.content] == ["text", "text", "image"]
+        shot = r.content[0].text
+        legend = r.content[1].text
         assert str(shot).endswith(".jpeg")
+        assert Path(shot).read_bytes() == base64.b64decode(r.content[2].data)
+
+        # Legend rows carry marker numbers + refs, and each box matches
+        # what page_snapshot(boxes=true) reports for the same ref.
+        snap = await h.call(
+            "page_snapshot", {"browser_id": bid, "tab_id": tid, "boxes": True}
+        )
+        snap_boxes = {}
+        for line in snap.splitlines():
+            m = re.search(
+                r"\[ref=((?:f\d+)?e\d+)\] \[box=(-?\d+),(-?\d+),(-?\d+),(-?\d+)\]",
+                line,
+            )
+            if m:
+                snap_boxes[m.group(1)] = tuple(int(m.group(i)) for i in range(2, 6))
+        button_ref = _pluck_ref(snap, "Go")
+        input_ref = _pluck_ref(snap, "Query")
+
+        rows = list(csv.DictReader(io.StringIO(legend)))
+        by_ref = {row["ref"]: row for row in rows}
+        assert {button_ref, input_ref} <= by_ref.keys()
+        assert sorted(int(row["n"]) for row in rows) == list(range(1, len(rows) + 1))
+        for ref in (button_ref, input_ref):
+            row = by_ref[ref]
+            assert tuple(int(row[k]) for k in ("x", "y", "w", "h")) == snap_boxes[ref]
+
         img = Image.open(BytesIO(Path(shot).read_bytes())).convert("RGB")
         # Box strokes land at the elements' known viewport positions —
         # boxes are viewport CSS px scaled by DSF (1 in odda's launches).
         assert _magenta_at(img, 100, 80), "button box stroke missing at (100, 80)"
         assert _magenta_at(img, 300, 200), "input box stroke missing at (300, 200)"
-        assert _has_chip(img, 100, 80), "label chip missing near (100, 80)"
+        assert _has_chip(img, 100, 80), "marker chip missing near (100, 80)"

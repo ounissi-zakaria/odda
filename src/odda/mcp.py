@@ -467,32 +467,37 @@ async def screenshot(
     output: optional path to write the JPEG to (a temp file when
     omitted). The written path is always the first text block.
     return_image: inline the JPEG as an image content block after the
-    path text (default) — a vision-capable harness sees the
+    text blocks (default) — a vision-capable harness sees the
     pixels without re-reading the file; a text-only harness collapses
     the image block to a placeholder while the path survives for
-    on-demand reads. false returns the path alone.
-    annotate: draw every Ref's bounding box, [ref=eN] label, and
-    box-origin coordinates onto the image — the visual counterpart
-    of page_snapshot's boxes=true; pairs with coordinate clicks
-    (canvas, overlays, elements the a11y tree can't name). Drawn
+    on-demand reads. false returns the path (plus the legend when
+    annotating) without an image block.
+    annotate: draw a numbered marker on every Ref's bounding box and
+    add a legend text block mapping each marker to its ref and
+    viewport box (CSV: n,ref,x,y,w,h) — the visual counterpart of
+    page_snapshot's boxes=true; pairs with coordinate clicks (canvas,
+    overlays, elements the a11y tree can't name). Markers are drawn
     onto the captured pixels client-side; nothing is injected into
-    the page.
+    the page. The legend sits between the path and the image block
+    and is omitted when the page has no refs.
     """
-    path = await ctx.request_context.lifespan_context.browser.screenshot(
+    path, legend = await ctx.request_context.lifespan_context.browser.screenshot(
         browser_id, tab_id, output, annotate=annotate
     )
-    if not return_image:
-        return path
-    return CallToolResult(
-        content=[
-            TextContent(type="text", text=path),
+    blocks: list[TextContent | ImageContent] = [TextContent(type="text", text=path)]
+    if legend is not None:
+        blocks.append(TextContent(type="text", text=legend))
+    if return_image:
+        blocks.append(
             ImageContent(
                 type="image",
                 data=base64.b64encode(Path(path).read_bytes()).decode(),
                 mimeType="image/jpeg",
-            ),
-        ]
-    )
+            )
+        )
+    if len(blocks) == 1:
+        return path
+    return CallToolResult(content=blocks)
 
 
 # --- page interaction (snapshot + ref-driven actions) ---
