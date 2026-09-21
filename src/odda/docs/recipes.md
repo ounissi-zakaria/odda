@@ -135,6 +135,19 @@ After `page_upload` sets the file on the input, click the form's submit button b
 
 The PortSwigger "RCE via polyglot web shell upload" lab needs a PHP/JPG polyglot uploaded as an avatar. Snapshot the login page, fill username + password by ref, click "Log in". On the account page the file input has no accessible name, so `eval` an `aria-label` onto it, re-snapshot, then `page_upload` the polyglot (`exiftool -Comment="<?php ... ?>" input.jpg -o polyglot.php`) by the new ref and click "Upload". Navigating to `/files/avatars/polyglot.php` executes the PHP; read the secret out of `document.body.innerText` via `eval`, then POST it to `/submitSolution` with a `fetch` from `eval` to clear the lab.
 
+### Coordinate targeting via annotated screenshot
+
+When the a11y tree can't name the target (canvas, custom hit-testing, elements behind overlays), get pixels and refs in one artifact and act by coordinates:
+
+```
+screenshot(browser_id=B, tab_id=T, annotate=true)
+# JPEG with every ref's bounding box + [ref=eN] label drawn onto the
+# pixels — read coordinates straight off the image
+page_click(browser_id=B, tab_id=T, x=..., y=...)   # viewport CSS px
+```
+
+`screenshot(annotate=true)` is the visual counterpart of `page_snapshot`'s `boxes: true` (the same geometry as `[box=x,y,w,h]` text). Coordinates are viewport CSS px from the viewport's top-left — the same space `page_click`/`page_hover` accept.
+
 ## Recipe: race conditions / limit overrun (concurrent send)
 
 A worked example of `request_send` with `repeat` to race a server-side check-then-write window (the classic limit-overrun attack — a "once per user" coupon applied N times because N concurrent requests all pass the check before any write lands). The same pattern applies to rate-limit bypass and any TOCTOU window where the same request fired many times at once slips through.

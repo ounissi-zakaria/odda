@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 from contextlib import suppress
+from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,7 @@ from patchright.async_api import (
     Playwright,
     async_playwright,
 )
+from PIL import Image, ImageDraw, ImageFont
 
 from odda import (
     coverage as coverage_mod,
@@ -40,6 +42,65 @@ logger = logging.getLogger(__name__)
 
 # Context lines around each page_find match (upstream parity: grep -C 3).
 _FIND_CONTEXT_LINES = 3
+
+# Annotated screenshots: one ref + box pair per snapshot line
+# (``[ref=eN] [box=x,y,w,h]`` — viewport CSS px, Math.round'ed ints,
+# negative near viewport edges). ADR-0028.
+_REF_BOX_RE = re.compile(
+    r"\[ref=((?:f\d+)?e\d+)\]\s+\[box=(-?\d+),(-?\d+),(-?\d+),(-?\d+)\]"
+)
+_ANNOTATION_COLOR = (255, 0, 255)
+_ANNOTATION_TEXT_COLOR = (0, 0, 0)
+_ANNOTATION_STROKE_WIDTH = 2
+_ANNOTATION_FONT_SIZE = 13
+
+
+def _draw_annotations(
+    img: Image.Image, snapshot_text: str, dsf: float, target: Path
+) -> None:
+    """Draw Ref boxes onto a captured image, save as JPEG.
+
+    Every ``[ref=eN] [box=…]`` pair in ``snapshot_text`` is drawn onto
+    ``img`` and the result is saved as JPEG at ``target``. Pure
+    client-side compositing — the page is never touched (ADR-0028).
+    Boxes are viewport CSS px; the screenshot rasterizes at the device
+    scale factor, so coordinates, stroke, and font all scale by ``dsf``.
+    """
+    draw = ImageDraw.Draw(img)
+    stroke_w = max(1, round(_ANNOTATION_STROKE_WIDTH * dsf))
+    font = ImageFont.load_default(size=max(8, round(_ANNOTATION_FONT_SIZE * dsf)))
+    for line in snapshot_text.splitlines():
+        m = _REF_BOX_RE.search(line)
+        if m is None:
+            continue
+        ref = m.group(1)
+        x, y, w, h = (int(m.group(i)) for i in range(2, 6))
+        if w <= 0 or h <= 0:
+            continue
+        box = [
+            round(x * dsf),
+            round(y * dsf),
+            round((x + w) * dsf),
+            round((y + h) * dsf),
+        ]
+        draw.rectangle(box, outline=_ANNOTATION_COLOR, width=stroke_w)
+        # Label chip at the box's top-left, clamped into the image so
+        # edge elements keep readable labels.
+        label = f"[ref={ref}]"
+        tb = draw.textbbox((0, 0), label, font=font)
+        pad = max(1, round(2 * dsf))
+        chip_w = tb[2] - tb[0] + 2 * pad
+        chip_h = tb[3] - tb[1] + 2 * pad
+        cx = min(max(box[0], 0), img.width - chip_w)
+        cy = min(max(box[1] - chip_h - pad, 0), img.height - chip_h)
+        draw.rectangle([cx, cy, cx + chip_w, cy + chip_h], fill=_ANNOTATION_COLOR)
+        draw.text(
+            (cx + pad - tb[0], cy + pad - tb[1]),
+            label,
+            font=font,
+            fill=_ANNOTATION_TEXT_COLOR,
+        )
+    img.convert("RGB").save(target, "JPEG", quality=80)
 
 
 BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
@@ -1225,7 +1286,9 @@ class BrowserInstance:
         _won, result = await self._race_dialog(tab_id, _wait)
         return result
 
-    async def screenshot(self, tab_id: int, output_path: str | None = None) -> str:
+    async def screenshot(
+        self, tab_id: int, output_path: str | None = None, *, annotate: bool = False
+    ) -> str:
         """Capture a JPEG screenshot of the target tab's viewport.
 
         Args:
@@ -1233,6 +1296,11 @@ class BrowserInstance:
             output_path: Optional path to write the JPEG to. When None,
                 a temp file path under the system temp dir is generated
                 (legacy behavior). When given, the directory must exist.
+            annotate: Draw every Ref's bounding box + its
+                ``[ref=eN]`` label onto the image — the visual
+                counterpart of ``page_snapshot(boxes=True)``. Pure
+                client-side compositing over the captured pixels; the
+                page is never touched (ADR-0028).
         """
         page = self._require_ready_tab(tab_id)
         if output_path is not None:
@@ -1242,7 +1310,25 @@ class BrowserInstance:
             target = Path(tempfile.gettempdir()) / f"screenshot_{int(time.time())}.jpeg"
 
         async def _shoot() -> str:
-            await page.screenshot(path=str(target), type="jpeg", full_page=False)
+            if not annotate:
+                await page.screenshot(path=str(target), type="jpeg", full_page=False)
+                return str(target)
+            # Annotated: capture pixels into memory (single lossy encode
+            # at save time), then read geometry + DSF. All in the same
+            # _run_action: the dialog gate is this method's
+            # _require_ready_tab prologue and none of these calls can
+            # open one. Geometry comes straight from the driver's
+            # aria_snapshot — NOT page_snapshot, whose render would
+            # become the tab's diff baseline (ADR-0026): a screenshot
+            # never moves baselines.
+            png = await page.screenshot(type="png", full_page=False)
+            dsf = await page.evaluate("window.devicePixelRatio")
+            if not isinstance(dsf, (int, float)) or dsf <= 0:
+                dsf = 1.0
+            snapshot_text = await page.aria_snapshot(mode="ai", depth=None, boxes=True)
+            _draw_annotations(
+                Image.open(BytesIO(png)), snapshot_text, float(dsf), target
+            )
             return str(target)
 
         return await self._run_action(
@@ -2162,11 +2248,16 @@ class BrowserManager:
         return await inst.wait_for(tab_id, expression, timeout_ms=timeout_ms)
 
     async def screenshot(
-        self, browser_id: int, tab_id: int, output_path: str | None = None
+        self,
+        browser_id: int,
+        tab_id: int,
+        output_path: str | None = None,
+        *,
+        annotate: bool = False,
     ) -> str:
         """Capture a screenshot of the target tab's viewport."""
         inst = self._require_instance(browser_id)
-        return await inst.screenshot(tab_id, output_path)
+        return await inst.screenshot(tab_id, output_path, annotate=annotate)
 
     async def page_click(
         self, browser_id: int, tab_id: int, ref: str, *, timeout_ms: float

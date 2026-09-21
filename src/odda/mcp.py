@@ -458,6 +458,7 @@ async def screenshot(
     tab_id: int,
     output: str | None = None,
     *,
+    annotate: bool = False,
     return_image: bool = True,
     ctx: Context[OddaState],
 ) -> str | CallToolResult:
@@ -470,9 +471,14 @@ async def screenshot(
     pixels without re-reading the file; a text-only harness collapses
     the image block to a placeholder while the path survives for
     on-demand reads. false returns the path alone.
+    annotate: draw every Ref's bounding box + [ref=eN] label
+    onto the image — the visual counterpart of page_snapshot's
+    boxes=true; pairs with coordinate clicks (canvas, overlays,
+    elements the a11y tree can't name). Drawn onto the captured
+    pixels client-side; nothing is injected into the page.
     """
     path = await ctx.request_context.lifespan_context.browser.screenshot(
-        browser_id, tab_id, output
+        browser_id, tab_id, output, annotate=annotate
     )
     if not return_image:
         return path
@@ -517,7 +523,8 @@ async def page_snapshot(
     are hidden (raise depth, or page_find, to see them); a tree that
     fits under the cap is returned without any such annotation.
     boxes: include [box=x,y,width,height] per line — geometry source
-    for page_click/page_hover coordinates.
+    for page_click/page_hover coordinates. screenshot(annotate=true)
+    draws these boxes and labels onto the captured pixels instead.
     diff: return only what changed since this tab's previous same-
     depth snapshot — "-"/"+" lines (fresh refs on "+", old render's
     on "-") under an ancestor-path header per hunk; unchanged content
@@ -561,7 +568,8 @@ async def page_find(
     (?i) for case-insensitive). Refs in results work in page_click/
     page_fill/page_hover/page_upload.
     boxes: include [box=x,y,width,height] per line — geometry source
-    for page_click/page_hover coordinates.
+    for page_click/page_hover coordinates. screenshot(annotate=true)
+    draws these boxes and labels onto the captured pixels instead.
     """
     try:
         pattern = re.compile(regex)

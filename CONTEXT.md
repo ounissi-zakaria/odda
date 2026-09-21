@@ -51,8 +51,8 @@ The alternative to Ref for `page_click` and `page_hover`: the agent passes viewp
 _Avoid_: pixel targeting, mouse targeting, coord click, position click
 
 **Screenshot**:
-A JPEG of a tab's viewport returned by the `screenshot` tool — pixels for reading visual layout, the counterpart of a **Snapshot** (which names actionable elements). The written path is always the result's text handle; the pixels are additionally returned inline by default, with `return_image=False` collapsing the result to the path alone.
-_Avoid_: picture, screen capture, page image, snapshot (reserved for the accessibility-tree Snapshot)
+A JPEG of a tab's viewport returned by the `screenshot` tool — pixels for reading visual layout, the counterpart of a **Snapshot** (which names actionable elements). An annotated Screenshot draws every **Ref**'s bounding box and label onto the pixels — the visual counterpart of a Snapshot's boxes, pairing pixels with refs for **Coordinate targeting**; annotation is drawn onto the captured pixels, never by injecting anything into the page. The written path is always the result's text handle; the pixels are additionally returned inline by default, with `return_image=False` collapsing the result to the path alone.
+_Avoid_: picture, screen capture, page image, overlay, ref overlay, labeled screenshot, snapshot (reserved for the accessibility-tree Snapshot)
 
 ## Dynamic analysis
 

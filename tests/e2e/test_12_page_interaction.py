@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import json
 import re
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image
 
 from tests.e2e.conftest import fixture_site
 
@@ -326,3 +329,73 @@ async def test_page_fill_hover_upload_and_stale_ref(
         assert err == f"Tab 9999 not found in browser {bid}."
         err = await h.call_error("page_snapshot", {"browser_id": 9999, "tab_id": tid})
         assert err == "Browser 9999 not found."
+
+
+_MAGENTA_RADIUS = 4
+
+
+def _is_magentaish(r: int, g: int, b: int) -> bool:
+    """JPEG-lossy magenta: chroma subsampling bleeds the channels."""
+    return r > 200 and b > 200 and g < 120
+
+
+def _magenta_at(img: Image.Image, x: int, y: int) -> bool:
+    """Any pixel within radius of (x, y) reads magenta."""
+    px = img.load()
+    for xx in range(x - _MAGENTA_RADIUS, x + _MAGENTA_RADIUS + 1):
+        for yy in range(y - _MAGENTA_RADIUS, y + _MAGENTA_RADIUS + 1):
+            if 0 <= xx < img.width and 0 <= yy < img.height:
+                r, g, b = px[xx, yy]
+                if _is_magentaish(r, g, b):
+                    return True
+    return False
+
+
+def _has_chip(img: Image.Image, x: int, y: int) -> bool:
+    """A filled label block near (x, y): a vertical magenta run >= 8px.
+    The 2px box stroke cannot produce one."""
+    px = img.load()
+    for xx in range(max(0, x - 40), min(img.width, x + 40)):
+        for yy in range(max(0, y - 30), min(img.height, y + 30)):
+            if not _is_magentaish(*px[xx, yy]):
+                continue
+            run = 0
+            for k in range(yy, min(img.height, yy + 12)):
+                if _is_magentaish(*px[xx, k]):
+                    run += 1
+                else:
+                    break
+            if run >= 8:
+                return True
+    return False
+
+
+async def test_screenshot_annotate_draws_ref_boxes(odda_session) -> None:
+    """annotate=True draws each ref's box stroke at its known viewport
+    position plus a filled label chip at the box's top-left; the flag
+    defaults off and the plain result is unannotated."""
+    body = (
+        '<button id="go" style="position:absolute;left:100px;top:80px;'
+        'width:120px;height:40px;">Go</button>'
+        '<input id="q" aria-label="Query" style="position:absolute;'
+        'left:300px;top:200px;width:200px;height:32px;">'
+    )
+    async with odda_session() as h, fixture_site(index_body=body) as fx:
+        bid, tid = await h.open_browser(f"{fx.base}/")
+
+        # Flag defaults off: the plain screenshot carries no annotation.
+        plain = await h.call("screenshot", {"browser_id": bid, "tab_id": tid})
+        assert str(plain).endswith(".jpeg")
+        plain_img = Image.open(BytesIO(Path(plain).read_bytes())).convert("RGB")
+        assert not _magenta_at(plain_img, 100, 80)
+
+        shot = await h.call(
+            "screenshot", {"browser_id": bid, "tab_id": tid, "annotate": True}
+        )
+        assert str(shot).endswith(".jpeg")
+        img = Image.open(BytesIO(Path(shot).read_bytes())).convert("RGB")
+        # Box strokes land at the elements' known viewport positions —
+        # boxes are viewport CSS px scaled by DSF (1 in odda's launches).
+        assert _magenta_at(img, 100, 80), "button box stroke missing at (100, 80)"
+        assert _magenta_at(img, 300, 200), "input box stroke missing at (300, 200)"
+        assert _has_chip(img, 100, 80), "label chip missing near (100, 80)"
