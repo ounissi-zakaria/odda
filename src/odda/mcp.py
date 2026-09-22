@@ -270,12 +270,7 @@ async def browser_open(
 @mcp_server.tool()
 @odda_tool
 async def browser_close(browser_id: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
-    """Close a browser instance by id.
-
-    Kills the Chrome process; the browser's record — its profile and
-    userscripts under .odda/browsers/<id>/ — persists and can be
-    reopened later with browser_open(browser_id=...).
-    """
+    """Close a browser instance by id."""
     return await ctx.request_context.lifespan_context.browser.close_instance(browser_id)
 
 
