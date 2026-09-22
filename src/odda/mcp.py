@@ -280,13 +280,7 @@ async def browser_list(
     *,
     ctx: Context[OddaState],
 ) -> list[dict[str, Any]]:
-    """List every browser record in the data dir, alphabetically.
-
-    Rows carry browser_id and state: "open" (running here, with
-    tab_count), "open in another session" (another MCP session on this
-    project has it — it cannot be opened or driven from here), or
-    "closed" (no tab_count; reopenable via browser_open(browser_id=...)).
-    """
+    """List every browser record in the data dir, alphabetically."""
     return _json_result(ctx.request_context.lifespan_context.browser.list_instances())
 
 
