@@ -2442,73 +2442,64 @@ class BrowserManager:
     async def _wrap_add(
         self,
         browser_id: str,
-        tab_id: int,
         name: str,
         expr: str,
         install_fn,
     ) -> dict[str, Any]:
         """Install a wrap (call or access) into the browser's scope and reload.
 
-        Validates that the target tab exists (so a stale ``tab_id``
-        errors cleanly), installs the wrap as a named userscript via
-        ``install_fn`` into the given browser's scope, and reloads that
-        browser's extension. The wrap takes effect on the next
-        navigation (the userscript re-runs at ``document_start``).
+        Installs the wrap as a named userscript via ``install_fn``
+        into the given browser's scope and reloads that browser's
+        extension. The wrap takes effect on the next navigation (the
+        userscript re-runs at ``document_start``).
 
         Returns:
             The install result from the wrap module.
         """
         inst = self._require_instance(browser_id)
-        inst._require_tab(tab_id)  # noqa: SLF001
         result = install_fn(inst.browser_id, name, expr)
         result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
         return result
 
     async def wrap_calls_add(
-        self, browser_id: str, tab_id: int, name: str, expr: str
+        self, browser_id: str, name: str, expr: str
     ) -> dict[str, Any]:
         """Install a call wrap on a named function and reload the extension."""
-        return await self._wrap_add(
-            browser_id, tab_id, name, expr, wrap_mod.install_call
-        )
+        return await self._wrap_add(browser_id, name, expr, wrap_mod.install_call)
 
     async def wrap_access_add(
-        self, browser_id: str, tab_id: int, name: str, expr: str
+        self, browser_id: str, name: str, expr: str
     ) -> dict[str, Any]:
         """Install an access wrap on a property accessor and reload the extension."""
-        return await self._wrap_add(
-            browser_id, tab_id, name, expr, wrap_mod.install_access
-        )
+        return await self._wrap_add(browser_id, name, expr, wrap_mod.install_access)
 
-    async def wrap_list(self, browser_id: str, tab_id: int) -> list[dict[str, Any]]:
+    async def wrap_list(self, browser_id: str) -> list[dict[str, Any]]:
         """List installed wraps for the given browser.
 
         Wraps are stored on disk as named userscripts scoped to the
-        given browser (per ADR-0010). The ``tab_id`` is validated
-        for targeting consistency with the other wrap tools but
-        does not filter the list.
+        given browser (per ADR-0010) and run in every tab of that
+        browser, so the list is browser-scope metadata and needs no
+        tab targeting.
 
         Returns:
             A list of ``{name, type, expr}`` dicts.
         """
         inst = self._require_instance(browser_id)
-        inst._require_tab(tab_id)  # noqa: SLF001
         return wrap_mod.list_wraps(inst.browser_id)
 
-    async def wrap_remove(
-        self, browser_id: str, tab_id: int, name: str
-    ) -> dict[str, Any]:
+    async def wrap_remove(self, browser_id: str, name: str) -> dict[str, Any]:
         """Remove a wrap from the given browser's scope and reload its extension.
 
-        The wrap stops recording on future navigations. Existing
-        records in already-loaded tabs are not affected (the wrapper
-        function is still in place until the page navigates).
+        Wraps are installed browser-wide (per ADR-0010), so removal is
+        browser-scope too and needs no tab. The wrap stops recording
+        on future navigations. Existing records in already-loaded tabs
+        are not affected (the wrapper function is still in place until
+        the page navigates).
 
         Returns:
             The remove result from the wrap module.
         """
         inst = self._require_instance(browser_id)
-        inst._require_tab(tab_id)  # noqa: SLF001
         try:
             result = wrap_mod.remove(inst.browser_id, name)
         except ValueError as exc:

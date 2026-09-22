@@ -6,7 +6,7 @@ Observing JavaScript execution in progress — recording what code does as it ru
 - **Logpoint** — "I know the line" → plant a non-pausing observation at a source location.
 - **Coverage** — "I know neither" → record which code blocks execute, then find the path.
 
-All tools in this file are tab-scoped: every call takes `browser_id` and `tab_id`.
+Every call takes `browser_id`; the wrap install/list/remove tools (`wrap_calls_add`, `wrap_access_add`, `wrap_list`, `wrap_remove`) take no `tab_id` — wraps install browser-wide and run in every tab, so managing them needs no tab targeting. The record tools (`wrap_dump`, `wrap_clear`) and the Logpoint/Coverage tools are tab-scoped.
 
 ## Shared: record lifecycle and scope
 
@@ -21,7 +21,7 @@ Applies to Wrap and Logpoint (Coverage is navigation-persistent — see its sect
 Wrap and Logpoint share an `add`/`list`/`remove`/`dump`/`clear` tool set:
 
 - `*_add` — install. Takes effect on the next navigation (re-navigate the tab or open a new one) for Wrap; binds on add for Logpoint.
-- `*_list` — list installed wraps/logpoints for the given browser.
+- `*_list` — list installed wraps (browser-wide) / planted logpoints (per-tab).
 - `*_remove` — remove an installation; stops recording on future hits.
 - `*_dump` — read the per-tab record array. Returns the records captured since the last navigation/clear.
 - `*_clear` — zero the per-tab record array without navigating. Returns `{status: "cleared", count: <records dropped>}`. Installations are unaffected; subsequent calls continue to record.
@@ -42,10 +42,10 @@ A placed observation at a function or property you name. odda replaces the funct
 
 Tools:
 
-- `wrap_calls_add(browser_id, tab_id, name, expr)` — Install a wrap on a function (e.g. `JSON.parse`, `EventTarget.prototype.addEventListener`). The wrapper calls through to the original and pushes a record with `{wrap, type: "call", this, args, ret, stack}`. Takes effect on the next navigation (re-navigate the tab or open a new one).
-- `wrap_access_add(browser_id, tab_id, name, expr)` — Install a wrap on a property accessor (e.g. `HTMLElement.prototype.innerHTML`, `document.cookie`). Both getter and setter are wrapped if present. A get records `ret` as the value read; a set records `args[0]` as the value written with `ret: null`.
-- `wrap_list(browser_id, tab_id)` — List installed wraps as `[{name, type, expr}]`.
-- `wrap_remove(browser_id, tab_id, name)` — Remove a wrap's userscript from the browser's scope and reload its extension. Stops recording on future navigations. Records already captured in the current page are not affected.
+- `wrap_calls_add(browser_id, name, expr)` — Install a wrap on a function (e.g. `JSON.parse`, `EventTarget.prototype.addEventListener`). Installs browser-wide; works with zero open tabs. The wrapper calls through to the original and pushes a record with `{wrap, type: "call", this, args, ret, stack}`. Takes effect on the next navigation (re-navigate the tab or open a new one).
+- `wrap_access_add(browser_id, name, expr)` — Install a wrap on a property accessor (e.g. `HTMLElement.prototype.innerHTML`, `document.cookie`). Installs browser-wide. Both getter and setter are wrapped if present. A get records `ret` as the value read; a set records `args[0]` as the value written with `ret: null`.
+- `wrap_list(browser_id)` — List installed wraps as `[{name, type, expr}]`. Works with zero open tabs.
+- `wrap_remove(browser_id, name)` — Remove a wrap's userscript from the browser's scope and reload its extension. Stops recording on future navigations. Works with zero open tabs. Records already captured in the current page are not affected.
 - `wrap_dump(browser_id, tab_id, name=None)` — Read the per-tab wrap record array. Returns `[{wrap, type, this, args, ret, stack, error?}]`. Pass `name` to filter server-side to one wrap's records (useful for narrowing context when several wraps are installed).
 - `wrap_clear(browser_id, tab_id)` — Zero the per-tab wrap record array without navigating. Returns `{status: "cleared", count: <records dropped>}`. Wrap installations are unaffected; subsequent calls continue to record.
 

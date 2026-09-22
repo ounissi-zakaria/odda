@@ -28,7 +28,7 @@ async def test_large_wrap_dump_succeeds(odda_session) -> None:
 
         await h.call(
             "wrap_calls_add",
-            {"browser_id": bid, "tab_id": tid, "name": "big", "expr": "JSON.parse"},
+            {"browser_id": bid, "name": "big", "expr": "JSON.parse"},
         )
         await h.navigate(bid, tid, f"{fx.base}/")
 
@@ -57,7 +57,7 @@ async def test_wrap_dump_name_filters_server_side(odda_session) -> None:
 
         await h.call(
             "wrap_calls_add",
-            {"browser_id": bid, "tab_id": tid, "name": "big", "expr": "JSON.parse"},
+            {"browser_id": bid, "name": "big", "expr": "JSON.parse"},
         )
         await h.navigate(bid, tid, f"{fx.base}/")
 

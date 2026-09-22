@@ -11,7 +11,7 @@ The workflow: Wrap confirms the API touch, Coverage finds the code path, Logpoin
 ### 1. Wrap `addEventListener` to confirm a `message` handler is registered and capture the handler reference
 
 ```
-wrap_calls_add(browser_id="kqzfm", tab_id=1, name="ael", expr="EventTarget.prototype.addEventListener")
+wrap_calls_add(browser_id="kqzfm", name="ael", expr="EventTarget.prototype.addEventListener")
 navigate(browser_id="kqzfm", tab_id=1, url="http://target/")   # re-navigate so the wrap runs
 wrap_dump(browser_id="kqzfm", tab_id=1)   # look for a call with args[0]=="message"; args[1] is the handler (its source is in the record)
 ```
@@ -316,7 +316,7 @@ grep <host> .odda/flows/flows.jsonl          # find the JS flow ids
 ### 4. (Optional) wrap/coverage to find the gadget if source-reading isn't enough
 
 ```
-wrap_access_add(browser_id=B, tab_id=T, name="proto", expr="Object.prototype")   # observe proto reads
+wrap_access_add(browser_id=B, name="proto", expr="Object.prototype")   # observe proto reads
 navigate(browser_id=B, tab_id=T, url="<url>?__proto__[foo]=bar")   # re-navigate so the wrap runs
 wrap_dump(browser_id=B, tab_id=T)
 # or: coverage_start → navigate with a test payload → coverage_stop

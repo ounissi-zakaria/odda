@@ -24,11 +24,11 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
 
         r = await h.call(
             "wrap_calls_add",
-            {"browser_id": bid, "tab_id": tid, "name": "jp", "expr": "JSON.parse"},
+            {"browser_id": bid, "name": "jp", "expr": "JSON.parse"},
         )
         assert (r["name"], r["type"], r["expr"]) == ("jp", "call", "JSON.parse")
 
-        r = await h.call_json("wrap_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_list", {"browser_id": bid})
         assert [(w["name"], w["type"], w["expr"]) for w in r] == [
             ("jp", "call", "JSON.parse")
         ]
@@ -55,7 +55,6 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
             "wrap_calls_add",
             {
                 "browser_id": bid,
-                "tab_id": tid,
                 "name": "ael",
                 "expr": "EventTarget.prototype.addEventListener",
             },
@@ -89,7 +88,6 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
             "wrap_access_add",
             {
                 "browser_id": bid,
-                "tab_id": tid,
                 "name": "ih",
                 "expr": "HTMLElement.prototype.innerHTML",
             },
@@ -129,7 +127,7 @@ async def test_wrap_records_wipe_installation_persists_iframes(
         bid, tid = await h.open_browser(url)
         await h.call(
             "wrap_calls_add",
-            {"browser_id": bid, "tab_id": tid, "name": "jp", "expr": "JSON.parse"},
+            {"browser_id": bid, "name": "jp", "expr": "JSON.parse"},
         )
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaWrapFixture === 'function'")
@@ -168,7 +166,8 @@ async def test_wrap_records_wipe_installation_persists_iframes(
 
 async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
     """Large arrays truncate; remove stops future recording; missing
-    tab/browser and non-existent-wrap errors are verbatim."""
+    browser and non-existent-wrap errors are verbatim; wrap
+    install/list/remove work with zero open tabs."""
     async with (
         odda_session() as h,
         fixture_site(["wrap.html", "iframe-inner.html"]) as fx,
@@ -182,13 +181,12 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         ):
             await h.call(
                 "wrap_calls_add",
-                {"browser_id": bid, "tab_id": tid, "name": name, "expr": expr},
+                {"browser_id": bid, "name": name, "expr": expr},
             )
         await h.call(
             "wrap_access_add",
             {
                 "browser_id": bid,
-                "tab_id": tid,
                 "name": "ih",
                 "expr": "HTMLElement.prototype.innerHTML",
             },
@@ -211,11 +209,9 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         assert big[0]["ret"]["length"] == 150
 
         # Remove jp; the others stay installed.
-        r = await h.call(
-            "wrap_remove", {"browser_id": bid, "tab_id": tid, "name": "jp"}
-        )
+        r = await h.call("wrap_remove", {"browser_id": bid, "name": "jp"})
         assert (r["name"], r["removed"]) == ("jp", True)
-        r = await h.call_json("wrap_list", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_list", {"browser_id": bid})
         assert sorted(w["name"] for w in r) == ["ael", "big", "ih"]
 
         # After a re-navigate the removed wrap no longer records; the
@@ -231,16 +227,29 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x["wrap"] == "ih" for x in r)
 
-        # Errors: missing tab, missing browser, non-existent wrap.
-        err = await h.call_error(
-            "wrap_calls_add",
-            {"browser_id": bid, "tab_id": 9999, "name": "x", "expr": "JSON.parse"},
-        )
-        assert err == f"Tab 9999 not found in browser {bid}."
-        err = await h.call_error("wrap_list", {"browser_id": "zzzzz", "tab_id": tid})
+        # Errors: missing browser, non-existent wrap. (Install/remove
+        # no longer validate a tab — they are browser-scope operations.)
+        err = await h.call_error("wrap_list", {"browser_id": "zzzzz"})
         assert err == "Browser zzzzz not found."
         err = await h.call_error(
             "wrap_remove",
-            {"browser_id": bid, "tab_id": tid, "name": "no-such-wrap"},
+            {"browser_id": bid, "name": "no-such-wrap"},
         )
         assert err == "Userscript '__odda-wrap__no-such-wrap' not found"
+
+        # Wrap install/list/remove are browser-scope operations
+        # (ADR-0010): they must work with zero open tabs instead of
+        # erroring on a missing tab.
+        await h.call("tabs_close", {"browser_id": bid, "tab_id": tid})
+        r = await h.call_json("wrap_list", {"browser_id": bid})
+        assert sorted(w["name"] for w in r) == ["ael", "big", "ih"]
+        await h.call(
+            "wrap_calls_add",
+            {"browser_id": bid, "name": "post", "expr": "Array.of"},
+        )
+        r = await h.call_json("wrap_list", {"browser_id": bid})
+        assert sorted(w["name"] for w in r) == ["ael", "big", "ih", "post"]
+        r = await h.call("wrap_remove", {"browser_id": bid, "name": "post"})
+        assert (r["name"], r["removed"]) == ("post", True)
+        r = await h.call_json("wrap_list", {"browser_id": bid})
+        assert sorted(w["name"] for w in r) == ["ael", "big", "ih"]

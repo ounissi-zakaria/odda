@@ -953,7 +953,7 @@ async def coverage_stop(
 @mcp_server.tool()
 @odda_tool
 async def wrap_calls_add(
-    browser_id: str, tab_id: int, name: str, expr: str, *, ctx: Context[OddaState]
+    browser_id: str, name: str, expr: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Install a call wrap on a named function.
 
@@ -963,14 +963,14 @@ async def wrap_calls_add(
     persists per browser.
     """
     return await ctx.request_context.lifespan_context.browser.wrap_calls_add(
-        browser_id, tab_id, name, expr
+        browser_id, name, expr
     )
 
 
 @mcp_server.tool()
 @odda_tool
 async def wrap_access_add(
-    browser_id: str, tab_id: int, name: str, expr: str, *, ctx: Context[OddaState]
+    browser_id: str, name: str, expr: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Install an access wrap on a property accessor.
 
@@ -979,32 +979,32 @@ async def wrap_access_add(
     records wipe on navigation.
     """
     return await ctx.request_context.lifespan_context.browser.wrap_access_add(
-        browser_id, tab_id, name, expr
+        browser_id, name, expr
     )
 
 
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def wrap_list(
-    browser_id: str, tab_id: int, *, ctx: Context[OddaState]
+    browser_id: str, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
     """List installed wraps (name, type, expr) for the browser."""
     return _json_result(
-        await ctx.request_context.lifespan_context.browser.wrap_list(browser_id, tab_id)
+        await ctx.request_context.lifespan_context.browser.wrap_list(browser_id)
     )
 
 
 @mcp_server.tool()
 @odda_tool
 async def wrap_remove(
-    browser_id: str, tab_id: int, name: str, *, ctx: Context[OddaState]
+    browser_id: str, name: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
     """Remove a wrap; it stops recording on future navigations.
 
     Already-recorded entries are unaffected.
     """
     return await ctx.request_context.lifespan_context.browser.wrap_remove(
-        browser_id, tab_id, name
+        browser_id, name
     )
 
 

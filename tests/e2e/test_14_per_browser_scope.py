@@ -26,18 +26,17 @@ async def test_wrap_scope_is_per_browser(odda_session) -> None:
             "wrap_calls_add",
             {
                 "browser_id": bid1,
-                "tab_id": tid1,
                 "name": "leaktest",
                 "expr": "JSON.parse",
             },
         )
 
         # Fresh browser 2: no wraps from browser 1's scope.
-        r = await h.call_json("wrap_list", {"browser_id": bid2, "tab_id": tid2})
+        r = await h.call_json("wrap_list", {"browser_id": bid2})
         assert r == []
 
         # Browser 1 still has its own wrap.
-        r = await h.call_json("wrap_list", {"browser_id": bid1, "tab_id": tid1})
+        r = await h.call_json("wrap_list", {"browser_id": bid1})
         assert any(w["name"] == "leaktest" for w in r)
 
         # A wrap installed on browser 2 does not appear on browser 1.
@@ -45,14 +44,13 @@ async def test_wrap_scope_is_per_browser(odda_session) -> None:
             "wrap_calls_add",
             {
                 "browser_id": bid2,
-                "tab_id": tid2,
                 "name": "b2wrap",
                 "expr": "JSON.parse",
             },
         )
-        r = await h.call_json("wrap_list", {"browser_id": bid1, "tab_id": tid1})
+        r = await h.call_json("wrap_list", {"browser_id": bid1})
         assert not any(w["name"] == "b2wrap" for w in r)
-        r = await h.call_json("wrap_list", {"browser_id": bid2, "tab_id": tid2})
+        r = await h.call_json("wrap_list", {"browser_id": bid2})
         assert any(w["name"] == "b2wrap" for w in r)
 
         # With wraps installed on browser 1, browser 2's userscript_list must
