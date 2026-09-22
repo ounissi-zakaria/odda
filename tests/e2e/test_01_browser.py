@@ -302,10 +302,11 @@ async def test_stale_lock_reads_closed(odda_session) -> None:
         record = h.data_dir / "browsers" / "qwert"
         (record / "profile").mkdir(parents=True)
         (record / "userscripts-extension").mkdir()
-        # Same-host lock with a dead pid: Chrome checks /proc, sees the
-        # owner is gone, and reclaims the lock silently. A foreign
-        # hostname would make Chrome pop its "profile in use on another
-        # computer" dialog instead — never fake the hostname here.
+        # Same-host lock with a dead pid: odda's signal-0 probe sees the
+        # owner is gone, and Chrome reclaims the lock silently at
+        # launch. A foreign hostname would make Chrome pop its "profile
+        # in use on another computer" dialog instead — never fake the
+        # hostname here.
         (record / "profile" / "SingletonLock").symlink_to(f"{platform.node()}-{dead}")
 
         assert await h.call_json("browser_list", {}) == [

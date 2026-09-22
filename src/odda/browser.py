@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+import os
 import platform
 import re
 import secrets
@@ -296,43 +297,31 @@ def _singleton_lock_pid(profile_dir: Path) -> int | None:
     return None
 
 
-def _process_cmdline(pid: int) -> bytes | None:
-    """Return a process's cmdline bytes, or ``None`` if it is not running.
+def _process_alive(pid: int) -> bool:
+    """Whether a process with this pid exists (stdlib signal-0 probe).
 
-    Reads /proc where available (Linux); falls back to ``ps`` (macOS).
+    ``PermissionError`` means the pid is alive but owned by another
+    user — treated as alive (locked) rather than guessed about.
     """
     try:
-        return Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
         pass
-    ps = shutil.which("ps")
-    if ps is None:
-        return None
-    try:
-        proc = subprocess.run(  # noqa: S603
-            [ps, "-p", str(pid), "-o", "command="],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return proc.stdout if proc.returncode == 0 else None
+    return True
 
 
 def _open_elsewhere(profile_dir: Path) -> bool:
-    """Whether a Chrome is live on ``profile_dir`` from outside this process.
+    """Whether a Chrome is live on ``profile_dir`` outside this process.
 
-    True iff the profile's SingletonLock encodes a live pid whose cmdline
-    references this exact profile dir. The pid check is what makes a
-    kill -9's stale lock read as closed; nothing about the state is
-    stored, so crashes need no reconciliation (ADR-0032).
+    True iff the profile's SingletonLock exists and the pid it encodes
+    is alive. The pid check is what makes a kill -9's stale lock read
+    as closed; nothing about the state is stored, so crashes need no
+    reconciliation (ADR-0032).
     """
     pid = _singleton_lock_pid(profile_dir)
-    if pid is None:
-        return False
-    cmdline = _process_cmdline(pid)
-    return cmdline is not None and str(profile_dir).encode() in cmdline
+    return pid is not None and _process_alive(pid)
 
 
 def init_chrome_profile() -> dict[str, Any]:
