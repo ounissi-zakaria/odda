@@ -10,7 +10,7 @@ The `userscript_*` tools manage JavaScript helpers that auto-run at `document_st
 
 ## Storage and scope
 
-Userscripts are stored **per-browser** on disk under `.odda/browsers/<browser_id>/userscripts/<name>/script.js`. Each browser gets its own Chrome extension that inlines that browser's installed userscripts and is loaded when that browser is opened. A userscript installed on one browser never reaches another — `browser_id` is the scope key, and identifiers are five-letter tokens unique for the data dir's lifetime (never reused), so a new session's browser can never inherit an old session's scripts. A browser you open starts with only the default userscripts (below).
+Userscripts are stored **per-browser** on disk under `.odda/browsers/<browser_id>/userscripts/<name>/script.js`. Each browser gets its own Chrome extension that inlines that browser's installed userscripts and is loaded when that browser is opened. A userscript installed on one browser never reaches another — `browser_id` is the scope key, and identifiers are five-letter tokens never assigned to a different browser than the one that first claimed them, so a new browser can never inherit an old browser's scripts. A browser you open starts with only the default userscripts (below); reopening a closed browser (see `browser_open`) brings its installed userscripts back with it.
 
 ## Behavior notes
 

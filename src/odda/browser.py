@@ -248,22 +248,91 @@ def _headless_launch_user_agent(chrome_executable: str) -> str | None:
     )
 
 
-def _prepare_user_data_dir() -> str:
-    """Create a temp user data dir, optionally seeded from the base profile.
+# A Browser record is its directory: browsers/<token>/profile under the
+# data dir (ADR-0032). Directories without a profile/ (legacy numeric
+# dirs, pre-record userscript-only dirs) are not records: never listed,
+# never openable.
+_BROWSER_TOKEN_RE = re.compile(r"[a-z]{5}")
 
-    The base profile is slimmed once by :func:`_slim_base_profile` during
-    :func:`init_chrome_profile`, so the copy here is a plain ``copytree`` (no
-    per-launch filtering).
+
+def _record_profile_dir(browser_id: str) -> Path:
+    """Return the profile dir of the Browser record ``browser_id``."""
+    return userscript_mod.browsers_root() / browser_id / "profile"
+
+
+def _prepare_record_profile(browser_id: str) -> str:
+    """Create-or-return a record's profile dir as Chrome's user data dir.
+
+    A new record (no profile dir yet) is seeded from the Base profile at
+    creation — never on reopen, so each record diverges from the seed
+    with use. The base profile is slimmed once by
+    :func:`_slim_base_profile` during :func:`init_chrome_profile`, so the
+    copy here is a plain ``copytree`` (no per-launch filtering).
 
     Returns:
-        Path to a temporary directory that can be used as Chrome's
-        user data directory.
+        Path to the record's profile directory.
     """
-    temp_dir = tempfile.mkdtemp(prefix="odda_")
-    if BASE_PROFILE_DIR.is_dir():
-        with suppress(OSError):
-            shutil.copytree(BASE_PROFILE_DIR, temp_dir, dirs_exist_ok=True)
-    return temp_dir
+    profile_dir = _record_profile_dir(browser_id)
+    if not profile_dir.is_dir():
+        profile_dir.mkdir(parents=True)
+        if BASE_PROFILE_DIR.is_dir():
+            with suppress(OSError):
+                shutil.copytree(BASE_PROFILE_DIR, profile_dir, dirs_exist_ok=True)
+    return str(profile_dir)
+
+
+def _singleton_lock_pid(profile_dir: Path) -> int | None:
+    """Return the pid encoded in Chrome's SingletonLock symlink, or ``None``.
+
+    Linux/macOS Chrome renders the lock as a symlink to
+    ``<hostname>-<pid>``; anything unreadable (absent, plain file,
+    foreign format) counts as no lock.
+    """
+    with suppress(OSError):
+        target = str((profile_dir / "SingletonLock").readlink())
+        _, sep, pid_part = target.rpartition("-")
+        if sep and pid_part.isdigit():
+            return int(pid_part)
+    return None
+
+
+def _process_cmdline(pid: int) -> bytes | None:
+    """Return a process's cmdline bytes, or ``None`` if it is not running.
+
+    Reads /proc where available (Linux); falls back to ``ps`` (macOS).
+    """
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        pass
+    ps = shutil.which("ps")
+    if ps is None:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [ps, "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _open_elsewhere(profile_dir: Path) -> bool:
+    """Whether a Chrome is live on ``profile_dir`` from outside this process.
+
+    True iff the profile's SingletonLock encodes a live pid whose cmdline
+    references this exact profile dir. The pid check is what makes a
+    kill -9's stale lock read as closed; nothing about the state is
+    stored, so crashes need no reconciliation (ADR-0032).
+    """
+    pid = _singleton_lock_pid(profile_dir)
+    if pid is None:
+        return False
+    cmdline = _process_cmdline(pid)
+    return cmdline is not None and str(profile_dir).encode() in cmdline
 
 
 def init_chrome_profile() -> dict[str, Any]:
@@ -274,8 +343,8 @@ def init_chrome_profile() -> dict[str, Any]:
     ``--user-data-dir=<BASE_PROFILE_DIR>`` plus the minimal first-run
     flags, and blocks until the user closes the window. After close, slims
     Chrome-managed junk from the profile once (so each subsequent seed copy
-    stays small). The configured profile is then copied by
-    :func:`_prepare_user_data_dir` into each isolated browser session.
+    stays small). The configured profile is then copied into each new
+    Browser record at creation (:func:`_prepare_record_profile`).
 
     Returns:
         ``{"chrome": <path>, "profile_dir": <path>, "status": "closed"}``.
@@ -2039,43 +2108,88 @@ class BrowserManager:
                 continue
             return token
 
-    def list_instances(self) -> list[dict]:
-        """List open browser instances with tab counts.
+    def list_instances(self) -> list[dict[str, Any]]:
+        """List every Browser record with its open state (ADR-0032).
 
-        Backs the ``browser_list`` tool and the session's
-        shutdown sweep. Returns ``[{browser_id, tab_count}]`` in creation
-        order (tokens sort randomly, so insertion order — which the dict
-        preserves — is the only meaningful one), with ``tab_count`` as
-        ``len(_tabs)`` (raw — may include pages whose underlying Chrome
-        has died if no close event fired).
+        Backs the ``browser_list`` tool. This session's browsers come
+        from the manager (state ``open``, with their raw ``tab_count``);
+        the data dir's other records join them — ``open in another
+        session`` when a live Chrome holds the profile's SingletonLock
+        elsewhere, ``closed`` otherwise. Closed records carry no
+        ``tab_count``: their Chrome is gone, not the record. Rows sort
+        by token — alphabetical is the only stable order across records
+        this session did not create. Directories without a ``profile/``
+        are not records and never appear.
         """
-        return [
-            {
-                "browser_id": bid,
-                "tab_count": len(inst._tabs),  # noqa: SLF001
-            }
-            for bid, inst in self._instances.items()
-        ]
+        browsers_root = userscript_mod.browsers_root()
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for bid, inst in self._instances.items():
+            seen.add(bid)
+            rows.append(
+                {
+                    "browser_id": bid,
+                    "state": "open",
+                    "tab_count": len(inst._tabs),  # noqa: SLF001
+                }
+            )
+        with suppress(OSError):
+            for entry in browsers_root.iterdir():
+                token = entry.name
+                if token in seen or not _BROWSER_TOKEN_RE.fullmatch(token):
+                    continue
+                profile_dir = _record_profile_dir(token)
+                if not profile_dir.is_dir():
+                    continue  # not a record: legacy or userscript-only dir
+                state = (
+                    "open in another session"
+                    if _open_elsewhere(profile_dir)
+                    else "closed"
+                )
+                rows.append({"browser_id": token, "state": state})
+        rows.sort(key=lambda row: row["browser_id"])
+        return rows
+
+    async def close_all(self) -> None:
+        """Close every browser this session has open.
+
+        Backs the session shutdown sweep. Only in-process instances —
+        records on disk (closed or foreign) are not this session's to
+        close.
+        """
+        for browser_id in list(self._instances):
+            await self.close_instance(browser_id)
 
     def _require_instance(self, browser_id: str) -> BrowserInstance:
         """Return the BrowserInstance for browser_id or raise.
 
         Input is case-insensitive (ADR-0030): tokens are stored and
         emitted lowercase, and uppercased spellings resolve to the same
-        browser.
+        browser. A closed record raises "is not open" — the browser
+        exists (it lists, it can be reopened), it just is not running;
+        an unknown id raises "not found".
         """
-        inst = self._instances.get(browser_id.lower())
+        bid = browser_id.lower()
+        inst = self._instances.get(bid)
         if inst is None:
+            if _record_profile_dir(bid).is_dir():
+                raise BrowserOperationError(f"Browser {browser_id} is not open.")
             raise BrowserOperationError(f"Browser {browser_id} not found.")
         return inst
 
-    async def _create_instance(self, *, headless: bool = True) -> BrowserInstance:
+    async def _create_instance(
+        self, *, browser_id: str | None = None, headless: bool = True
+    ) -> BrowserInstance:
         """Create and register a new BrowserInstance.
 
-        Registers the initial page (the one Chrome creates at launch) and
-        returns the instance with at least one tab_id assigned.
+        With ``browser_id`` given, reopens that closed record on its own
+        profile dir (ADR-0032); without, mints a fresh token and creates
+        its record, seeded from the Base profile. Registers the initial
+        page (the one Chrome creates at launch) and returns the instance
+        with at least one tab_id assigned.
         """
-        browser_id = self._new_browser_id()
+        if browser_id is None:
+            browser_id = self._new_browser_id()
 
         # Proxy credentials whose username is the browser's identifier
         # token: the proxy's auth addon stamps them onto flow metadata
@@ -2091,7 +2205,7 @@ class BrowserManager:
                 "password": PROXY_AUTH_PASSWORD,
             }
 
-        user_data_dir = _prepare_user_data_dir()
+        user_data_dir = _prepare_record_profile(browser_id)
         chrome_executable = _find_chrome_executable()
 
         # Headless UA normalization: probe once, off the event loop.
@@ -2159,14 +2273,28 @@ class BrowserManager:
         self._instances[browser_id] = instance
         return instance
 
-    async def open(self, *, headless: bool = True) -> dict[str, Any]:
-        """Open a new Chrome browser window.
+    async def open(
+        self, *, browser_id: str | None = None, headless: bool = True
+    ) -> dict[str, Any]:
+        """Open a browser: a fresh one, or reopen a closed record (ADR-0032).
+
+        Without ``browser_id``, launches a new browser under a fresh
+        token, its profile seeded from the Base profile. With
+        ``browser_id``, relaunches that closed record on its own profile
+        — same identity, same userscripts, flows keep attributing to the
+        token. Refuses an id that is already open in this session, open
+        in another session, or unknown: agents never mint ids, a fresh
+        browser only comes from bare ``open``.
 
         Returns:
             Dict with browser_id, the initial tab_id, and a status.
         """
+        bid = browser_id.lower() if browser_id is not None else None
         try:
-            instance = await self._create_instance(headless=headless)
+            if bid is None:
+                instance = await self._create_instance(headless=headless)
+            else:
+                instance = await self._reopen_instance(bid, headless=headless)
         except BrowserOperationError:
             raise
         except Exception as e:
@@ -2177,6 +2305,28 @@ class BrowserManager:
             "tab_id": initial_tab_id,
             "status": "launched",
         }
+
+    async def _reopen_instance(
+        self, browser_id: str, *, headless: bool
+    ) -> BrowserInstance:
+        """Relaunch a closed record on its own profile (ADR-0032).
+
+        The record boundary is its ``profile/`` dir: a directory without
+        one is not a record. Openness comes from Chrome's SingletonLock
+        — a live Chrome on this profile dir, here or in another session,
+        is refused; a stale lock (dead pid) is Chrome's to reclaim at
+        launch.
+        """
+        if browser_id in self._instances:
+            raise BrowserOperationError(f"Browser {browser_id} is already open.")
+        profile_dir = _record_profile_dir(browser_id)
+        if not profile_dir.is_dir():
+            raise BrowserOperationError(f"Browser {browser_id} not found.")
+        if _open_elsewhere(profile_dir):
+            raise BrowserOperationError(
+                f"Browser {browser_id} is open in another session."
+            )
+        return await self._create_instance(browser_id=browser_id, headless=headless)
 
     async def close_instance(self, browser_id: str) -> dict[str, Any]:
         """Close a browser instance by ID.

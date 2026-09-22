@@ -31,7 +31,7 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
         assert tid == 1
 
         r = await h.call_json("browser_list", {})
-        assert r == [{"browser_id": bid, "tab_count": 1}]
+        assert r == [{"browser_id": bid, "state": "open", "tab_count": 1}]
 
         title = await h.eval(bid, tid, "document.title")
         assert title == "Listener Test"
@@ -43,7 +43,9 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
         assert str(shot).endswith(".jpeg")
 
         await h.call("browser_close", {"browser_id": bid})
-        assert await h.call_json("browser_list", {}) == []
+        assert await h.call_json("browser_list", {}) == [
+            {"browser_id": bid, "state": "closed"}
+        ]
 
 
 async def test_data_dir_ownership_and_isolation(odda_session, tmp_path) -> None:

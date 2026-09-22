@@ -1,0 +1,12 @@
+# Durable browser records with lock-derived open state
+
+Browsers were ephemeral: each launch copied the global Base profile into a throwaway `/tmp` user-data-dir that was leaked on close, `browser_list` showed only live instances, and ADR-0030's never-reuse rule existed because reopening an id would silently reassign an old browser's identity. Now each browser's Chrome user-data-dir lives at `.odda/browsers/<id>/profile` from its first launch, making the Browser a durable per-project record: close keeps the profile, `browser_list` lists closed records and records open in other sessions, `browser_open(<id>)` reopens a closed record, and opening a browser that is open — here or in another session — errors.
+
+Open state is never stored: it is derived. This session's `BrowserManager` owns the answer for its own browsers; for everything else, a record is open iff Chrome's `SingletonLock` sits in its profile dir and the pid it encodes is alive running Chrome on that dir. Crashes therefore need no reconciliation (dead pid ⇒ closed), and two sessions racing to open the same closed record are arbitrated by Chrome itself — the second launch on a locked dir fails and surfaces as a normal `browser_open` error.
+
+This narrows ADR-0030: a token is never assigned to a *different* browser, but the same browser keeps its token and can be reopened, so flows attribution stays continuous across sessions. Reopen restores the profile but always starts one fresh tab (no session restore) with the caller's `headless` choice; fresh browsers still seed from the Base profile, reopen never re-seeds. A record is exactly its directory — there is no delete tool and no profile slimming; `rm -rf .odda/browsers/<id>/` while closed removes the record, and profiles grow with use. Directories without a `profile/` (legacy numeric dirs, pre-record 5-letter userscript dirs) are not records: never listed, never openable; their orphaned userscripts are left on disk.
+
+## Considered Options
+
+- An odda-written state file (`state.json`) instead of deriving state from Chrome's lock — rejected: a crashed session strands the flag, and every reader then needs pid-liveness staleness checks, which is the lock derivation plus a file that can lie.
+- Record = any `browsers/<token>/` directory, with profile backfilled from the Base profile on first reopen — rejected: weaker invariant (record ⇔ profile) and backfill code to orphan-proof userscript state nobody asked to keep.

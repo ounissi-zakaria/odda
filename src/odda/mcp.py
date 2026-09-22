@@ -171,8 +171,7 @@ async def odda_lifespan(
     try:
         yield OddaState(proxy=proxy, browser=browser)
     finally:
-        for browser_id in [b["browser_id"] for b in browser.list_instances()]:
-            await browser.close_instance(browser_id)
+        await browser.close_all()
         await proxy.shutdown()
 
 
@@ -248,23 +247,35 @@ _register_doc_resources()
 @odda_tool
 async def browser_open(
     *,
+    browser_id: str | None = None,
     headless: bool = True,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Open a new Chrome browser window with one blank tab.
+    """Open a browser: a fresh one, or reopen a closed browser record.
 
-    Returns browser_id (a five-letter token, unique for the data dir's
-    lifetime) and the initial tab_id used to target every other tool.
-    All browser traffic is captured as flows under .odda/flows/ —
-    driving the browser is traffic capture (see odda://docs/flows).
+    Without browser_id, launches a new browser under a fresh five-letter
+    token (unique for the data dir's lifetime), its Chrome profile seeded
+    once from the global Base profile. With browser_id, reopens that
+    closed record: same token, same profile and userscripts — logins and
+    site data come back, tabs start fresh. Ids are case-insensitive.
+    Refuses an id that is already open (here or in another session) or
+    unknown. All browser traffic is captured as flows under .odda/flows/
+    — driving the browser is traffic capture (see odda://docs/flows).
     """
-    return await ctx.request_context.lifespan_context.browser.open(headless=headless)
+    return await ctx.request_context.lifespan_context.browser.open(
+        browser_id=browser_id, headless=headless
+    )
 
 
 @mcp_server.tool()
 @odda_tool
 async def browser_close(browser_id: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
-    """Close a browser instance by id."""
+    """Close a browser instance by id.
+
+    Kills the Chrome process; the browser's record — its profile and
+    userscripts under .odda/browsers/<id>/ — persists and can be
+    reopened later with browser_open(browser_id=...).
+    """
     return await ctx.request_context.lifespan_context.browser.close_instance(browser_id)
 
 
@@ -274,7 +285,13 @@ async def browser_list(
     *,
     ctx: Context[OddaState],
 ) -> list[dict[str, Any]]:
-    """List every tracked browser with its tab count."""
+    """List every browser record in the data dir, alphabetically.
+
+    Rows carry browser_id and state: "open" (running here, with
+    tab_count), "open in another session" (another MCP session on this
+    project has it — it cannot be opened or driven from here), or
+    "closed" (no tab_count; reopenable via browser_open(browser_id=...)).
+    """
     return _json_result(ctx.request_context.lifespan_context.browser.list_instances())
 
 

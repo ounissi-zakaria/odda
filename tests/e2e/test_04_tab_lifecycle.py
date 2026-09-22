@@ -108,8 +108,9 @@ async def test_multiple_browsers_isolated_and_ids_never_reused(
         await h.call("browser_close", {"browser_id": bid3})
         await h.call("browser_close", {"browser_id": bid2})
 
-        # A closed browser_id is not reused.
+        # A closed browser_id is never reassigned to a new browser, and
+        # targeting it reports the record's state, not "not found".
         err = await h.call_error(
             "navigate", {"browser_id": bid2, "tab_id": 1, "url": "http://x"}
         )
-        assert err == f"Browser {bid2} not found."
+        assert err == f"Browser {bid2} is not open."

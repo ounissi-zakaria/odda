@@ -21,8 +21,16 @@ _Avoid_: project dir, state dir, .odda dir
 ## Browser sessions
 
 **Browser identifier**:
-A five-letter lowercase token (`a`–`z`) that names one Browser. Unique for the Data dir's lifetime and never reused: flows and per-browser storage outlive the MCP session that created them, and a record from a past session must never collide with a future browser. Tool input is case-insensitive and normalized to lowercase; odda always emits lowercase. The scope key for per-browser state (installed Userscripts, userscript extension).
+A five-letter lowercase token (`a`–`z`) that names one Browser. A token is never assigned to a different Browser than the one that first claimed it: flows and per-browser storage outlive the MCP session that created them, so a token from a past session must never name a new browser — but the same Browser keeps its token forever and can be reopened. Tool input is case-insensitive and normalized to lowercase; odda always emits lowercase. The scope key for per-browser state (installed Userscripts, userscript extension).
 _Avoid_: browser number, session browser id, numeric id
+
+**Browser record**:
+The durable, per-project form of a Browser: a directory under the Data dir holding the browser's persistent Chrome profile and its per-browser state (Userscripts, userscript extension). Created at the browser's first open; survives close and MCP session teardown; a directory without the profile is not a record. Its states are open (a Chrome is running on its profile, in this or another session) and closed (none is; it can be opened).
+_Avoid_: saved browser, browser folder, browser entry
+
+**Base profile**:
+The global seed Chrome profile at `~/.config/odda/chrome-profile`, built once by the `init-chrome-profile` helper. Copied into a Browser record when the browser is first created — never on reopen — so every record diverges from the seed with use.
+_Avoid_: template profile, master profile, default profile
 
 **UA normalization**:
 Launch-time behavior of headless browsers: odda derives a headed Chrome User-Agent from the installed Chrome's real version and the driver applies it across the whole browser context, so the wire User-Agent header and page-visible `navigator.userAgent` both present a headed browser. Covers every page of a headless browser, including tabs opened later; headed launches keep Chrome's own UA.
