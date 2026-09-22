@@ -721,6 +721,82 @@ async def event_listeners(
     )
 
 
+@mcp_server.tool(structured_output=False)
+@odda_tool
+async def cookies_list(
+    browser_id: str, url: str | None = None, *, ctx: Context[OddaState]
+) -> list[dict[str, Any]]:
+    """Return a browser's cookie jar as one JSON array.
+
+    Every cookie of its Chrome profile, including httpOnly cookies
+    that page JavaScript cannot read (eval on document.cookie is blind
+    to them). Each cookie carries name, value, domain, path, expires
+    (epoch seconds, -1 for a session cookie), httpOnly, secure, and
+    sameSite. Pass url to scope the list to the cookies that URL would
+    receive.
+    """
+    return _json_result(
+        await ctx.request_context.lifespan_context.browser.cookies_list(browser_id, url)
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def cookies_clear(
+    browser_id: str,
+    name: str | None = None,
+    domain: str | None = None,
+    path: str | None = None,
+    *,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Delete cookies from a browser's jar.
+
+    httpOnly cookies included — page JavaScript cannot delete them.
+    Filters are exact-match and combine (name, domain, path); with no
+    filter the whole jar is wiped. Returns {"cleared": N}, the number
+    of cookies removed — e.g. clear one site's session with domain
+    while every other site survives.
+    """
+    return await ctx.request_context.lifespan_context.browser.cookies_clear(
+        browser_id, name, domain, path
+    )
+
+
+@mcp_server.tool()
+@odda_tool
+async def cookies_set(
+    browser_id: str,
+    cookies: list[dict[str, Any]],
+    *,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Plant cookies into a browser's jar.
+
+    httpOnly cookies included — page JavaScript cannot set them. Each
+    cookie needs name and value, plus either url or domain and path
+    (exactly the shape cookies_list returns, so a read jar can be
+    replayed into another browser); optional httpOnly, secure,
+    sameSite ("Strict"/"Lax"/"None"), and expires (epoch seconds).
+    Returns {"set": N}. Use it to seed a session — e.g. replay a
+    captured Set-Cookie response header — before navigating.
+    """
+    for i, cookie in enumerate(cookies):
+        if (
+            not isinstance(cookie, dict)
+            or not cookie.get("name")
+            or "value" not in cookie
+        ):
+            raise ToolParamError(f"cookies[{i}] needs name and value")
+        if "url" not in cookie and ("domain" not in cookie or "path" not in cookie):
+            raise ToolParamError(f"cookies[{i}] needs url or domain and path")
+        if "url" in cookie and "domain" in cookie:
+            raise ToolParamError(f"cookies[{i}] takes url or domain and path, not both")
+    return await ctx.request_context.lifespan_context.browser.cookies_set(
+        browser_id, cookies
+    )
+
+
 @mcp_server.tool()
 @odda_tool
 async def version() -> dict[str, Any]:

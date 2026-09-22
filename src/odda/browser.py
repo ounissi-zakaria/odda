@@ -1770,6 +1770,57 @@ class BrowserInstance:
 
         return listeners
 
+    # --- cookies -------------------------------------------------------
+
+    async def cookies_list(self, url: str | None = None) -> list[dict[str, Any]]:
+        """Return the cookie jar of the Chrome profile.
+
+        Every cookie, including the httpOnly ones page JavaScript
+        cannot read. With ``url``, only the cookies that URL would
+        receive.
+        """
+        try:
+            return await self.context.cookies([url] if url is not None else None)
+        except Exception as e:
+            raise BrowserOperationError(f"Failed to list cookies: {e!s}") from e
+
+    async def cookies_clear(
+        self,
+        name: str | None = None,
+        domain: str | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete cookies from the jar — httpOnly ones included.
+
+        Filters are exact-match and combine; with none, the whole jar
+        goes. The count is a before/after diff keyed on (name, domain,
+        path), so a Set-Cookie landing mid-call is never miscounted.
+        """
+
+        def _key(c: dict[str, Any]) -> tuple[str, str, str]:
+            return (c["name"], c["domain"], c["path"])
+
+        try:
+            before = {_key(c) for c in await self.context.cookies()}
+            await self.context.clear_cookies(name=name, domain=domain, path=path)
+            after = {_key(c) for c in await self.context.cookies()}
+        except Exception as e:
+            raise BrowserOperationError(f"Failed to clear cookies: {e!s}") from e
+        return {"cleared": len(before - after)}
+
+    async def cookies_set(self, cookies: list[dict[str, Any]]) -> dict[str, Any]:
+        """Plant cookies into the jar — httpOnly ones included.
+
+        ``cookies`` are driver-shaped: name and value required, scoped
+        by url or by domain and path; httpOnly, secure, sameSite, and
+        expires optional.
+        """
+        try:
+            await self.context.add_cookies(cookies)
+        except Exception as e:
+            raise BrowserOperationError(f"Failed to set cookies: {e!s}") from e
+        return {"set": len(cookies)}
+
     # --- coverage ------------------------------------------------------
 
     async def coverage_start(self, tab_id: int) -> dict[str, Any]:
@@ -2530,6 +2581,31 @@ class BrowserManager:
         """List JS event listeners in the target tab."""
         inst = self._require_instance(browser_id)
         return await inst.list_event_listeners(tab_id)
+
+    async def cookies_list(
+        self, browser_id: str, url: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return the browser's cookie jar (httpOnly cookies included)."""
+        inst = self._require_instance(browser_id)
+        return await inst.cookies_list(url)
+
+    async def cookies_clear(
+        self,
+        browser_id: str,
+        name: str | None = None,
+        domain: str | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete cookies from the browser's jar; filters are exact-match."""
+        inst = self._require_instance(browser_id)
+        return await inst.cookies_clear(name, domain, path)
+
+    async def cookies_set(
+        self, browser_id: str, cookies: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Plant cookies into the browser's jar (httpOnly allowed)."""
+        inst = self._require_instance(browser_id)
+        return await inst.cookies_set(cookies)
 
     async def coverage_start(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Enable precise block-level coverage on the target tab."""

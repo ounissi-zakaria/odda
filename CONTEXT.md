@@ -32,6 +32,10 @@ _Avoid_: saved browser, browser folder, browser entry
 The global seed Chrome profile at `~/.config/odda/chrome-profile`, built once by the `init-chrome-profile` helper. Copied into a Browser record when the browser is first created — never on reopen — so every record diverges from the seed with use.
 _Avoid_: template profile, master profile, default profile
 
+**Cookie jar**:
+The full cookie set of one Browser: browser-scoped state living in the Browser record's Chrome profile, not per-tab state. Includes the cookies page JavaScript can neither read nor change (httpOnly, and those outside the page's domain/path) — which is why cookie state has its own tools rather than riding on `eval`. Survives close, reopen, and MCP session teardown with the record; clearing deletes permanently for that Browser.
+_Avoid_: cookie store, cookie storage, browser cookies
+
 **UA normalization**:
 Launch-time behavior of headless browsers: odda derives a headed Chrome User-Agent from the installed Chrome's real version and the driver applies it across the whole browser context, so the wire User-Agent header and page-visible `navigator.userAgent` both present a headed browser. Covers every page of a headless browser, including tabs opened later; headed launches keep Chrome's own UA.
 _Avoid_: UA spoofing, stealth mode, user-agent override
@@ -109,11 +113,11 @@ _Avoid_: separator, delimiter, line separator, framing byte
 ## Dialogs
 
 **Dialog**:
-A JavaScript modal (`alert`, `confirm`, `prompt`, `beforeunload`) that the page opens. Under odda, a dialog is a first-class open state of its tab: it stays open (never auto-accepted, never auto-dismissed), it surfaces in every same-browser tool result while open, and it gates the tab — tab-touching tools block until it is handled. The action that opened it returns with the dialog's details instead of hanging.
+A JavaScript modal (`alert`, `confirm`, `prompt`, `beforeunload`) that the page opens. Under odda, a dialog is a first-class open state of its tab: it stays open (never auto-accepted, never auto-dismissed) and it gates the tab — tab-touching tools reject until it is handled. The action that opened it returns with the dialog's details instead of hanging.
 _Avoid_: dialog interceptor, notification, popup
 
 **Dialog note**:
-The structured record of open dialogs a tool result carries while any dialog is open in the same browser: `dialogs: [{tab_id, type, message, default_value}]` appended to same-browser tool results, and `closed_dialog: {type, message}` on a `tabs_close` that closed a dialog tab. The note is read-only observation — it never handles the dialog.
+The dialog details a tool result carries when its own action opened the dialog (the trigger rule): `{dialog: {tab_id, type, message, default_value}}` in place of the normal result — plus `closed_dialog: {type, message}` on a `tabs_close` that closed a dialog tab. Read-only observation — it never handles the dialog.
 _Avoid_: dialog response, modal state, dialog hint
 
 **Dialog handling**:
