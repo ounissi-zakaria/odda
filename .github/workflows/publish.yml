@@ -1,0 +1,112 @@
+name: publish
+
+# Tag push → PyPI, tokenless (trusted publishing / OIDC).
+#
+# One tag pushed as part of a multi-ref push gets its own event, so each tag
+# publishes in its own run. GitHub does not create tag events at all when more
+# than three tags land in a single push (`events-that-trigger-workflows`, push):
+# push larger batches in groups of three, or run this workflow manually per tag.
+#
+# Actions are pinned by commit SHA (Dependabot refreshes them), and the OIDC
+# token that PyPI trusts exists only inside the publish job.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish, e.g. v0.54.1
+        required: true
+
+permissions:
+  contents: read
+
+# Re-pushing or re-running the same tag serializes (PyPI rejects a second
+# upload of the same filenames); distinct tags are distinct refs and publish
+# in parallel, which is what a multi-tag push needs.
+concurrency:
+  group: publish-${{ github.ref }}
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          # Nothing after checkout needs git credentials, and `uv build` runs
+          # third-party build backends.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Install the project's Python
+        run: uv python install
+
+      # PyPI uploads are immutable: a wrong version here cannot be fixed after
+      # the fact, only burned with another version. Catch the drift first.
+      # The tag value arrives through the environment, never interpolated into
+      # this script — git allows `$()`, quotes and newlines in tag names.
+      - name: Check tag against the three version sites
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["TAG"].removeprefix("v")
+          sites = {
+              "pyproject.toml": tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"],
+              "src/odda/__init__.py": re.search(
+                  r'^__version__ = "([^"]+)"', Path("src/odda/__init__.py").read_text(), re.M
+              ).group(1),
+              "uv.lock": next(
+                  package["version"]
+                  for package in tomllib.loads(Path("uv.lock").read_text())["package"]
+                  if package["name"] == "odda"
+              ),
+          }
+          drifted = {path: version for path, version in sites.items() if version != tag}
+          if drifted:
+              raise SystemExit(f"tag {tag} disagrees with {drifted}: bump every site, run `uv lock`, re-tag")
+          print(f"{tag} matches {', '.join(sites)}")
+          PY
+
+      - name: Build sdist and wheel
+        run: uv build --no-sources
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # The OIDC token minted for this environment is the publish authority PyPI
+    # trusts; required reviewers here would gate every publish on a human.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/odda
+    # Only the publish job gets an OIDC token; the build job runs untrusted
+    # build backends with read-only access.
+    permissions:
+      id-token: write
+    steps:
+      # No repo code runs here: an artifact is downloaded and handed to one
+      # action, so nothing from the checkout can reach the OIDC token.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      # No skip-existing: a duplicate-filename upload must fail loudly rather
+      # than no-op, or a re-pushed tag reports success while PyPI still serves
+      # the previous bytes.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

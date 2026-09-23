@@ -1,0 +1,13 @@
+version: 2
+
+updates:
+  # `publish.yml` pins its actions by commit SHA; without this the pins rot and
+  # miss upstream security fixes.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
