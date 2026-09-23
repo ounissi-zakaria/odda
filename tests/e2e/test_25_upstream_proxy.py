@@ -107,7 +107,7 @@ async def test_http_traffic_traverses_upstream(odda_session, tmp_path) -> None:
         entries = log_lines(log_path)
         assert any(
             e["kind"] == "request"
-            and f"GET http://127.0.0.1:{site.port}/?marker=up-chain-http" in e["line"]
+            and f"GET {site.base}/?marker=up-chain-http" in e["line"]
             for e in entries
         ), entries
 

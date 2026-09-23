@@ -13,9 +13,20 @@ import asyncio
 import json
 import re
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 import odda.mcp as odda_mcp
 from tests.e2e.conftest import fixture_site, odda_session
+
+
+def _site_pathname(fx, name: str) -> str:
+    """Pathname of ``name`` under the fixture site.
+
+    The site is mounted under a path (one shared server serves a directory
+    per site content), so the expected pathname is derived from the base
+    URL rather than assumed to be ``/``.
+    """
+    return f"{urlparse(fx.base).path}/{name}"
 
 
 def _pluck_ref(snapshot: str, label: str) -> str:
@@ -230,8 +241,28 @@ async def test_user_close_clears_and_unblocks(odda_session) -> None:
                 f"Tab {tid} in browser {bid} has no open dialog.",
             )
 
-            # The rejected call is now a plain success: retry runs it.
-            assert await h.eval(bid, tid, "1 + 1") == "2"
+            # The rejected call is now a plain success: retry runs it. The
+            # unblock is not synchronous with the user's close, though:
+            # handle_dialog's already-closed branch deliberately leaves the
+            # registry entry to the parked probe (a re-registered chained
+            # dialog must not be cleared by a stale call), and that probe's
+            # round trip through the renderer can trail the close by more
+            # than the gap between these two calls — CPU load widens it. Poll
+            # to a deadline; the retry is what the tool's message prescribes.
+            for attempt in range(200):
+                r = await h.client.call_tool(
+                    "eval", {"browser_id": bid, "tab_id": tid, "js": "1 + 1"}
+                )
+                if not r.is_error:
+                    assert r.content[0].text == "2"
+                    break
+                # Wait on *this* unblock, never on some other failure.
+                assert "has an open confirm dialog" in r.content[0].text
+                assert attempt < 199, (
+                    "eval still rejected after the user closed the dialog: "
+                    f"{r.content[0].text}"
+                )
+                await asyncio.sleep(0.05)
             assert "Confirm me" in await h.page_snapshot(bid, tid)
             assert await h.wait_for(
                 bid, tid, "window.__confirmResult === true", timeout=5
@@ -291,7 +322,12 @@ async def test_beforeunload_dialog_on_navigate(odda_session) -> None:
         await h.call(
             "dialog_handle", {"browser_id": bid, "tab_id": tid, "action": "accept"}
         )
-        await h.wait_for(bid, tid, "location.pathname === '/index.html'", timeout=5)
+        await h.wait_for(
+            bid,
+            tid,
+            f"location.pathname === '{_site_pathname(fx, 'index.html')}'",
+            timeout=5,
+        )
 
         # dismiss: navigation stays. Reload dialogs.html first (the
         # page navigated away on accept) and re-arm before trying again.
@@ -305,7 +341,12 @@ async def test_beforeunload_dialog_on_navigate(odda_session) -> None:
         await h.call(
             "dialog_handle", {"browser_id": bid, "tab_id": tid, "action": "dismiss"}
         )
-        await h.wait_for(bid, tid, "location.pathname === '/dialogs.html'", timeout=5)
+        await h.wait_for(
+            bid,
+            tid,
+            f"location.pathname === '{_site_pathname(fx, 'dialogs.html')}'",
+            timeout=5,
+        )
 
 
 async def test_tabs_open_onload_dialog_returns_details(odda_session) -> None:
@@ -338,5 +379,8 @@ async def test_tabs_open_onload_dialog_returns_details(odda_session) -> None:
         )
         # The parked goto finished; the new tab is at the target URL.
         await h.wait_for(
-            bid, tid + 1, "location.pathname === '/onload-dialog.html'", timeout=5
+            bid,
+            tid + 1,
+            f"location.pathname === '{_site_pathname(fx, 'onload-dialog.html')}'",
+            timeout=5,
         )

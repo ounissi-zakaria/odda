@@ -27,12 +27,12 @@ If you add, remove, or change a dependency in `pyproject.toml`, regenerate the l
 
 ```bash
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
-pytest                          # full e2e suite (4 xdist workers, from pytest.ini addopts)
+pytest                          # full e2e suite (3 xdist workers — see pytest.ini)
 pytest tests/e2e/test_02_userscripts.py   # one file
 pytest tests/e2e -n 0           # sequential (also the mode for pdb — xdist breaks it)
 ```
 
-The suite runs on the host (Chrome on `PATH` is required — the same requirement as usage). It's pytest modules under `tests/e2e/` (one module per former scrut doc, named `test_NN_<slug>.py`) driving the in-process MCP server (`Client(odda.mcp.mcp_server)`) with real Chrome, real mitmproxy, and real fixture-server subprocesses. Each test gets its own MCP session, per-test tmp data dir, and auto-picked fixture ports, so parallel workers never collide. Iterate on one file first, then run the full suite to confirm nothing else broke. `tests/e2e/Dockerfile` still exists as the seed image for a future CI runner but is not part of the documented workflow.
+The suite runs on the host (Chrome on `PATH` is required — the same requirement as usage). It's pytest modules under `tests/e2e/` (one module per former scrut doc, named `test_NN_<slug>.py`) driving the in-process MCP server (`Client(odda.mcp.mcp_server)`) with real Chrome, real mitmproxy, and real fixture-server subprocesses. Each test gets its own MCP session and per-test tmp data dir, and fixture ports are auto-picked, so parallel workers never collide — the request-stateless fixture servers (`fixture_site` per content, `dyn_server` per worker) are booted once and shared instead of restarted per test (see `conftest.py`). Iterate on one file first, then run the full suite to confirm nothing else broke. `tests/e2e/Dockerfile` still exists as the seed image for a future CI runner but is not part of the documented workflow.
 
 **When running tests, read the full output.** Do not pipe test commands through `grep`, `head`, `tail`, or any truncation. Grep for a pass/fail marker and you will miss the failure context (the diff block, the stderr traceback, which doc actually failed) and end up re-running the suite to recover what the first run already told you. The Bash tool captures the full output to a file when it exceeds the display window — read that file with the Read tool (offset/limit) instead of truncating on the shell side.
 

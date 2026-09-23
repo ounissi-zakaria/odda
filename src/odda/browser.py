@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import functools
 import logging
 import os
 import platform
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import weakref
 from contextlib import suppress
 from io import BytesIO
 from pathlib import Path
@@ -208,6 +210,7 @@ def _find_chrome_executable() -> str:
     raise RuntimeError(msg)
 
 
+@functools.cache
 def _headless_launch_user_agent(chrome_executable: str) -> str | None:
     """Build a headed-Chrome UA from the installed binary, or ``None``.
 
@@ -219,6 +222,8 @@ def _headless_launch_user_agent(chrome_executable: str) -> str | None:
     wire header and page-visible ``navigator.userAgent`` for every page in
     the context. The version is probed from the actual binary; any failure
     returns ``None`` and the launch proceeds without an override.
+    Memoized per binary path: the probe is a ``--version`` subprocess, and
+    one installed binary's UA cannot change under a running process.
     """
     try:
         proc = subprocess.run(  # noqa: S603
@@ -646,18 +651,15 @@ class BrowserInstance:
     def __init__(
         self,
         browser_id: str,
-        playwright: Playwright,
         context: BrowserContext,
     ) -> None:
         """Initialize a browser instance.
 
         Args:
             browser_id: Unique ID for this browser.
-            playwright: Patchright Playwright object.
             context: BrowserContext (persistent context for this browser).
         """
         self.browser_id = browser_id
-        self.playwright = playwright
         self.context = context
         self._next_tab_id: int = 1
         self._tabs: dict[int, Page] = {}
@@ -2111,11 +2113,30 @@ class BrowserInstance:
         with suppress(Exception):
             if self.context:
                 await self.context.close()
-        with suppress(Exception):
-            if self.playwright:
-                await self.playwright.stop()
         self.context = None  # type: ignore[assignment]
-        self.playwright = None  # type: ignore[assignment]
+
+
+# One patchright driver per event loop, per process. Starting a driver
+# spawns a Node process and handshakes with it (~0.3 s of every
+# browser_open); a driver serves any number of Chrome contexts, so it is
+# kept for the loop's lifetime instead of being stopped with the browser
+# that happened to start it. Keyed weakly by loop: a driver's connection
+# belongs to the loop that started it, and a finished loop's driver goes
+# with it (the Node process exits once the process holding its pipes
+# does).
+_DRIVERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Playwright] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+async def _driver() -> Playwright:
+    """Return this event loop's patchright driver, starting it on first use."""
+    loop = asyncio.get_running_loop()
+    driver = _DRIVERS.get(loop)
+    if driver is None:
+        driver = await async_playwright().start()
+        _DRIVERS[loop] = driver
+    return driver
 
 
 class BrowserManager:
@@ -2191,14 +2212,16 @@ class BrowserManager:
         return rows
 
     async def close_all(self) -> None:
-        """Close every browser this session has open.
+        """Close every browser this session has open, concurrently.
 
         Backs the session shutdown sweep. Only in-process instances —
         records on disk (closed or foreign) are not this session's to
-        close.
+        close. Closing is independent per browser (its own context), so
+        the sweep gathers instead of paying each Chrome teardown in turn.
         """
-        for browser_id in list(self._instances):
-            await self.close_instance(browser_id)
+        await asyncio.gather(
+            *(self.close_instance(bid) for bid in list(self._instances))
+        )
 
     def _require_instance(self, browser_id: str) -> BrowserInstance:
         """Return the BrowserInstance for browser_id or raise.
@@ -2216,6 +2239,28 @@ class BrowserManager:
                 raise BrowserOperationError(f"Browser {browser_id} is not open.")
             raise BrowserOperationError(f"Browser {browser_id} not found.")
         return inst
+
+    @staticmethod
+    async def _seed_proxy_auth(initial_page: Page) -> None:
+        """Seed proxy-auth attribution (ADR-0031) with one canary fetch.
+
+        Drives one canary request through the browser via in-page fetch. The
+        proxy's auth addon challenges it, Playwright's auth handler answers
+        with this browser's credentials, and Chrome caches them
+        profile-wide — every later connection authenticates preemptively.
+        Both canary legs are synthesized by the addon (reserved TLD, no
+        DNS) and tagged so the flow writer drops them. A fetch, not a goto:
+        it must not commit a main-frame navigation — the initial tab's
+        first navigation belongs to the agent, and patchright's ai-mode
+        refs go frame-prefixed (f<N>eN) once a frame has navigated more
+        than once. Silent by design: a failure here degrades flows to null
+        attribution, never wrong attribution.
+        """
+        with suppress(Exception):
+            await asyncio.wait_for(
+                initial_page.evaluate(f"fetch('{AUTH_CANARY_URL}').catch(() => 0)"),
+                15,
+            )
 
     async def _create_instance(
         self, *, browser_id: str | None = None, headless: bool = True
@@ -2254,7 +2299,7 @@ class BrowserManager:
             if headless
             else None
         )
-        playwright = await async_playwright().start()
+        playwright = await _driver()
         context = await playwright.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             executable_path=chrome_executable,
@@ -2276,7 +2321,7 @@ class BrowserManager:
             ),
         )
 
-        instance = BrowserInstance(browser_id, playwright, context)
+        instance = BrowserInstance(browser_id, context)
 
         # Register the initial page (Chrome opens one automatically).
         # context.on('page') may have already fired for it during context
@@ -2286,26 +2331,13 @@ class BrowserManager:
         if not any(p is initial_page for p in instance._tabs.values()):  # noqa: SLF001
             instance._register_page(initial_page)  # noqa: SLF001
 
-        # Load the userscript extension (best-effort).
-        await instance._load_userscript_extension()  # noqa: SLF001
-
-        # Seed proxy-auth attribution (ADR-0031): drive one canary request
-        # through the browser via in-page fetch. The proxy's auth addon
-        # challenges it, Playwright's auth handler answers with this
-        # browser's credentials, and Chrome caches them profile-wide —
-        # every later connection authenticates preemptively. Both canary
-        # legs are synthesized by the addon (reserved TLD, no DNS) and
-        # tagged so the flow writer drops them. A fetch, not a goto: it
-        # must not commit a main-frame navigation — the initial tab's
-        # first navigation belongs to the agent, and patchright's ai-mode
-        # refs go frame-prefixed (f<N>eN) once a frame has navigated more
-        # than once. Silent by design: a failure here degrades flows to
-        # null attribution, never wrong attribution.
-        with suppress(Exception):
-            await asyncio.wait_for(
-                initial_page.evaluate(f"fetch('{AUTH_CANARY_URL}').catch(() => 0)"),
-                15,
-            )
+        # Both of the launch's best-effort side effects are independent —
+        # the userscript extension loads over CDP while the canary fetch
+        # exercises the proxy — so they overlap instead of queueing.
+        await asyncio.gather(
+            instance._load_userscript_extension(),  # noqa: SLF001
+            self._seed_proxy_auth(initial_page),
+        )
 
         # The initial page may have arrived before the context.on("page")
         # handler was wired, or it may re-fire; the handler guards against

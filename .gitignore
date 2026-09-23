@@ -231,3 +231,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local benchmark harness (autoresearch session tooling): lives in the
+# worktree, never in the repo.
+/autoresearch.sh
+/bench/

@@ -20,22 +20,28 @@ Maps the scrut suite's per-document model onto pytest:
   H1+H2 via ALPN, dynamic ``?body=&status=&header=&gzip=1&race=``
   responses), and ``script_server`` (raw-socket fixtures). Their
   blocking launch parts run in worker threads — the event loop that
-  carries the in-process mitmproxy must never block.
+  carries the in-process mitmproxy must never block. Booting is
+  amortized where it is pure overhead: the request-stateless
+  ``dyn_server`` keeps one instance per worker process (``_shared_dyn_server``)
+  and the TLS cert pair is generated once per process (``_tls_cert``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -110,14 +116,15 @@ async def curl(
 class ServerHandle:
     """A running fixture-server subprocess with an auto-picked port."""
 
-    def __init__(self, proc: subprocess.Popen, port: int) -> None:
+    def __init__(self, proc: subprocess.Popen, port: int, path: str = "") -> None:
         self.proc = proc
         self.port = port
+        self.path = path
 
     @property
     def base(self) -> str:
         """Plain-http base URL for this server."""
-        return f"http://127.0.0.1:{self.port}"
+        return f"http://127.0.0.1:{self.port}{self.path}"
 
     @property
     def tls_base(self) -> str:
@@ -143,96 +150,148 @@ async def _stop(handle: ServerHandle) -> None:
 async def fixture_site(
     filenames: Iterable[str] = (), index_body: str | None = None
 ) -> AsyncIterator[ServerHandle]:
-    """Serve FIXTURES/<name> files over plain HTTP from a tmp dir (http.server)."""
+    """Serve FIXTURES/<name> files over plain HTTP (http.server).
 
-    # Build the site dir synchronously (fast), launch the server threaded.
-    site_parent = Path(tempfile.mkdtemp(prefix="odda-fx-"))
-    site = site_parent / "site"
-    site.mkdir()
-    for f in filenames:
-        (site / f).write_bytes((FIXTURES / f).read_bytes())
-    if index_body is not None:
-        (site / "index.html").write_text(index_body)
-    handle = await asyncio.to_thread(
-        _launch_server_threaded,
+    One server per worker process serves a scratch root that holds one
+    directory per distinct site content — the directory is named after the
+    content key (see :func:`_site_dir`) and contains exactly the requested
+    files, so a test still sees only its own file set. Booting an
+    interpreter + ``http.server`` per content (``["index.html"]`` alone
+    appears in 37 tests) bought nothing over a path segment under one
+    server.
+    """
+    key = (tuple(sorted(filenames)), index_body)
+    root_dir, root = await asyncio.to_thread(_boot_site_root)
+    path = await asyncio.to_thread(_site_dir, root_dir, key)
+    yield ServerHandle(root.proc, root.port, path)
+
+
+def _boot_site_root() -> tuple[Path, ServerHandle]:
+    """Boot (once per worker) the http.server that serves every site dir."""
+    global _SITE_SERVER, _SITE_ROOT  # noqa: PLW0603 — process-wide scratch root
+    with _SHARED_LOCK:
+        handle = _SITE_SERVER
+        if (
+            handle is not None
+            and _SITE_ROOT is not None
+            and handle.proc is not None
+            and handle.proc.poll() is None
+        ):
+            return _SITE_ROOT, handle
+        if _SITE_ROOT is None:
+            _SITE_ROOT = Path(tempfile.mkdtemp(prefix="odda-sites-"))
+        _SITE_SERVER = _launch_server_threaded(
+            [
+                sys.executable,
+                "-m",
+                "http.server",
+                "{port}",
+                "--bind",
+                "127.0.0.1",
+                "--directory",
+                str(_SITE_ROOT),
+            ]
+        )
+        return _SITE_ROOT, _SITE_SERVER
+
+
+def _site_dir(root: Path, key: tuple[tuple[str, ...], str | None]) -> str:
+    """Materialize one site content key as a directory under the site root.
+
+    Returns the URL path it is served under. Files are symlinked from
+    FIXTURES (no copy) and an ``index_body`` is written out; the directory
+    holds nothing else, so the served file set stays exactly the key's.
+    """
+    filenames, index_body = key
+    with _SHARED_LOCK:
+        name = _SITE_DIRS.get(key)
+        if name is None:
+            name = f"site{len(_SITE_DIRS) + 1}"
+            site = root / name
+            site.mkdir(parents=True)
+            for f in filenames:
+                (site / f).symlink_to(FIXTURES / f)
+            if index_body is not None:
+                (site / "index.html").write_text(index_body)
+            _SITE_DIRS[key] = name
+        return f"/{name}"
+
+
+def _boot_dyn_server(race_dir: Path | None) -> ServerHandle:
+    """Boot a hypercorn HTTPS server (H1+H2 via ALPN) on the shared cert."""
+    key, cert = _tls_cert()
+    env = {**os.environ}
+    if race_dir is not None:
+        env["ODDA_RACE_DIR"] = str(race_dir)
+    return _launch_server_threaded(
         [
             sys.executable,
             "-m",
-            "http.server",
-            "{port}",
+            "hypercorn",
             "--bind",
-            "127.0.0.1",
-            "--directory",
-            str(site),
+            "127.0.0.1:{port}",
+            "--keyfile",
+            str(key),
+            "--certfile",
+            str(cert),
+            f"{FIXTURES / 'dyn_asgi.py'}:app",
         ],
+        env=env,
     )
-    try:
-        yield handle
-    finally:
-        await _stop(handle)
-        import shutil
 
-        shutil.rmtree(site_parent, ignore_errors=True)
+
+def _shared_dyn_server() -> ServerHandle:
+    """Return the worker's long-lived dyn server, booting it on first use.
+
+    Booting costs an interpreter, hypercorn, and a TLS key exchange
+    (~0.4 s per test that serves dynamic responses), and dyn_asgi is
+    request-stateless — every behavior is a query parameter — so one
+    instance per worker process serves every caller that needs no private
+    race dir. A dead instance (crashed server) is rebooted in place.
+    """
+    handle = _DYN_SHARED.get("default")
+    if handle is None or handle.proc.poll() is not None:
+        handle = _boot_dyn_server(None)
+        _DYN_SHARED["default"] = handle
+    return handle
+
+
+def _stop_shared_servers() -> None:
+    """Reap the shared fixture servers at process exit (they are daemons)."""
+    stop_handles = [*_DYN_SHARED.values(), *([_SITE_SERVER] if _SITE_SERVER else [])]
+    for handle in stop_handles:
+        with suppress(Exception):
+            handle.stop()
+    _DYN_SHARED.clear()
+    if _SITE_ROOT is not None:
+        with suppress(Exception):
+            shutil.rmtree(_SITE_ROOT, ignore_errors=True)
+
+
+_SITE_SERVER: ServerHandle | None = None
+_SITE_DIRS: dict[tuple[tuple[str, ...], str | None], str] = {}
+_DYN_SHARED: dict[str, ServerHandle] = {}
+_SHARED_LOCK = threading.Lock()
+_SITE_ROOT: Path | None = None
+atexit.register(_stop_shared_servers)
 
 
 @asynccontextmanager
 async def dyn_server(race_dir: Path | None = None) -> AsyncIterator[ServerHandle]:
-    """Hypercorn HTTPS server (H1+H2 via ALPN) serving dyn_asgi with a self-signed cert."""
+    """Hypercorn HTTPS server (H1+H2 via ALPN) serving dyn_asgi with a self-signed cert.
 
-    def _boot() -> ServerHandle:
-        td = Path(tempfile.mkdtemp(prefix="odda-dyn-"))
-        key, cert = td / "dyn.key", td / "dyn.pem"
-        subprocess.run(  # noqa: S603
-            [
-                "openssl",
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-keyout",
-                str(key),
-                "-out",
-                str(cert),
-                "-days",
-                "1",
-                "-nodes",
-                "-subj",
-                "/CN=127.0.0.1",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        env = {**os.environ}
-        if race_dir is not None:
-            env["ODDA_RACE_DIR"] = str(race_dir)
-        handle = _launch_server_threaded(
-            [
-                sys.executable,
-                "-m",
-                "hypercorn",
-                "--bind",
-                "127.0.0.1:{port}",
-                "--keyfile",
-                str(key),
-                "--certfile",
-                str(cert),
-                f"{FIXTURES / 'dyn_asgi.py'}:app",
-            ],
-            env=env,
-        )
-        handle._cert_dir = td  # noqa: SLF001 — cleaned up in stop path
-        return handle
-
-    handle = await asyncio.to_thread(_boot)
+    ``race_dir`` callers get a private instance (the race behavior lives in
+    the server's environment) that is stopped with the block; everyone else
+    shares the worker's instance (see :func:`_shared_dyn_server`).
+    """
+    if race_dir is None:
+        yield _shared_dyn_server()
+        return
+    handle = await asyncio.to_thread(_boot_dyn_server, race_dir)
     try:
         yield handle
     finally:
         await _stop(handle)
-        td = getattr(handle, "_cert_dir", None)
-        if td is not None:
-            import shutil
-
-            shutil.rmtree(td, ignore_errors=True)
 
 
 @asynccontextmanager
@@ -399,6 +458,26 @@ def self_signed_cert(tmp_dir: Path) -> tuple[Path, Path]:
         capture_output=True,
     )
     return key, cert
+
+
+def _tls_cert() -> tuple[Path, Path]:
+    """Return a process-wide self-signed cert/key pair, generating it once.
+
+    RSA-2048 keygen is ~0.15 s of CPU, and the fixture TLS servers only need
+    *a* valid 127.0.0.1 cert, so one pair per worker process serves every
+    boot (removed at process exit by the atexit sweep below).
+    """
+    global _CERT_PAIR  # noqa: PLW0603 — memo slot, written once under the lock
+    with _CERT_LOCK:
+        if _CERT_PAIR is None:
+            cert_dir = Path(tempfile.mkdtemp(prefix="odda-tls-"))
+            _CERT_PAIR = self_signed_cert(cert_dir)
+            atexit.register(shutil.rmtree, cert_dir, ignore_errors=True)
+        return _CERT_PAIR
+
+
+_CERT_LOCK = threading.Lock()
+_CERT_PAIR: tuple[Path, Path] | None = None
 
 
 @asynccontextmanager

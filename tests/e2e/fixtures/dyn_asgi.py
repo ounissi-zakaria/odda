@@ -36,6 +36,20 @@ async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         race_dir.mkdir(parents=True, exist_ok=True)
         with (race_dir / race_id).open("a") as f:
             f.write(f"{time.monotonic_ns()}\n")
+    # Consume the request body before responding. An ASGI app that returns
+    # without reading it lets hypercorn complete and drop the stream while the
+    # client's trailing DATA frames are still in flight; hypercorn's H2 event
+    # dispatch then indexes the removed stream and dies with KeyError,
+    # tearing down the whole connection mid-response. odda reports that
+    # faithfully as "connection closed before response complete", which is how
+    # the H2 repeat tests flaked under CPU load. Reading the body keeps the
+    # stream alive until the client's end_stream.
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            return
+        if not message.get("more_body", False):
+            break
     body = qd.get("body", [""])[0].encode()
     status = int(qd.get("status", ["200"])[0])
     headers: list[tuple[bytes, bytes]] = []
