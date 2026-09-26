@@ -181,6 +181,17 @@ if (!window.__oddaWrapWatch) {
     var slot = reg.get(obj);
     if (!slot) { slot = {}; reg.set(obj, slot); }
     var st = slot[prop];
+    if (st && st.pair) {
+      var cur = null;
+      try { cur = Object.getOwnPropertyDescriptor(obj, prop); } catch (e) { cur = null; }
+      if (!cur || cur.get !== st.pair.get || cur.set !== st.pair.set) {
+        // The watcher was redefined away (e.g. a top-level declaration
+        // DEFINES the global property, clobbering the accessor):
+        // reinstall from the current descriptor.
+        delete slot[prop];
+        st = null;
+      }
+    }
     if (st) { if (st.cbs.indexOf(cb) === -1) st.cbs.push(cb); return true; }
     var desc = null;
     try { desc = Object.getOwnPropertyDescriptor(obj, prop); } catch (e) { desc = null; }
@@ -217,7 +228,28 @@ if (!window.__oddaWrapWatch) {
       for (var i = 0; i < cbs.length; i++) { try { cbs[i](); } catch (e) {} }
     };
     try { Object.defineProperty(obj, prop, d); } catch (e) { delete slot[prop]; return false; }
+    st.pair = d;
     return true;
+  };
+}
+if (!window.__oddaWrapRetry) {
+  window.__oddaWrapRetry = function(go) {
+    // Top-level var/function declarations DEFINE (not set) the global
+    // property — the engine's defineProperty is not interceptable from
+    // JS — silently replacing pre-armed pairs and watchers. go() runs
+    // once synchronously (document_start), then again on a bounded
+    // tick schedule after load so declared targets still get wrapped;
+    // assignment-defined targets are caught immediately by the
+    // pre-armed setter.
+    var delays = [0, 50, 200, 800, 2500, 6000];
+    var i = 0;
+    go();
+    function tick() {
+      go();
+      i += 1;
+      if (i < delays.length) setTimeout(tick, delays[i] - delays[i - 1]);
+    }
+    setTimeout(tick, delays[0]);
   };
 }
 if (!window.__oddaWrapMark) {
@@ -281,7 +313,6 @@ if (!window.__oddaWrapArm) {
     .replace("%MAX_FN%", str(_MAX_FUNCTION_SOURCE))
 )
 
-
 # A call wrap replaces the function at ``expr`` (e.g. ``JSON.parse``,
 # ``EventTarget.prototype.addEventListener``, ``libX.modY.calc``) with
 # a wrapper that records each call. The ``expr`` is split on the last
@@ -292,7 +323,10 @@ if (!window.__oddaWrapArm) {
 # does not exist at ``document_start``, the wrap arms itself via
 # ``__oddaWrapArm`` (owner appearing later) and a converting pre-armed
 # pair (function appearing later: functions written to the slot are
-# stored wrapped; other values pass through unchanged). Global
+# stored wrapped; other values pass through unchanged). Top-level
+# ``var``/``function`` declarations DEFINE (not set) the global
+# property, clobbering pre-armed pairs — wraps re-check on a bounded
+# post-load schedule so declared targets still get wrapped. Global
 # lexical owners (``let``/``const``, module scope) are unwatchable.
 
 _CALL_WRAPPER_TEMPLATE = """\
@@ -310,12 +344,20 @@ $HELPERS$
   }
   var install = function(owner) {
     if (!owner) return;
-    // Install once per wrap name: re-arming (owner replaced, an armed
-    // level rewritten) must not stack wrappers — two wraps on one
-    // target would otherwise double-record on every re-fire.
-    if (!window.__oddaWrapMark(owner, prop, __oddaWrapName)) return;
     var original;
     try { original = owner[prop]; } catch (e) { return; }
+    // Our wrapper is outermost (or stored by the converting pair):
+    // installed, nothing to do on a re-check.
+    if (original && original.__oddaWrapName === __oddaWrapName) return;
+    // Another wrap layers above ours: contribute once, never stack.
+    if (original && original.__oddaWrapName) {
+      window.__oddaWrapMark(owner, prop, __oddaWrapName);
+      return;
+    }
+    // Claim the name once. Reaching here with it already claimed means
+    // the slot went raw again — the page redefined it (a top-level
+    // declaration clobbered the pair) — so reinstall.
+    window.__oddaWrapMark(owner, prop, __oddaWrapName);
     var wrapFn = function(f) {
       var wrapped = function() {
         var args = Array.prototype.slice.call(arguments);
@@ -381,8 +423,10 @@ $HELPERS$
     };
     try { Object.defineProperty(owner, prop, d); } catch (e) {}
   };
-  if (ownerExpr === null) install(globalThis);
-  else window.__oddaWrapArm(ownerExpr, install);
+  window.__oddaWrapRetry(function() {
+    if (ownerExpr === null) install(globalThis);
+    else window.__oddaWrapArm(ownerExpr, install);
+  });
 })();
 """
 
@@ -434,6 +478,10 @@ $HELPERS$
       if (desc) break;
       try { descOwner = Object.getPrototypeOf(descOwner); } catch (e) { descOwner = null; }
     }
+    // Already installed: our recording accessor is in place — nothing
+    // to do on a re-check.
+    if (desc && ((desc.get && desc.get.__oddaWrapName === __oddaWrapName) ||
+                 (desc.set && desc.set.__oddaWrapName === __oddaWrapName))) return;
     var installTarget, enumerable, configurable;
     var innerGet, innerSet;
     var preArmed = false;
@@ -529,13 +577,19 @@ $HELPERS$
       };
       try { newDesc.set.__oddaWrapName = __oddaWrapName; } catch (e) {}
     }
-    // Install once per wrap name (after the pinned guards, which return
-    // without claiming the slot): re-arming must not stack recording
-    // layers — two wraps on one target would otherwise double-record.
-    if (!window.__oddaWrapMark(installTarget, prop, __oddaWrapName)) return;
+    // Claim the wrap name once. Reaching the defineProperty with the
+    // name already claimed means the slot went raw again — the page
+    // redefined it (a top-level declaration DEFINES the property,
+    // clobbering a pre-armed pair) — so reinstall; but if another
+    // wrap's accessor is layered here, ours still runs beneath it and
+    // stacking another layer would double-record.
+    if (!window.__oddaWrapMark(installTarget, prop, __oddaWrapName) &&
+        desc && (desc.get || desc.set)) return;
     try { Object.defineProperty(installTarget, prop, newDesc); } catch (e) {}
   };
-  window.__oddaWrapArm(ownerExpr, install);
+  window.__oddaWrapRetry(function() {
+    window.__oddaWrapArm(ownerExpr, install);
+  });
 })();
 """
 
@@ -562,8 +616,11 @@ def generate_call_wrapper(name: str, expr: str) -> str:
             ``libX.modY.calc``). If the owner chain or the function
             itself appears after document_start, the wrap arms itself
             and installs on first appearance (functions written later
-            are stored wrapped). Global lexical owners (``let``/
-            ``const``, module scope) are unwatchable.
+            are stored wrapped). Top-level var/function declarations
+            define (not set) the global property, clobbering pre-armed
+            pairs — wraps re-check on a bounded post-load schedule.
+            Global lexical owners (``let``/``const``, module scope)
+            are unwatchable.
 
     Returns:
         The wrapper JS source, ready to install as a userscript.
@@ -588,7 +645,10 @@ def generate_access_wrapper(name: str, expr: str) -> str:
             on replacement). Pinned targets (non-writable, or
             non-configurable on the owner; frozen owners) stay
             unwrapped; global lexical owners (``let``/``const``,
-            module scope) are unwatchable.
+            module scope) are unwatchable. Top-level var/function
+            declarations define (not set) the global property,
+            clobbering pre-armed pairs — wraps re-check on a bounded
+            post-load schedule.
 
     Returns:
         The wrapper JS source, ready to install as a userscript.

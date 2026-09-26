@@ -633,3 +633,42 @@ async def test_wrap_calls_owner_and_function_appearing_later(odda_session) -> No
         r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
         lf7 = [x for x in r if x["wrap"] == "lf" and x["args"] == [7]]
         assert len(lf7) == 1 and lf7[0]["ret"] == 70
+
+
+async def test_wrap_records_page_declared_globals(odda_session) -> None:
+    """A top-level function or var DECLARATION does not assign through
+    window — the engine defines the property, clobbering any pre-armed
+    pair. Both wrap kinds re-check after load, so page-declared globals
+    record like assignment-defined ones."""
+    body = (
+        "<!doctype html><html><body><script>"
+        "function jsAlert() { return 'alerted'; }"
+        "var declVar = 5;"
+        "</script></body></html>"
+    )
+    async with (
+        odda_session() as h,
+        fixture_site(index_body=body) as fx,
+    ):
+        url = f"{fx.base}/"
+        bid, tid = await h.open_browser(url)
+        await h.call(
+            "wrap_calls_add",
+            {"browser_id": bid, "name": "jsa", "expr": "jsAlert"},
+        )
+        await h.call(
+            "wrap_access_add",
+            {"browser_id": bid, "name": "dv", "expr": "window.declVar"},
+        )
+        await h.navigate(bid, tid, url)
+        await h.wait_for(bid, tid, "typeof jsAlert === 'function' && declVar === 5")
+
+        out = await h.eval(bid, tid, "String(jsAlert())")
+        assert out == "alerted"
+        await h.eval(bid, tid, "window.declVar = 6; String(window.declVar)")
+        r = await h.call_json("wrap_dump", {"browser_id": bid, "tab_id": tid})
+        jsa = [x for x in r if x["wrap"] == "jsa"]
+        assert any(x["args"] == [] and x["ret"] == "alerted" for x in jsa)
+        dv = [x for x in r if x["wrap"] == "dv"]
+        assert any(x["args"] == [6] and x["ret"] is None for x in dv)
+        assert any(x["args"] == [] and x["ret"] == 6 for x in dv)

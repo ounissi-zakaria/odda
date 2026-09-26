@@ -2716,7 +2716,10 @@ class BrowserManager:
         If the owner chain or the function itself appears after
         document_start, the wrap arms itself and installs on first
         appearance (functions written later are stored wrapped).
-        Global lexical owners (let/const, module scope) are unwatchable.
+        Top-level var/function declarations define (not set) the
+        global property — wraps re-check on a bounded post-load
+        schedule. Global lexical owners (let/const, module scope) are
+        unwatchable.
         """
         return await self._wrap_add(browser_id, name, expr, wrap_mod.install_call)
 
