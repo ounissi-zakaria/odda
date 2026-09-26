@@ -1,9 +1,22 @@
 ## Agent-facing surfaces are self-contained
 
-Tool descriptions and server instructions in `src/odda/mcp.py`, and concept docs in
-`src/odda/docs/`, must state behavior itself — never cite repo-internal references
-(ADR numbers, internal module/class/CDP API names, repo paths, CLI flag dialect).
-The reader is an agent with no repo access.
+Agent-facing text lives in four surfaces — tool descriptions, server
+instructions, tool results, error messages — and nowhere else: there are no
+docs resources (`odda://docs/*` was removed; agents learn from the surfaces
+themselves). All four state behavior itself and never cite repo-internal
+references (ADR numbers, internal module/class/CDP API names, repo paths, CLI
+flag dialect); the reader is an agent with no repo access.
+
+- Tool descriptions are one line: the name-level contract. Only contracts an
+  agent cannot infer and would silently get wrong get more (request-file
+  wire-faithful vs frame-source, wrap/logpoint effect timing).
+- Constraints live in the error that fires, with the fix — not in the
+  description. Describe what exists, never what to do: no "prefer X", no
+  workflows, no usage recipes.
+- Server instructions carry the session mental model only (capture invariant,
+  `flows.jsonl` index, body decode semantics), phrased as what exists.
+- Results teach their own shape: legends, sentinels, and cap notes ride on
+  the result and are documented nowhere else.
 
 ## Architecture: thin surface, deep library
 

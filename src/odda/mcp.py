@@ -29,7 +29,6 @@ import json
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -42,7 +41,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context  # noqa: TC002
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.mcpserver.resources import TextResource
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
@@ -184,60 +182,12 @@ mcp_server = MCPServer[OddaState](
     description="Browser automation and HTTP traffic capture for agents.",
     lifespan=odda_lifespan,
     instructions=(
-        "Browser automation, HTTP traffic capture, dynamic analysis, "
-        "and raw request crafting. Use when driving Chrome, capturing "
-        "flows, observing JS execution, or hand-building HTTP "
-        "requests.\n"
-        "All traffic that goes through proxy (including browser "
-        "traffic) is captured as flows under .odda/flows/. "
-        "Concept references: odda://docs/* resources."
+        "All traffic that goes through the proxy (including browser "
+        "traffic) is captured as flows under .odda/flows/ — driving "
+        "the browser is capture. flows.jsonl is the append-only "
+        "index. Response bodies are stored decoded."
     ),
 )
-
-
-# --- resources: concept docs (odda://docs/<slug>) ---
-
-
-def _register_doc_resources() -> None:
-    """Register the six static ``odda://docs/<slug>`` markdown resources.
-
-    The concept references agents read for orientation: request
-    crafting, flow capture, dynamic analysis, userscripts,
-    proxy-scripts, and worked recipes. Content lives in the
-    ``odda.docs`` package (``src/odda/docs/``); read at registration
-    time — these are server-instructions-scale documents, not lazily
-    generated state.
-    """
-    docs = {
-        "request-crafting": "Craft and send raw HTTP requests byte-for-byte.",
-        "flows": "Flow file layout and the flows.jsonl schema.",
-        "dynamic-analysis": "Wrap, logpoint, and coverage observation of JS execution.",
-        "userscripts": (
-            "Userscripts that auto-run at document_start; shipped default helper."
-        ),
-        "proxy-scripts": (
-            "mitmproxy addons at the proxy layer; format, scope, failure model."
-        ),
-        "recipes": "Worked examples composing the tools into full investigations.",
-    }
-    for slug, description in docs.items():
-        text = (
-            importlib_resources.files("odda.docs")
-            .joinpath(f"{slug}.md")
-            .read_text(encoding="utf-8")
-        )
-        mcp_server.add_resource(
-            TextResource(
-                uri=f"odda://docs/{slug}",
-                name=slug,
-                description=description,
-                mime_type="text/markdown",
-                text=text,
-            )
-        )
-
-
-_register_doc_resources()
 
 
 # --- browser lifecycle ---
@@ -251,17 +201,7 @@ async def browser_open(
     headless: bool = True,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Open a browser: a fresh one, or reopen a closed browser record.
-
-    Without browser_id, launches a new browser under a fresh five-letter
-    token (unique for the data dir's lifetime), its Chrome profile seeded
-    once from the global Base profile. With browser_id, reopens that
-    closed record: same token, same profile and userscripts — logins and
-    site data come back, tabs start fresh. Ids are case-insensitive.
-    Refuses an id that is already open (here or in another session) or
-    unknown. All browser traffic is captured as flows under .odda/flows/
-    — driving the browser is traffic capture (see odda://docs/flows).
-    """
+    """Open a browser: fresh, or reopen a closed record (same id, same profile)."""
     return await ctx.request_context.lifespan_context.browser.open(
         browser_id=browser_id, headless=headless
     )
@@ -306,12 +246,7 @@ async def tabs_open(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Open a new tab in a browser, optionally navigating to a URL.
-
-    If the URL's page opens a dialog while loading (e.g. an on-load
-    alert), the result carries the dialog's details instead of the
-    open status; resolve it with dialog_handle.
-    """
+    """Open a new tab in a browser, optionally navigating to a URL."""
     return await ctx.request_context.lifespan_context.browser.open_tab(browser_id, url)
 
 
@@ -320,11 +255,7 @@ async def tabs_open(
 async def tabs_close(
     browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Close a tab in a browser.
-
-    Closing the last tab leaves the browser open with zero tabs;
-    use browser_close to close the browser itself.
-    """
+    """Close a tab in a browser."""
     return await ctx.request_context.lifespan_context.browser.close_tab(
         browser_id, tab_id
     )
@@ -340,18 +271,7 @@ async def dialog_handle(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Accept or dismiss the tab's open alert/confirm/prompt dialog.
-
-    Native dialogs (alert/confirm/prompt/beforeunload) block the page
-    until handled. accept answers OK/true (confirm) or
-    the given prompt_text (prompt; supplies the answer, defaults to
-    the dialog's default_value; ignored for non-prompts and with
-    dismiss); dismiss answers cancel/false/null. While a dialog is
-    open, same-tab tools reject with an error instead of running —
-    handle the dialog first, then retry them. beforeunload
-    fires on navigate away (accept completes it, dismiss stays) but
-    never on tab/browser close.
-    """
+    """Accept or dismiss the tab's open alert/confirm/prompt dialog."""
     return await ctx.request_context.lifespan_context.browser.handle_dialog(
         browser_id, tab_id, action, prompt_text
     )
@@ -371,12 +291,7 @@ async def navigate(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Navigate an existing tab to a URL (to open a new tab, use tabs_open).
-
-    wait_until: one of commit, domcontentloaded, load, networkidle —
-    pick domcontentloaded for SPAs whose load event never fires. On
-    timeout the error names the wait_until event that failed.
-    """
+    """Navigate an existing tab to a URL."""
     if wait_until not in NAVIGATE_WAIT_UNTIL_EVENTS:
         raise ToolParamError(
             f"wait_until must be one of {', '.join(NAVIGATE_WAIT_UNTIL_EVENTS)}, "
@@ -413,16 +328,10 @@ async def eval(
     *,
     ctx: Context[OddaState],
 ) -> Any:
-    """Execute JavaScript in the target tab; return the raw value.
+    """Execute JavaScript in the target tab and return the raw value.
 
-    Pass an expression, not a return statement — use an IIFE
-    (() => { ... })() for statements. Returned Promises are awaited
-    (fetch(url).then(r => r.status) returns 200); return a
-    serializable value — bare fetch(url) returns {} (Response isn't
-    JSON-serializable; chain .then(r => r.text())). No timeout: a
-    hung expression blocks the call — wrap long loops in a bounded
-    Promise.race. Pass the code inline as js, or a server-side
-    path in file (mutually exclusive).
+    js is an expression, not statements; returned Promises are
+    awaited; the return value must be JSON-serializable.
     """
     if js is not None and file is not None:
         raise ToolParamError("Provide either js or file, not both")
@@ -445,13 +354,7 @@ async def wait_for(
     *,
     ctx: Context[OddaState],
 ) -> Any:
-    """Poll a JS expression until it's truthy or timeout in the target tab.
-
-    Polls in-browser in the main world. A thrown error counts as
-    falsy and polling continues — document.querySelector('#root')
-    .children.length keeps polling while #root is absent instead of
-    crashing on the null deref.
-    """
+    """Poll a JS expression until it's truthy or timeout in the target tab."""
     return await ctx.request_context.lifespan_context.browser.wait_for(
         browser_id, tab_id, expression, timeout_ms=timeout * 1000
     )
@@ -468,25 +371,7 @@ async def screenshot(
     return_image: bool = True,
     ctx: Context[OddaState],
 ) -> str | CallToolResult:
-    """Capture a JPEG of the target tab's viewport.
-
-    output: optional path to write the JPEG to (a temp file when
-    omitted). The written path is always the first text block.
-    return_image: inline the JPEG as an image content block after the
-    text blocks (default) — a vision-capable harness sees the
-    pixels without re-reading the file; a text-only harness collapses
-    the image block to a placeholder while the path survives for
-    on-demand reads. false returns the path (plus the legend when
-    annotating) without an image block.
-    annotate: draw a numbered marker on every Ref's bounding box and
-    add a legend text block mapping each marker to its ref and
-    viewport box (CSV: n,ref,x,y,w,h) — the visual counterpart of
-    page_snapshot's boxes=true; pairs with coordinate clicks (canvas,
-    overlays, elements the a11y tree can't name). Markers are drawn
-    onto the captured pixels client-side; nothing is injected into
-    the page. The legend sits between the path and the image block
-    and is omitted when the page has no refs.
-    """
+    """Capture a JPEG of the target tab's viewport."""
     path, legend = await ctx.request_context.lifespan_context.browser.screenshot(
         browser_id, tab_id, output, annotate=annotate
     )
@@ -520,35 +405,7 @@ async def page_snapshot(
     diff: bool = False,
     ctx: Context[OddaState],
 ) -> str:
-    """Take an agent-readable snapshot of the page's accessibility tree.
-
-    Snapshot to discover element refs (eN; f<frameSeq>eN inside an
-    iframe), then pass a ref to page_click/page_fill/page_hover/
-    page_upload. Refs stay valid until their element leaves the DOM —
-    every snapshot covers the whole page, so no call invalidates
-    earlier refs; re-snapshot after a navigation. Prefer this over
-    screenshot for finding elements; use screenshot for visual layout.
-    depth: cap tree depth; boundary nodes render without children.
-    When the tree actually reaches the cap, each boundary line is
-    tagged with its hidden subtree depth ([deeper=k]) and the result
-    ends with a note stating the tree's real depth and how many lines
-    are hidden (raise depth, or page_find, to see them); a tree that
-    fits under the cap is returned without any such annotation.
-    boxes: include [box=x,y,width,height] per line — geometry source
-    for page_click/page_hover coordinates. screenshot(annotate=true)
-    draws these boxes and labels onto the captured pixels instead.
-    diff: return only what changed since this tab's previous same-
-    depth snapshot — "-"/"+" lines (fresh refs on "+", old render's
-    on "-") under an ancestor-path header per hunk; unchanged content
-    is never re-sent. Comparison ignores refs, boxes, and cap tags,
-    so scrolling never reads as change. Every page_snapshot becomes
-    the baseline for its depth (diffs chain); navigation clears the
-    tab's baselines; nothing changed returns the sentinel
-    "(no changes since previous snapshot)"; a first diff returns the
-    full tree, announced by a note. Prefer diff over a full re-read
-    after every action.
-    On a large page, prefer page_find (search without the full tree).
-    """
+    """Take an agent-readable snapshot of the page's accessibility tree."""
     return await ctx.request_context.lifespan_context.browser.page_snapshot(
         browser_id,
         tab_id,
@@ -568,21 +425,7 @@ async def page_find(
     boxes: bool = False,
     ctx: Context[OddaState],
 ) -> str:
-    """Search the page's accessibility snapshot for a regex.
-
-    Returns matching regions with context, not the whole tree.
-
-    Cheaper than page_snapshot when you only need to locate an element
-    and its ref on a large page: each match comes back with a few lines
-    of context and its ancestor path from the tree root, so refs arrive
-    with their location. The snapshot is taken fresh on every call.
-    regex: Python re pattern, matched per line (case-sensitive; add
-    (?i) for case-insensitive). Refs in results work in page_click/
-    page_fill/page_hover/page_upload.
-    boxes: include [box=x,y,width,height] per line — geometry source
-    for page_click/page_hover coordinates. screenshot(annotate=true)
-    draws these boxes and labels onto the captured pixels instead.
-    """
+    """Search the page's accessibility snapshot for a regex."""
     try:
         pattern = re.compile(regex)
     except re.error as exc:
@@ -604,12 +447,7 @@ async def page_click(  # noqa: PLR0913 — targeting + ref/coords union is the t
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Click the element identified by ref, or at viewport coordinates.
-
-    Either ref (waits for the element to be actionable) or both x
-    and y (raw trusted click), never both. timeout applies to ref
-    mode only.
-    """
+    """Click the element identified by ref, or at viewport coordinates."""
     browser = ctx.request_context.lifespan_context.browser
     if x is not None or y is not None:
         if ref is not None:
@@ -634,14 +472,7 @@ async def page_fill(  # noqa: PLR0913 — value xor file is the tool's contract
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Fill the element identified by ref with value.
-
-    Clears the field first. Works on text inputs, textareas,
-    contenteditable, checkboxes ("true"/"false"), radios, and
-    selects. Fires input events, not change — trigger change
-    listeners separately. Pass value inline, or a server-side path
-    in file preserving newlines (mutually exclusive).
-    """
+    """Fill the element identified by ref with value."""
     if value is not None and file is not None:
         raise ToolParamError("Provide either value or file, not both")
     if value is None and file is None:
@@ -665,11 +496,7 @@ async def page_hover(  # noqa: PLR0913 — targeting + ref/coords union is the t
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Hover the element identified by ref, or at viewport coordinates.
-
-    Either ref or both x and y, never both. timeout applies to ref
-    mode only.
-    """
+    """Hover the element identified by ref, or at viewport coordinates."""
     browser = ctx.request_context.lifespan_context.browser
     if x is not None or y is not None:
         if ref is not None:
@@ -693,13 +520,7 @@ async def page_upload(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Upload local files to the file input identified by ref.
-
-    Does NOT submit the form — click the submit button separately.
-    A nameless file input doesn't appear in the snapshot: eval an
-    aria-label onto it, re-snapshot, then upload by the new ref
-    (odda://docs/recipes).
-    """
+    """Upload local files to the file input identified by ref."""
     return await ctx.request_context.lifespan_context.browser.page_upload(
         browser_id, tab_id, ref, files, timeout_ms=timeout * 1000
     )
@@ -726,15 +547,7 @@ async def event_listeners(
 async def cookies_list(
     browser_id: str, url: str | None = None, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
-    """Return a browser's cookie jar as one JSON array.
-
-    Every cookie of its Chrome profile, including httpOnly cookies
-    that page JavaScript cannot read (eval on document.cookie is blind
-    to them). Each cookie carries name, value, domain, path, expires
-    (epoch seconds, -1 for a session cookie), httpOnly, secure, and
-    sameSite. Pass url to scope the list to the cookies that URL would
-    receive.
-    """
+    """Return a browser's cookie jar as one JSON array."""
     return _json_result(
         await ctx.request_context.lifespan_context.browser.cookies_list(browser_id, url)
     )
@@ -750,14 +563,7 @@ async def cookies_clear(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Delete cookies from a browser's jar.
-
-    httpOnly cookies included — page JavaScript cannot delete them.
-    Filters are exact-match and combine (name, domain, path); with no
-    filter the whole jar is wiped. Returns {"cleared": N}, the number
-    of cookies removed — e.g. clear one site's session with domain
-    while every other site survives.
-    """
+    """Delete cookies from a browser's jar."""
     return await ctx.request_context.lifespan_context.browser.cookies_clear(
         browser_id, name, domain, path
     )
@@ -771,16 +577,7 @@ async def cookies_set(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Plant cookies into a browser's jar.
-
-    httpOnly cookies included — page JavaScript cannot set them. Each
-    cookie needs name and value, plus either url or domain and path
-    (exactly the shape cookies_list returns, so a read jar can be
-    replayed into another browser); optional httpOnly, secure,
-    sameSite ("Strict"/"Lax"/"None"), and expires (epoch seconds).
-    Returns {"set": N}. Use it to seed a session — e.g. replay a
-    captured Set-Cookie response header — before navigating.
-    """
+    """Plant cookies into a browser's jar."""
     for i, cookie in enumerate(cookies):
         if (
             not isinstance(cookie, dict)
@@ -816,11 +613,7 @@ async def request_clone(
     force: bool = False,
     ctx: Context[OddaState],  # noqa: ARG001
 ) -> dict[str, Any]:
-    """Clone a captured flow's request into an editable request.
-
-    The copy lives at .odda/requests/<name>/request — edit it,
-    then send with request_send.
-    """
+    """Clone a captured flow's request into an editable request."""
     return clone_request(flow_id, name, force=force)
 
 
@@ -838,11 +631,13 @@ async def request_new(  # noqa: PLR0913 — the tool mirrors request new's full 
 ) -> dict[str, Any]:
     """Create a new empty editable request.
 
-    Creates .odda/requests/<name>/request (raw HTTP bytes — the
-    wire bytes for HTTP/1.1) plus a meta.json sidecar; fill the
-    request file, then send with request_send. See
-    odda://docs/request-crafting for the file format and the
-    line_terminator option.
+    Writes .odda/requests/<name>/request plus a meta.json sidecar.
+    HTTP/1.1 request files are wire-faithful: their bytes go on the
+    socket verbatim. HTTP/2 request files are frame-sources: parsed
+    into header values and translated to H2 frames, so the line
+    terminator (line_terminator, default CRLF) decides how the file
+    splits into header values; a Host header translates to
+    :authority.
     """
     lt_bytes = bytes(line_terminator) if line_terminator is not None else b"\r\n"
     return new_request(
@@ -870,16 +665,13 @@ async def request_send(  # noqa: PLR0913 — single/pipeline/repeat union is the
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Send editable request(s) and record each response as a flow.
 
-    Modes by argument: single name → one flow record (a dict);
-    names (two or more) → all sent on one connection, a list of
-    records in send order (H1: sequential keep-alive, or
-    ``pipelining`` for send-all-then-read-all; H2: concurrent
-    streams); repeat >= 2 with a single name → N concurrent
-    copies, one flow each. Errors are recorded as error flows
-    (status_code null + error message), not tool errors. Requests
-    dial direct from this machine's own IP — they never traverse
-    odda's proxy or a proxy_upstream chain. See
-    odda://docs/request-crafting for the full semantics.
+    Arity selects the mode: one name → one flow; names (two or
+    more) → one connection, in order (HTTP/1.1 sequential
+    keep-alive, or pipelining for send-all-then-read-all; HTTP/2
+    concurrent streams); repeat >= 2 with one name → N concurrent
+    copies. Errors are recorded as error flows, not tool errors.
+    Requests dial direct from this machine, never through odda's
+    proxy.
     """
     if repeat is not None and names is not None:
         raise ToolError(
@@ -940,19 +732,7 @@ async def proxy_upstream_set(
 ) -> dict[str, Any]:
     """Route the proxy's upstream traffic through a chained HTTP(S) proxy.
 
-    Chrome still connects to odda's proxy; every request odda forwards
-    goes via the upstream instead of direct (mitmproxy upstream mode).
-    ``url`` is the upstream proxy, ``http://`` or ``https://`` only
-    (no SOCKS); no credentials in the URL — Basic auth goes in
-    ``auth`` as 'username:password'. Loopback targets cannot be
-    reached through a remote upstream: clear it before driving
-    127.0.0.1 targets. Crafted requests (request_send) always dial
-    direct from this machine regardless. An unreachable or refusing
-    upstream fails per-flow: plain-http targets get a 502 naming the
-    upstream, https targets get a dead TLS handshake — check
-    flow.error in flows.jsonl. Open connections are closed so the new
-    path applies on the very next request — even over pooled HTTP/2
-    (in-flight requests on them abort). Per-session.
+    Loopback targets are unreachable via a remote upstream.
     """
     return await ctx.request_context.lifespan_context.proxy.set_upstream(url, auth)
 
@@ -960,24 +740,14 @@ async def proxy_upstream_set(
 @mcp_server.tool()
 @odda_tool
 async def proxy_upstream_clear(*, ctx: Context[OddaState]) -> dict[str, Any]:
-    """Remove the upstream proxy and return to direct egress.
-
-    Open connections are closed so direct egress applies on the very
-    next request (in-flight requests on them abort); browsers
-    reconnect transparently. Session-scoped like proxy_upstream_set.
-    """
+    """Remove the upstream proxy and return to direct egress."""
     return await ctx.request_context.lifespan_context.proxy.clear_upstream()
 
 
 @mcp_server.tool()
 @odda_tool
 async def proxy_upstream_get(*, ctx: Context[OddaState]) -> dict[str, Any]:
-    """Report the current upstream proxy configuration.
-
-    Returns ``upstream`` (the URL, or ``None`` when direct) and
-    ``auth_set`` (whether credentials are configured; the secret is
-    never echoed back).
-    """
+    """Report the current upstream proxy configuration."""
     return ctx.request_context.lifespan_context.proxy.upstream_state()
 
 
@@ -989,11 +759,7 @@ async def proxy_upstream_get(*, ctx: Context[OddaState]) -> dict[str, Any]:
 async def coverage_start(
     browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Enable block-level coverage on the target tab.
-
-    Per-tab and spans navigations: the workflow is start →
-    navigate → snapshot/stop. Zero-hit blocks are included.
-    """
+    """Enable block-level coverage on the target tab."""
     return await ctx.request_context.lifespan_context.browser.coverage_start(
         browser_id, tab_id
     )
@@ -1004,11 +770,7 @@ async def coverage_start(
 async def coverage_snapshot(
     browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Read per-block hit counts on the target tab without stopping.
-
-    Returns the delta since the previous take (or since start);
-    records nest scripts → functions → ranges.
-    """
+    """Read per-block hit counts on the target tab without stopping."""
     return await ctx.request_context.lifespan_context.browser.coverage_snapshot(
         browser_id, tab_id
     )
@@ -1019,11 +781,7 @@ async def coverage_snapshot(
 async def coverage_stop(
     browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Take a final coverage snapshot and stop recording.
-
-    Returns the cumulative counts for the whole window (the sum
-    of every take since start, including prior snapshots).
-    """
+    """Take a final coverage snapshot and stop recording."""
     return await ctx.request_context.lifespan_context.browser.coverage_stop(
         browser_id, tab_id
     )
@@ -1037,13 +795,7 @@ async def coverage_stop(
 async def wrap_calls_add(
     browser_id: str, name: str, expr: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Install a call wrap on a named function.
-
-    Takes effect on the next navigation (already-loaded tabs are
-    not re-injected). Leaf-only: callbacks passed as arguments are
-    not wrapped. Records wipe on navigation; the installation
-    persists per browser.
-    """
+    """Install a call wrap on a named function; effective on the next navigation."""
     return await ctx.request_context.lifespan_context.browser.wrap_calls_add(
         browser_id, name, expr
     )
@@ -1054,12 +806,7 @@ async def wrap_calls_add(
 async def wrap_access_add(
     browser_id: str, name: str, expr: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Install an access wrap on a property accessor.
-
-    Records every get/set with receiver, value, and stack. Same
-    lifecycle as wrap_calls_add: effective next navigation,
-    records wipe on navigation.
-    """
+    """Install an access wrap on a property accessor (effective next navigation)."""
     return await ctx.request_context.lifespan_context.browser.wrap_access_add(
         browser_id, name, expr
     )
@@ -1081,10 +828,7 @@ async def wrap_list(
 async def wrap_remove(
     browser_id: str, name: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Remove a wrap; it stops recording on future navigations.
-
-    Already-recorded entries are unaffected.
-    """
+    """Remove a wrap; it stops recording on future navigations."""
     return await ctx.request_context.lifespan_context.browser.wrap_remove(
         browser_id, name
     )
@@ -1095,12 +839,7 @@ async def wrap_remove(
 async def wrap_dump(
     browser_id: str, tab_id: int, name: str | None = None, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
-    """Read the per-tab wrap record array.
-
-    Each record: wrap name, type (call/access), this, args, ret,
-    stack; functions and large/cyclic values are serialized
-    compactly. Pass name to filter to one wrap's records.
-    """
+    """Read the per-tab wrap record array."""
     return _json_result(
         await ctx.request_context.lifespan_context.browser.wrap_dump(
             browser_id, tab_id, name
@@ -1134,13 +873,7 @@ async def logpoint_add(  # noqa: PLR0913 — targeting + url/line/col/expr is th
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Plant a non-pausing logpoint at a source location.
-
-    Each hit evaluates expr in the frame's scope (locals are
-    readable) and records the result; the page never pauses. line
-    and col are 0-based. Persists until removed, re-binds on
-    navigation, dies with the tab.
-    """
+    """Plant a non-pausing logpoint at a source location (0-based line/col)."""
     return await ctx.request_context.lifespan_context.browser.logpoint_add(
         browser_id, tab_id, url, line, col, expr
     )
@@ -1175,11 +908,7 @@ async def logpoint_remove(
 async def logpoint_dump(
     browser_id: str, tab_id: int, *, ctx: Context[OddaState]
 ) -> list[dict[str, Any]]:
-    """Read the per-tab logpoint record array.
-
-    Each record: logpoint id, url, line, col, value (null when the
-    expression threw), error. Wipes on navigation.
-    """
+    """Read the per-tab logpoint record array."""
     return _json_result(
         await ctx.request_context.lifespan_context.browser.logpoint_dump(
             browser_id, tab_id
@@ -1226,14 +955,7 @@ async def userscript_install(
     *,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Install a userscript into the given browser's scope.
-
-    Runs at document_start in the main world before the page's
-    own scripts, in every tab and frame of the browser. Scope is
-    per-browser; a same-name install overwrites. Takes effect on
-    new navigations (already-loaded tabs are not re-injected).
-    Pass file or source, not both.
-    """
+    """Install a userscript (auto-runs at document_start, main world)."""
     js = _read_install_source(file, source, "js")
     if not js.strip():
         raise ToolParamError("source is empty")
@@ -1277,13 +999,7 @@ async def proxy_script_install(
     force: bool = False,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
-    """Install a proxy-script (mitmproxy ``-s`` addon) from file or source.
-
-    Runs with full server-process privileges. Overwriting an
-    existing name requires force. Persisted and re-added on boot;
-    scope is global (one proxy shared across all browsers). See
-    odda://docs/proxy-scripts for the format.
-    """
+    """Install a proxy-script (mitmproxy ``-s`` addon) from file or source."""
     py = _read_install_source(file, source, "py")
     if not py.strip():
         raise ToolParamError("source is empty")

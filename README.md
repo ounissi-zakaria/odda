@@ -101,7 +101,7 @@ A real Chrome (via patchright/Playwright), headless by default:
 
 ### Capture every flow
 
-A transparent mitmproxy sits between Chrome and the network; driving the browser *is* traffic capture. Every request/response is saved under `.odda/flows/<id>/`; the index is `.odda/flows/flows.jsonl`. The proxy can also chain through an upstream forward proxy (`proxy_upstream_set`) to change the session's network vantage. See the `odda://docs/flows` resource for the file layout and schema.
+A transparent mitmproxy sits between Chrome and the network; driving the browser *is* traffic capture. Every request/response is saved under `.odda/flows/<id>/`; the index is `.odda/flows/flows.jsonl`. The proxy can also chain through an upstream forward proxy (`proxy_upstream_set`) to change the session's network vantage.
 
 ### Observe JS in progress
 
@@ -111,7 +111,7 @@ Three lenses, chosen by what you know:
 - **Logpoint** — plant a non-pausing observation at a source `url` + `line` + `col`; the expression is evaluated in the paused frame's scope, so it reads locals by name.
 - **Coverage** — record which code blocks execute across one or more navigations; start, trigger behavior, snapshot or stop.
 
-Wrap and Logpoint records wipe on navigation — dump before navigating again. The `odda://docs/dynamic-analysis` resource documents the full surface; `odda://docs/recipes` has a worked example tracing untrusted DOM data to a sink.
+Wrap and Logpoint records wipe on navigation — dump before navigating again.
 
 ### Craft raw HTTP
 
@@ -123,8 +123,6 @@ Byte-faithful raw HTTP sends, bypassing the browser — the Burp Repeater model,
 - **Multi-name pipeline** — pass several names to send several requests on one connection (H1 keep-alive, or H2 concurrent stream-multiplex) for same-connection attacks.
 - **Concurrent send** — `repeat` fires N copies of one request concurrently for race conditions and limit-overrun attacks.
 - **`fix_content_length`** — recompute Content-Length after body edits.
-
-See the `odda://docs/request-crafting` resource for framing details.
 
 ## How it works
 

@@ -45,7 +45,7 @@ where = ["src"]
 "" = "src"
 
 [tool.setuptools.package-data]
-odda = ["docs/*.md", "userscripts/default/*.js"]
+odda = ["userscripts/default/*.js"]
 
 [tool.ruff]
 target-version = "py311"

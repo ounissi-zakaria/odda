@@ -20,10 +20,10 @@ For each problem, give: the exact tool call(s) you made (arguments, in a fenced 
 ## 3. What was unexpected (worked, but surprised you)
 Things that succeeded but behaved differently from your mental model — defaults, naming, output shape, lifecycle, ordering. These are the UX/confusion signals. For each: what you expected vs. what happened.
 
-## 4. Docs & resources
-- Was there anything you couldn't find in the docs and had to discover by trial and error?
-- Did you read the `odda://docs/` resources (`flows`, `request-crafting`, `dynamic-analysis`, `userscripts`, `proxy-scripts`, `recipes`)? If yes, were they accurate? If no — did you know they existed?
-- Anything documented that was wrong, stale, or contradicted by actual behavior?
+## 4. Onboarding & discoverability
+- Was there anything the tool descriptions didn't tell you and you had to discover by trial and error?
+- Did the error messages tell you how to fix the problem, or just that it failed?
+- Did the server instructions tell you what you needed to know before calling anything?
 - Anything you only understood *after* failing once? (the failure that taught you is the signal we want)
 
 ## 5. Specific surfaces — only answer for the ones you touched
