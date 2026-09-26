@@ -2711,13 +2711,28 @@ class BrowserManager:
     async def wrap_calls_add(
         self, browser_id: str, name: str, expr: str
     ) -> dict[str, Any]:
-        """Install a call wrap on a named function and reload the extension."""
+        """Install a call wrap on a named function and reload the extension.
+
+        If the owner chain or the function itself appears after
+        document_start, the wrap arms itself and installs on first
+        appearance (functions written later are stored wrapped).
+        Global lexical owners (let/const, module scope) are unwatchable.
+        """
         return await self._wrap_add(browser_id, name, expr, wrap_mod.install_call)
 
     async def wrap_access_add(
         self, browser_id: str, name: str, expr: str
     ) -> dict[str, Any]:
-        """Install an access wrap on a property accessor and reload the extension."""
+        """Install an access wrap on a property and reload the extension.
+
+        Existing accessors are wrapped in place; data slots convert to
+        recording accessors; a property the page has not defined yet is
+        pre-armed so its first write records. An owner chain the page
+        has not built yet is armed and the wrap installs on first
+        appearance (re-arming on replacement). Pinned targets (frozen
+        owners; non-writable or non-configurable slots) stay unwrapped;
+        global lexical owners (let/const, module scope) are unwatchable.
+        """
         return await self._wrap_add(browser_id, name, expr, wrap_mod.install_access)
 
     async def wrap_list(self, browser_id: str) -> list[dict[str, Any]]:

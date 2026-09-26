@@ -795,7 +795,7 @@ async def coverage_stop(
 async def wrap_calls_add(
     browser_id: str, name: str, expr: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Install a call wrap on a named function; effective on the next navigation."""
+    """Install a call wrap on a named function, even one defined later."""
     return await ctx.request_context.lifespan_context.browser.wrap_calls_add(
         browser_id, name, expr
     )
@@ -806,7 +806,11 @@ async def wrap_calls_add(
 async def wrap_access_add(
     browser_id: str, name: str, expr: str, *, ctx: Context[OddaState]
 ) -> dict[str, Any]:
-    """Install an access wrap on a property accessor (effective next navigation)."""
+    """Install an access wrap on a property (effective next navigation).
+
+    Accessors, data slots, and properties the page defines later all
+    record; frozen or pinned targets can't be wrapped.
+    """
     return await ctx.request_context.lifespan_context.browser.wrap_access_add(
         browser_id, name, expr
     )
