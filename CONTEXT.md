@@ -18,6 +18,10 @@ _Avoid_: server instance, odda server, daemon
 `.odda/` under the MCP process's working directory — holds persisted project state: `flows/`, `requests/`, `browsers/`. Created lazily on the first state-producing call (browser open, request clone, etc.), not when the session starts. Absent until odda is actually used; read-only calls (`version`, `proxy_url`) never create it.
 _Avoid_: project dir, state dir, .odda dir
 
+**Flow**:
+One captured HTTP exchange — a request, its response (or network error) — recorded as a read-only directory under the Data dir (named by the flow id) plus one line in the flows index (`flows.jsonl`). Written exactly once, when the exchange completes; attributed to the Browser whose proxy credentials carried it, when it rode one.
+_Avoid_: transaction, request/response pair, capture entry, traffic entry
+
 ## Browser sessions
 
 **Browser identifier**:
@@ -129,6 +133,20 @@ _Avoid_: dialog response, auto-accept, dialog handler
 **Proxy-script**:
 A Python file in mitmproxy `-s` script format that odda execs and adds to the running proxy's addon chain. Installed via the `proxy_script_install` tool (`force` overwrites by name), persisted under `.odda/proxy-scripts/<name>/script.py`, re-added on session boot; scope is global (one proxy shared across all browsers, not per-browser like userscripts).
 _Avoid_: addon, interceptor, proxy addon, mitmproxy script, userscript
+
+## Passive scanning
+
+**Scanner**:
+The session-live passive analyzer of captured traffic: starts with each MCP session and observes Flows as that session writes them, recording Findings. Two definitional invariants: zero egress (nothing is ever sent — analysis of what was captured, only) and forward-only (a Flow that predates the Scanner's start is never analyzed; each Flow is observed exactly once, by the session that wrote it).
+_Avoid_: watcher, monitor, audit module, linter
+
+**Finding**:
+The record of one Rule matching one Flow: a severity-tagged observation with aggregated evidence and references, keyed by the Rule–Flow pair. Findings accumulate append-only like Flows — an observation is never retracted; removing a Rule stops future Findings without erasing past ones.
+_Avoid_: alert, issue, hit, match
+
+**Rule**:
+A single passive check over one Flow's captured material, gated on flow context (scheme, status, content type, attribution). Rule identifiers are permanent — they key Findings. Built-ins ship with odda; user Rules persist in the Data dir and survive sessions, like Proxy-scripts.
+_Avoid_: check, signature, template, detector
 
 ## Testing
 
