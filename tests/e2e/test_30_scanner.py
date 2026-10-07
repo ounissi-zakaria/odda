@@ -1476,3 +1476,148 @@ async def test_error_flow_from_browser_keeps_request_rules(odda_session) -> None
             h, flow["id"], "request.session-token-in-url"
         )
         assert finding["evidence"][0]["detail"].startswith("token=")
+
+
+# --- ticket 07: invariants across sessions (forward-only, per-session) ---
+
+# Curl "status only" extra — every ticket-07 drive checks the 200.
+_STATUS_ONLY = ["-o", "/dev/null", "-w", "%{http_code}"]
+
+
+def _findings_index(data_dir: Path) -> list[dict]:
+    """Every findings.jsonl record on the data dir ([] when absent).
+
+    Harness-free on purpose: the assertions between sessions (one
+    closed, the next not yet booted) have no live session to ask.
+    """
+    f = data_dir / "scanner" / "findings.jsonl"
+    if not f.is_file():
+        return []
+    return [json.loads(line) for line in f.read_text().splitlines()]
+
+
+async def test_sequential_sessions_are_forward_only(odda_session, tmp_path) -> None:
+    """Two sequential sessions on ONE shared data dir: session A's flows
+    are scanned exactly once — by A, while A lives — and session B, booting
+    on the same data dir, never adds a finding for them. B's non-matching
+    traffic stays silent; B's own matching traffic yields B's findings,
+    with A's and B's flows sitting alongside in the same flows.jsonl."""
+    data_dir = tmp_path / ".odda"
+    async with fixture_site([_FX, "index.html"]) as fx:
+        # Session A: stack-trace-matching traffic, then close.
+        async with odda_session() as a:
+            proxy = await a.call("proxy_url", {})
+            r = await curl(
+                f"{fx.base}/{_FX}?marker=t07-seq-a", proxy, extra=_STATUS_ONLY
+            )
+            assert r.stdout == "200"
+            flow_a = await a.wait_flow("t07-seq-a")
+            # Session-live observation: A scanned its own flow (the
+            # writing session scans — ADR-0034), so exactly A's finding
+            # exists from here on; no later session may extend it.
+            finding_a = await a.wait_finding(flow_a["id"])
+
+        # A closed, B not yet booted: the index holds exactly A's finding.
+        assert _findings_index(data_dir) == [finding_a]
+
+        # Session B boots on the same data dir (A's flows in flows.jsonl).
+        async with odda_session() as b:
+            proxy = await b.call("proxy_url", {})
+            r = await curl(
+                f"{fx.base}/index.html?marker=t07-seq-b-quiet",
+                proxy,
+                extra=_STATUS_ONLY,
+            )
+            assert r.stdout == "200"
+            quiet = await b.wait_flow("t07-seq-b-quiet")
+            r = await curl(
+                f"{fx.base}/{_FX}?marker=t07-seq-b-match", proxy, extra=_STATUS_ONLY
+            )
+            assert r.stdout == "200"
+            flow_b = await b.wait_flow("t07-seq-b-match")
+            finding_b = await b.wait_finding(flow_b["id"])
+
+            # The drain is FIFO: finding_b landing proves the quiet flow
+            # drained before it, so both negatives below are settled —
+            # B produced nothing for its own clean flow, and nothing for
+            # A's matching flow sitting in the same flows.jsonl.
+            assert b.findings_for(quiet["id"]) == []
+            assert b.findings_for(flow_a["id"]) == [finding_a]
+
+        # Both closed: A's and B's flows share one flows.jsonl; the
+        # findings index is exactly A's frozen finding plus B's own.
+        jsonl = (data_dir / "flows" / "flows.jsonl").read_text()
+        assert "t07-seq-a" in jsonl
+        assert "t07-seq-b-match" in jsonl
+        assert _findings_index(data_dir) == [finding_a, finding_b]
+
+
+async def test_concurrent_sessions_observe_their_own_flows_only(
+    odda_session, odda_subprocess_session
+) -> None:
+    """Two concurrently live sessions on ONE shared data dir each scan
+    exactly their own flows: interleaved matching traffic through each
+    session's own proxy yields exactly one finding per rule-flow pair —
+    no cross-observation, no duplicates from the sibling — and each
+    session's scanner keeps working after the sibling session tears down.
+
+    The sibling is a real ``odda mcp`` subprocess (the production
+    one-process-per-session shape): mitmproxy's context is process-global,
+    so a second in-process session cannot be a true concurrent sibling.
+    """
+    async with fixture_site([_FX]) as fx, odda_session() as a:
+        async with odda_subprocess_session() as b:
+            # Both sessions are live at once over the same data dir, each
+            # with its own proxy and its own scanner drain.
+            proxy_a = await a.call("proxy_url", {})
+            proxy_b = await b.call("proxy_url", {})
+            assert proxy_a != proxy_b
+
+            # Interleaved matching traffic: a, b, a — both live throughout.
+            for marker, proxy in (
+                ("t07-cc-a1", proxy_a),
+                ("t07-cc-b1", proxy_b),
+                ("t07-cc-a2", proxy_a),
+            ):
+                r = await curl(
+                    f"{fx.base}/{_FX}?marker={marker}", proxy, extra=_STATUS_ONLY
+                )
+                assert r.stdout == "200"
+
+            flow_a1 = await a.wait_flow("t07-cc-a1")
+            flow_a2 = await a.wait_flow("t07-cc-a2")
+            flow_b1 = await b.wait_flow("t07-cc-b1")
+            # The two sessions' writers allocate independently; mkdir
+            # uniqueness keeps the shared flows.jsonl collision-free.
+            assert len({flow_a1["id"], flow_a2["id"], flow_b1["id"]}) == 3
+
+            finding_a1 = await a.wait_finding(flow_a1["id"])
+            finding_a2 = await a.wait_finding(flow_a2["id"])
+            finding_b1 = await b.wait_finding(flow_b1["id"])
+
+            # Exactly one finding per rule-flow pair: three flows, three
+            # lines, no duplicate pairs — each session scanned its own
+            # flows; the sibling's scanner never observed them.
+            index = _findings_index(a.data_dir)
+            assert len(index) == 3
+            assert len({(rec["rule_id"], rec["flow_id"]) for rec in index}) == 3
+            for finding, flow_id in (
+                (finding_a1, flow_a1["id"]),
+                (finding_a2, flow_a2["id"]),
+                (finding_b1, flow_b1["id"]),
+            ):
+                assert finding["rule_id"] == "disclosure.stack-trace"
+                assert finding["flow_id"] == flow_id
+                assert finding["severity"] == "high"
+
+        # b's session closed: a's own scanner is untouched by the sibling
+        # teardown — matching traffic through a's proxy still lands a's
+        # finding.
+        r = await curl(f"{fx.base}/{_FX}?marker=t07-cc-a3", proxy_a, extra=_STATUS_ONLY)
+        assert r.stdout == "200"
+        flow_a3 = await a.wait_flow("t07-cc-a3")
+        finding_a3 = await a.wait_finding(flow_a3["id"])
+        assert finding_a3["flow_id"] == flow_a3["id"]
+        index = _findings_index(a.data_dir)
+        assert len(index) == 4
+        assert len({(rec["rule_id"], rec["flow_id"]) for rec in index}) == 4

@@ -559,6 +559,40 @@ def odda_session(tmp_path: Path) -> Iterator[object]:
     return _session
 
 
+@pytest.fixture
+def odda_subprocess_session(tmp_path: Path) -> Iterator[object]:
+    """Per-test subprocess MCP session factory: ``async with
+    odda_subprocess_session() as h:`` — the production
+    one-process-per-session shape over stdio, sharing the test's data dir.
+
+    Concurrently-live sessions cannot share one process: mitmproxy keeps
+    process-global context (``mitmproxy_ctx.master``/``options``), so a
+    second in-process master absorbs the first's traffic. A concurrently-
+    live sibling session must be its own process — ``python -m odda mcp``
+    with its cwd at the test's tmp dir (same ``.odda`` data dir) and
+    PYTHONPATH pointing at this checkout's ``src`` so the child runs the
+    code under test, not any installed odda.
+    """
+    from mcp.client.stdio import StdioServerParameters
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    assert src.is_dir(), f"checkout src not found at {src}"
+    data_dir = tmp_path / ".odda"
+
+    @asynccontextmanager
+    async def _session() -> AsyncIterator[Harness]:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "odda", "mcp"],
+            env={"PYTHONPATH": str(src)},
+            cwd=tmp_path,
+        )
+        async with Client(params) as client:
+            yield Harness(client, data_dir)
+
+    return _session
+
+
 __all__ = [
     "FIXTURES",
     "Harness",
@@ -567,6 +601,7 @@ __all__ = [
     "dyn_server",
     "fixture_site",
     "odda_session",
+    "odda_subprocess_session",
     "script_server",
     "self_signed_cert",
     "slow_load_server",
