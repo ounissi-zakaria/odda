@@ -10,6 +10,8 @@ via curl through proxy_url or request_send, findings out via a bounded
 poll of the index (the ``wait_flow`` precedent).
 """
 
+import asyncio
+
 from tests.e2e.conftest import curl, fixture_site
 
 _FX = "stack-trace.html"
@@ -97,3 +99,76 @@ async def test_request_send_flow_is_scanned(odda_session) -> None:
         finding = await h.wait_finding(rec["id"])
         assert finding["rule_id"] == "disclosure.stack-trace"
         assert finding["flow_id"] == rec["id"]
+
+
+async def test_clean_and_error_flows_produce_no_finding(odda_session) -> None:
+    """A clean response and an error flow (no response side) produce no
+    Finding, and the scanner's data-dir subtree appears lazily — absent
+    until the first Finding."""
+    async with odda_session() as h, fixture_site(["index.html"]) as fx:
+        proxy = await h.call("proxy_url", {})
+        r = await curl(
+            f"{fx.base}/?marker=scan-clean",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+        clean = await h.wait_flow("scan-clean")
+        assert clean["error"] is None
+
+        # A flow with no response at all (closed port): recorded as an
+        # error flow, nothing for a response-side rule to match.
+        await curl(
+            "http://127.0.0.1:9/?marker=scan-err",
+            proxy,
+            extra=["-o", "/dev/null"],
+        )
+        err = await h.wait_flow("scan-err")
+        assert err["status_code"] is None
+        assert err["error"]
+
+        # Both flows were drained (they precede nothing else, but give
+        # the drain a generous bounded settle before the negative read).
+        await asyncio.sleep(0.5)
+        assert not (h.data_dir / "scanner").exists(), (
+            "scanner dir must appear lazily on the first finding"
+        )
+
+
+async def test_scan_failure_never_touches_capture(odda_session) -> None:
+    """A finding that cannot be recorded — the scanner dir is blocked by
+    a plain file — is logged and skipped; the flow still lands fully in
+    the flows index and the session keeps capturing."""
+    async with odda_session() as h, fixture_site([_FX]) as fx:
+        blocked = h.data_dir / "scanner"
+        blocked.parent.mkdir(parents=True, exist_ok=True)
+        blocked.write_text("not a directory")
+
+        proxy = await h.call("proxy_url", {})
+        marker = "scan-blocked"
+        r = await curl(
+            f"{fx.base}/{_FX}?marker={marker}",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        # The flow lands fully: record complete, body stored.
+        flow = await h.wait_flow(marker)
+        assert flow["status_code"] == 200
+        assert flow["body_file"] is not None
+        assert (h.data_dir / flow["body_file"]).is_file()
+
+        # The finding write failed (contained): no findings file, and
+        # the flow write path was never touched.
+        await asyncio.sleep(0.5)
+        assert not (blocked / "findings.jsonl").exists()
+
+        # Capture still works after the failed scan.
+        r2 = await curl(
+            f"{fx.base}/?marker=scan-after-block",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r2.stdout == "200"
+        await h.wait_flow("scan-after-block")
