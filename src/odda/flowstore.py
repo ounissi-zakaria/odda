@@ -11,9 +11,15 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 # Content types to exclude from response body storage
 EXCLUDED_CONTENT_TYPES: tuple[str, ...] = (
@@ -293,6 +299,9 @@ class FlowRecordWriter:
         self._flows_dir = _flows_dir()
         self._counter = itertools.count(_scan_max_flow_id(self._flows_dir) + 1)
         self._jsonl_path = self._flows_dir / "flows.jsonl"
+        # Post-append observer (the scanner's enqueue-only hook,
+        # ADR-0034); None until a session registers one.
+        self._observer: Callable[[dict[str, Any]], None] | None = None
 
     def _ensure_flows_dir(self) -> None:
         """Create the flows directory (and parents) if missing.
@@ -457,10 +466,35 @@ class FlowRecordWriter:
         return record
 
     def _append_jsonl(self, record: dict[str, Any]) -> None:
-        """Append one record to flows.jsonl atomically (O_APPEND)."""
+        """Append one record to flows.jsonl atomically (O_APPEND).
+
+        Fires the post-append observer (the scanner's enqueue-only
+        hook) once the line has landed — by then the per-flow files
+        are all durable. Observer failures are contained here; the
+        write path is never touched (ADR-0034).
+        """
         line = json.dumps(record, ensure_ascii=False) + "\n"
         with self._jsonl_path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+        observer = self._observer
+        if observer is not None:
+            try:
+                observer(record)
+            except Exception:
+                logger.exception("flow observer failed; write path unaffected")
+
+    def set_observer(self, observer: Callable[[dict[str, Any]], None] | None) -> None:
+        """Register (or clear) the post-append observer.
+
+        Args:
+            observer: Called with each record right after its
+                flows.jsonl line lands, on the writer's own thread
+                (the mitmproxy addon thread for browser capture,
+                the event-loop thread for request_send). It must
+                only enqueue — inline scanning could stall proxy
+                traffic. ``None`` unregisters.
+        """
+        self._observer = observer
 
 
 @dataclass(frozen=True, slots=True)

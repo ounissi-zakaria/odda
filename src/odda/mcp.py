@@ -23,11 +23,12 @@ contract is the one pinned in ticket #03 (``.scratch/odda-mcp/issues/
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import json
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -53,6 +54,8 @@ from odda.request import (
     send_pipeline as send_request_pipeline,
     send_repeat as send_request_repeat,
 )
+from odda.scanner.builtins import BUILTIN_RULES
+from odda.scanner.engine import Scanner
 
 # Two or more names selects the multi-name pipeline mode (ADR-0019);
 # repeat >= 2 selects the concurrent-send mode (ADR-0020) — the same
@@ -166,9 +169,21 @@ async def odda_lifespan(
     # ProxyServer so the DumpMaster addon chain is ready. A failing
     # proxy-script is logged and skipped, never blocking boot.
     proxy.restore_scripts_on_boot()
+    # The passive scanner (ADR-0034): the writer's post-append hook
+    # only enqueues, and the drain task started here scans. Both come
+    # before the yield so no tools/call can produce a flow before
+    # observation is live; teardown cancels the drain before the proxy
+    # stops, so scanning never outlives the session that captured.
+    scanner = Scanner(data_dir, rules=BUILTIN_RULES)
+    flowstore.get_writer().set_observer(scanner.observe)
+    scanner_task = asyncio.create_task(scanner.run())
     try:
         yield OddaState(proxy=proxy, browser=browser)
     finally:
+        scanner_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await scanner_task
+        flowstore.get_writer().set_observer(None)
         await browser.close_all()
         await proxy.shutdown()
 
@@ -185,7 +200,10 @@ mcp_server = MCPServer[OddaState](
         "All traffic that goes through the proxy (including browser "
         "traffic) is captured as flows under .odda/flows/ — driving "
         "the browser is capture. flows.jsonl is the append-only "
-        "index. Response bodies are stored decoded."
+        "index. Response bodies are stored decoded. Captured flows "
+        "are passively scanned while the session lives and findings "
+        "append to .odda/scanner/findings.jsonl; flows that predate "
+        "the session are never scanned."
     ),
 )
 
