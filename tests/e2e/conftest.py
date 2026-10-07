@@ -433,6 +433,36 @@ class Harness:
             await asyncio.sleep(delay)
         raise AssertionError(f"no flow matching {marker!r} flushed to disk")
 
+    def _findings_lines(self) -> list[str]:
+        f = self.data_dir / "scanner" / "findings.jsonl"
+        if not f.is_file():
+            return []
+        return f.read_text().splitlines()
+
+    def findings_for(self, flow_id: str) -> list[dict]:
+        """All findings.jsonl records for flow_id."""
+        out: list[dict] = []
+        for l in self._findings_lines():
+            rec = json.loads(l)
+            if rec.get("flow_id") == flow_id:
+                out.append(rec)
+        return out
+
+    async def wait_finding(
+        self, flow_id: str, attempts: int = 200, delay: float = 0.05
+    ) -> dict:
+        """Bounded poll until a finding for flow_id lands in findings.jsonl.
+
+        One async hop beyond wait_flow: the flow line lands first, then
+        the scanner's drain task records the finding.
+        """
+        for _ in range(attempts):
+            findings = self.findings_for(flow_id)
+            if findings:
+                return findings[0]
+            await asyncio.sleep(delay)
+        raise AssertionError(f"no finding for flow {flow_id!r} in findings.jsonl")
+
 
 def self_signed_cert(tmp_dir: Path) -> tuple[Path, Path]:
     """Generate a self-signed cert/key pair (CN=127.0.0.1) into tmp_dir; returns paths."""
