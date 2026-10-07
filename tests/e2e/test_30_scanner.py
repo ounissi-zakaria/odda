@@ -15,7 +15,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from tests.e2e.conftest import curl, fixture_site
+from tests.e2e.conftest import curl, dyn_server, fixture_site
 
 _FX = "stack-trace.html"
 
@@ -264,6 +264,222 @@ def test_scanner_package_has_no_egress_imports() -> None:
         f"scanner imports outside the zero-egress allowlist: "
         f"{sorted(imported - allowed)}"
     )
+
+
+# --- ticket 04: target-confirmation family ---
+
+
+async def test_shiro_rememberme_delete_me_lands_finding(odda_session) -> None:
+    """A ``rememberMe=deleteMe`` Set-Cookie response yields the Shiro
+    deserialization Finding (MEDIUM) with response-header evidence; an
+    ordinary session cookie on the same server shape does not fire."""
+    async with odda_session() as h, dyn_server() as dyn:
+        proxy = await h.call("proxy_url", {})
+        url = (
+            f"{dyn.tls_base}/?marker=t04-shiro"
+            "&header=set-cookie:rememberMe%3DdeleteMe%3B%20Path%3D%2F"
+            "%3B%20Max-Age%3D0"
+        )
+        r = await curl(url, proxy, extra=["-o", "/dev/null", "-w", "%{http_code}"])
+        assert r.stdout == "200"
+        flow = await h.wait_flow("t04-shiro")
+
+        finding = await h.wait_finding(flow["id"])
+        assert finding["rule_id"] == "deser.apache-shiro-rememberme"
+        assert finding["flow_id"] == flow["id"]
+        assert finding["severity"] == "medium"
+        assert finding["title"]
+        first = finding["evidence"][0]
+        assert first["where"] == "response_headers"
+        assert isinstance(first["offset"], int)
+        assert "rememberMe=deleteMe" in first["detail"]
+
+        # Negative: an ordinary session cookie must not fire the rule.
+        clean_url = (
+            f"{dyn.tls_base}/?marker=t04-shiro-clean"
+            "&header=set-cookie:session%3Dabc123%3B%20Path%3D%2F"
+        )
+        r2 = await curl(
+            clean_url, proxy, extra=["-o", "/dev/null", "-w", "%{http_code}"]
+        )
+        assert r2.stdout == "200"
+        clean = await h.wait_flow("t04-shiro-clean")
+        await asyncio.sleep(0.5)
+        assert not any(
+            f["rule_id"] == "deser.apache-shiro-rememberme"
+            for f in h.findings_for(clean["id"])
+        )
+
+
+_S3_HITS = "s3-nosuchbucket.xml"
+_S3_MISS = "s3-accessdenied.xml"
+_SHOPIFY = "shopify.html"
+_CDN_CLEAN = "cdn-clean.html"
+_TELERIK_HITS = "telerik-vuln.html"
+_TELERIK_MISS = "telerik-unknown.html"
+_PROM_HITS = "prometheus.txt"
+_PROM_MISS = "prometheus-negative.txt"
+
+# One sample script import per compromised CDN of the 2024 incident:
+# polyfill.io plus the BootCDN/Bootcss/Staticfile/Uncdn mirrors the
+# same operator was caught serving.
+_CDN_IMPORTS = {
+    "polyfill.io": "https://polyfill.io/v3/polyfill.min.js",
+    "bootcdn.net": "https://cdn.bootcdn.net/jquery/3.7.1/jquery.min.js",
+    "bootcss.com": "https://cdn.bootcss.com/jquery/3.7.1/jquery.min.js",
+    "staticfile.org": "https://cdn.staticfile.org/jquery/3.7.1/jquery.min.js",
+    "staticfile.net": "https://cdn.staticfile.net/jquery/3.7.1/jquery.min.js",
+    "uncdn.com": "https://uncdn.com/jquery/3.7.1/jquery.min.js",
+}
+
+
+async def _fetch(h, proxy: str, url: str, marker: str) -> dict:
+    """Curl one URL through the proxy; wait for the flow record."""
+    r = await curl(url, proxy, extra=["-o", "/dev/null", "-w", "%{http_code}"])
+    assert r.stdout == "200", f"curl failed: {r.stdout!r} {r.stderr!r}"
+    return await h.wait_flow(marker)
+
+
+async def _assert_silent(h, flow_id: str, rule_id: str) -> None:
+    """Bounded settle for the drain, then the rule fired on no flow of
+    this id (the negative-assertion counterpart of wait_finding)."""
+    await asyncio.sleep(0.5)
+    assert not any(f["rule_id"] == rule_id for f in h.findings_for(flow_id)), (
+        f"{rule_id} fired unexpectedly on flow {flow_id}"
+    )
+
+
+async def test_s3_nosuchbucket_fires_and_normal_s3_error_does_not(
+    odda_session,
+) -> None:
+    """An S3 NoSuchBucket body yields the takeover Finding (HIGH) with
+    the BucketName value in evidence; a normal S3 XML error
+    (AccessDenied) does not fire."""
+    async with odda_session() as h, fixture_site([_S3_HITS, _S3_MISS]) as fx:
+        proxy = await h.call("proxy_url", {})
+        flow = await _fetch(h, proxy, f"{fx.base}/{_S3_HITS}?marker=t04-s3", "t04-s3")
+
+        finding = await h.wait_finding(flow["id"])
+        assert finding["rule_id"] == "takeover.s3-nosuchbucket"
+        assert finding["flow_id"] == flow["id"]
+        assert finding["severity"] == "high"
+        first = finding["evidence"][0]
+        assert first["where"] == "response_body"
+        assert isinstance(first["offset"], int)
+        assert "NoSuchBucket" in first["detail"]
+        assert "assets.dangling-target.example.com" in first["detail"]
+
+        miss = await _fetch(
+            h, proxy, f"{fx.base}/{_S3_MISS}?marker=t04-s3-clean", "t04-s3-clean"
+        )
+        await _assert_silent(h, miss["id"], "takeover.s3-nosuchbucket")
+
+
+async def test_shopify_shop_not_found_fires(odda_session) -> None:
+    """A Shopify shop-not-found body yields the takeover Finding (HIGH);
+    a page without the phrase does not fire."""
+    async with odda_session() as h, fixture_site([_SHOPIFY, "index.html"]) as fx:
+        proxy = await h.call("proxy_url", {})
+        flow = await _fetch(
+            h, proxy, f"{fx.base}/{_SHOPIFY}?marker=t04-shopify", "t04-shopify"
+        )
+
+        finding = await h.wait_finding(flow["id"])
+        assert finding["rule_id"] == "takeover.shopify"
+        assert finding["severity"] == "high"
+        assert any("currently unavailable" in e["detail"] for e in finding["evidence"])
+
+        miss = await _fetch(
+            h,
+            proxy,
+            f"{fx.base}/index.html?marker=t04-shopify-clean",
+            "t04-shopify-clean",
+        )
+        await _assert_silent(h, miss["id"], "takeover.shopify")
+
+
+async def test_each_compromised_cdn_import_fires_and_clean_cdns_do_not(
+    odda_session,
+) -> None:
+    """An HTML script import from each compromised CDN yields the
+    supply-chain Finding (HIGH) with the domain in evidence; imports
+    from unaffected CDNs (cdnjs, unpkg, jsdelivr) do not fire."""
+    async with odda_session() as h, fixture_site([_CDN_CLEAN]) as fx:
+        proxy = await h.call("proxy_url", {})
+        for domain, src in _CDN_IMPORTS.items():
+            body = (
+                "<!DOCTYPE html>\n<html><head>"
+                f'<script src="{src}"></script>'
+                "</head><body>cdn import</body></html>\n"
+            )
+            async with fixture_site(index_body=body) as bad:
+                marker = f"t04-cdn-{domain.replace('.', '-')}"
+                flow = await _fetch(h, proxy, f"{bad.base}/?marker={marker}", marker)
+
+            finding = await h.wait_finding(flow["id"])
+            assert finding["rule_id"] == "js.malicious-cdn-import", domain
+            assert finding["severity"] == "high"
+            assert domain in finding["evidence"][0]["detail"], domain
+
+        miss = await _fetch(
+            h, proxy, f"{fx.base}/{_CDN_CLEAN}?marker=t04-cdn-clean", "t04-cdn-clean"
+        )
+        await _assert_silent(h, miss["id"], "js.malicious-cdn-import")
+
+
+async def test_telerik_vulnerable_version_fires_and_unknown_does_not(
+    odda_session,
+) -> None:
+    """A Telerik WebResource reference carrying a vulnerable version
+    yields the CVE Finding (HIGH) with CVE-2017-9248 in refs and the
+    version in evidence; a fixed/unknown version does not fire."""
+    async with (
+        odda_session() as h,
+        fixture_site([_TELERIK_HITS, _TELERIK_MISS]) as fx,
+    ):
+        proxy = await h.call("proxy_url", {})
+        flow = await _fetch(
+            h, proxy, f"{fx.base}/{_TELERIK_HITS}?marker=t04-telerik", "t04-telerik"
+        )
+
+        finding = await h.wait_finding(flow["id"])
+        assert finding["rule_id"] == "cve.telerik-ui-9248"
+        assert finding["severity"] == "high"
+        assert "CVE-2017-9248" in finding["refs"]
+        assert "2013.2.611.35" in finding["evidence"][0]["detail"]
+
+        miss = await _fetch(
+            h,
+            proxy,
+            f"{fx.base}/{_TELERIK_MISS}?marker=t04-telerik-clean",
+            "t04-telerik-clean",
+        )
+        await _assert_silent(h, miss["id"], "cve.telerik-ui-9248")
+
+
+async def test_prometheus_metrics_page_fires_and_prose_does_not(
+    odda_session,
+) -> None:
+    """A Prometheus exposition body on a 200 yields the exposure Finding
+    (MEDIUM) with the HELP/TYPE pair in evidence; ordinary prose that
+    mentions metrics does not fire."""
+    async with odda_session() as h, fixture_site([_PROM_HITS, _PROM_MISS]) as fx:
+        proxy = await h.call("proxy_url", {})
+        flow = await _fetch(
+            h, proxy, f"{fx.base}/{_PROM_HITS}?marker=t04-prom", "t04-prom"
+        )
+
+        finding = await h.wait_finding(flow["id"])
+        assert finding["rule_id"] == "exposure.prometheus-metrics"
+        assert finding["severity"] == "medium"
+        details = " ".join(e["detail"] for e in finding["evidence"])
+        assert "# HELP go_goroutines" in details
+        assert "# TYPE go_goroutines gauge" in details
+
+        miss = await _fetch(
+            h, proxy, f"{fx.base}/{_PROM_MISS}?marker=t04-prom-clean", "t04-prom-clean"
+        )
+        await _assert_silent(h, miss["id"], "exposure.prometheus-metrics")
 
 
 # --- ticket 06: user rules + rule tool trio ---

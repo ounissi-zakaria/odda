@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><BucketName>assets.dangling-target.example.com</BucketName><RequestId>44BC25F711EXAMPLE</RequestId><HostId>9Gjjt1m+cjU4OPvX9O9/8RuvnG41MRb/18DBuxXfahEFWRta4B0aKyQ2ncX2v</HostId></Error>
