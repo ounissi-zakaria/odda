@@ -44,6 +44,7 @@ from functools import cache
 from importlib import resources
 from typing import Any
 
+from odda.scanner.engine import _RESPONSE_BODY
 from odda.scanner.model import Evidence, Finding, FlowView, Rule, Severity
 
 logger = logging.getLogger(__name__)
@@ -61,9 +62,8 @@ _VERSION_GROUP = "version"
 # vendored regexes mean what upstream means.
 _VERSION_CLASS = r"[0-9][0-9.a-z_\\-]+"
 
-# Evidence "where" values: the declarative engine matches bodies; this
-# adapter also matches the flow record's URL path.
-_RESPONSE_BODY = "response_body"
+# Evidence "where" value for matches on the flow record's URL path —
+# the body "where" comes from the engine, which defines it.
 _REQUEST_PATH = "request_path"
 
 # Content-type prefixes a flow must carry to be a JS body at all.

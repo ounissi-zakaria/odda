@@ -146,6 +146,10 @@ class Rule:
             self, "request_header_patterns", _compile(self.request_header_patterns)
         )
 
+    def scan(self, view: FlowView) -> list[Finding] | None:  # noqa: ARG002
+        """Declarative rules return ``None``; dataset-backed rules override."""
+        return None
+
 
 def _compile(
     patterns: tuple[re.Pattern[str] | str, ...],
@@ -325,6 +329,11 @@ class FlowView:
                         self._content_type = line.split(":", 1)[1].strip()
                         break
         return self._content_type
+
+    @property
+    def is_browser(self) -> bool:
+        """Whether the flow rode a browser's proxy credentials."""
+        return self.record.get("browser_id") is not None
 
     @staticmethod
     def _read(path: Path) -> str:

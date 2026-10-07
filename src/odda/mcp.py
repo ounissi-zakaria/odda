@@ -1058,23 +1058,15 @@ async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str
 
 
 # The rule-file contract rides the tool description (an agent cannot
-# infer the format); built from the one skeleton the load-failure
-# rejections also show, so the surfaces cannot drift.
+# infer the format), derived from the one skeleton the load-failure
+# rejections also show — a single source, so the surfaces cannot
+# drift. The id-uniqueness constraint is deliberately absent here: it
+# lives in the firing error (CODING_STANDARDS), fixes included.
 _RULE_INSTALL_DOC = (
     "Install a passive-scanner rule slot from file or source. The slot "
     "is a Python file whose module-level RULES list holds Rule objects; "
     "installed rules scan flows captured after the install, never "
-    "retroactively. Rule ids are permanent and globally unique — builtin "
-    "ids and other slots' ids are taken. A rule file looks like:\n"
-    + RULE_FILE_SKELETON
-    + "Match kinds (each match becomes one evidence entry): "
-    "body_patterns over the stored response body, header_patterns over "
-    "the stored response headers, request_query_patterns over request "
-    "URL query parameter names, request_header_patterns over stored "
-    "request header lines. Gates, all optional: schemes, statuses, "
-    "content_types (prefix match), browser_only (browser-driven flows "
-    "only), request_browser_only (same, for the request-side matchers "
-    "only)."
+    "retroactively. A rule file looks like:\n" + RULE_FILE_SKELETON
 )
 
 
