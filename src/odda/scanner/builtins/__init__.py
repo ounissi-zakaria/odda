@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from odda.scanner.builtins import disclosure
+from odda.scanner.builtins import cookies, disclosure
 
 if TYPE_CHECKING:
     from odda.scanner.model import Rule
 
-BUILTIN_RULES: tuple[Rule, ...] = (*disclosure.RULES,)
+BUILTIN_RULES: tuple[Rule, ...] = (*disclosure.RULES, *cookies.RULES)

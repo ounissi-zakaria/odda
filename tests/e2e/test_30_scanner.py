@@ -14,8 +14,9 @@ import ast
 import asyncio
 import json
 from pathlib import Path
+from urllib.parse import quote
 
-from tests.e2e.conftest import curl, fixture_site
+from tests.e2e.conftest import curl, dyn_server, fixture_site
 
 _FX = "stack-trace.html"
 
@@ -263,3 +264,261 @@ def test_scanner_package_has_no_egress_imports() -> None:
         f"scanner imports outside the zero-egress allowlist: "
         f"{sorted(imported - allowed)}"
     )
+
+
+# --- ticket 02: disclosure builtin family ---
+
+_PK = "private-key.html"
+_PC = "public-cert.html"
+
+
+async def test_private_key_block_lands_finding(odda_session) -> None:
+    """A PEM private-key block in a response body yields a
+    disclosure.private-key Finding (HIGH) with body evidence and refs."""
+    async with odda_session() as h, fixture_site([_PK]) as fx:
+        proxy = await h.call("proxy_url", {})
+        marker = "scan-pk-pos"
+        r = await curl(
+            f"{fx.base}/{_PK}?marker={marker}",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow(marker)
+        finding = await h.wait_finding(flow["id"])
+
+        assert finding["rule_id"] == "disclosure.private-key"
+        assert finding["flow_id"] == flow["id"]
+        assert finding["severity"] == "high"
+        assert finding["title"]
+        assert "CWE-321" in finding["refs"]
+        # The fixture's match inventory: the RSA and the OpenSSH BEGIN
+        # sentinels — two blocks, one finding.
+        assert len(finding["evidence"]) == 2
+        details = {e["detail"] for e in finding["evidence"]}
+        assert any("RSA PRIVATE KEY" in d for d in details)
+        assert any("OPENSSH PRIVATE KEY" in d for d in details)
+        assert all(e["where"] == "response_body" for e in finding["evidence"])
+        assert len({e["offset"] for e in finding["evidence"]}) == 2
+        assert len(h.findings_for(flow["id"])) == 1
+
+
+async def test_public_certificate_block_does_not_fire(odda_session) -> None:
+    """A public-key / certificate PEM block is not a private key — no
+    finding for published trust material."""
+    async with odda_session() as h, fixture_site([_PC]) as fx:
+        proxy = await h.call("proxy_url", {})
+        marker = "scan-pk-neg"
+        r = await curl(
+            f"{fx.base}/{_PC}?marker={marker}",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow(marker)
+        await asyncio.sleep(0.5)
+        assert h.findings_for(flow["id"]) == []
+
+
+_FS = "frontend-secret.js"
+_BK = "benign-keynames.js"
+
+
+async def test_frontend_secret_assignment_lands_finding(odda_session) -> None:
+    """A hardcoded secret assignment in a served JS body yields a
+    disclosure.frontend-secret Finding (MEDIUM) with the assignments and
+    the logger line as evidence."""
+    async with odda_session() as h, fixture_site([_FS]) as fx:
+        proxy = await h.call("proxy_url", {})
+        marker = "scan-fs-pos"
+        r = await curl(
+            f"{fx.base}/{_FS}?marker={marker}",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow(marker)
+        finding = await h.wait_finding(flow["id"])
+
+        assert finding["rule_id"] == "disclosure.frontend-secret"
+        assert finding["flow_id"] == flow["id"]
+        assert finding["severity"] == "medium"
+        assert finding["title"]
+        assert "CWE-798" in finding["refs"]
+        # The fixture's match inventory: client_secret, refreshToken,
+        # and api_key assignments, a quoted "apiKey" property, and two
+        # password-leaking logger lines — six matches, one finding.
+        assert len(finding["evidence"]) == 6
+        details = " ".join(e["detail"] for e in finding["evidence"])
+        assert "client_secret" in details
+        assert "refreshToken" in details
+        assert "api_key" in details
+        assert "apiKey" in details
+        assert details.count("password") == 2
+        assert all(e["where"] == "response_body" for e in finding["evidence"])
+        assert len(h.findings_for(flow["id"])) == 1
+
+
+async def test_benign_key_names_do_not_fire(odda_session) -> None:
+    """Ordinary JS property names that merely contain "key" (hotkey,
+    keyword, apiKeyId, keydown) are not secrets — no finding, and the
+    scanner's subtree stays absent."""
+    async with odda_session() as h, fixture_site([_BK]) as fx:
+        proxy = await h.call("proxy_url", {})
+        marker = "scan-fs-neg"
+        r = await curl(
+            f"{fx.base}/{_BK}?marker={marker}",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow(marker)
+        await asyncio.sleep(0.5)
+        assert h.findings_for(flow["id"]) == []
+        assert not (h.data_dir / "scanner").exists()
+
+
+async def test_frontend_secret_requires_2xx(odda_session) -> None:
+    """The frontend-secret gate holds for 2xx responses only: the same
+    assignment shape served with status 404 yields no finding."""
+    async with odda_session() as h, dyn_server() as dyn:
+        proxy = await h.call("proxy_url", {})
+        secret = 'const apiKey = "sk_live_26XyZ9Q8pL2mN4vB7cD3eF5g";'
+        url = (
+            f"{dyn.tls_base}/?marker=scan-fs-404"
+            "&status=404"
+            "&header=content-type:text/javascript"
+            f"&body={quote(secret, safe='')}"
+        )
+        r = await curl(
+            url,
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "404"
+
+        flow = await h.wait_flow("scan-fs-404")
+        await asyncio.sleep(0.5)
+        assert h.findings_for(flow["id"]) == []
+
+
+_AWB = "aws-key-body.txt"
+
+
+async def test_aws_key_in_body_lands_finding(odda_session) -> None:
+    """An AWS access key id in a response body yields a
+    disclosure.aws-key Finding (HIGH); the near-miss decoys in the same
+    body (truncated, lowercase, embedded) do not add evidence."""
+    async with odda_session() as h, fixture_site([_AWB]) as fx:
+        proxy = await h.call("proxy_url", {})
+        marker = "scan-aws-body"
+        r = await curl(
+            f"{fx.base}/{_AWB}?marker={marker}",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow(marker)
+        finding = await h.wait_finding(flow["id"])
+
+        assert finding["rule_id"] == "disclosure.aws-key"
+        assert finding["flow_id"] == flow["id"]
+        assert finding["severity"] == "high"
+        assert finding["title"]
+        assert "CWE-798" in finding["refs"]
+        assert len(finding["evidence"]) == 1
+        first = finding["evidence"][0]
+        assert first["where"] == "response_body"
+        assert first["detail"] == "AKIAIOSFODNN7EXAMPLE"
+        assert len(h.findings_for(flow["id"])) == 1
+
+
+async def test_aws_key_in_response_header_lands_finding(odda_session) -> None:
+    """An AWS access key id in a response header yields one
+    disclosure.aws-key Finding whose evidence is located in the stored
+    response headers (where="response_headers")."""
+    async with odda_session() as h, dyn_server() as dyn:
+        proxy = await h.call("proxy_url", {})
+        url = (
+            f"{dyn.tls_base}/?marker=scan-aws-hdr"
+            "&header=x-access-key:AKIAIOSFODNN7EXAMPLE"
+        )
+        r = await curl(
+            url,
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow("scan-aws-hdr")
+        finding = await h.wait_finding(flow["id"])
+
+        assert finding["rule_id"] == "disclosure.aws-key"
+        assert finding["flow_id"] == flow["id"]
+        assert finding["severity"] == "high"
+        # Header side only: the body is empty, so the single evidence
+        # entry comes from the stored response headers.
+        assert len(finding["evidence"]) == 1
+        first = finding["evidence"][0]
+        assert first["where"] == "response_headers"
+        assert first["detail"] == "AKIAIOSFODNN7EXAMPLE"
+        assert isinstance(first["offset"], int)
+        assert len(h.findings_for(flow["id"])) == 1
+
+
+async def test_xdebug_setcookie_lands_finding(odda_session) -> None:
+    """A Set-Cookie: XDEBUG_SESSION= response yields a
+    cookie.xdebug-session Finding (HIGH) whose refs point at the Xdebug
+    remote-debug documentation, evidence located in the response
+    headers."""
+    async with odda_session() as h, dyn_server() as dyn:
+        proxy = await h.call("proxy_url", {})
+        url = (
+            f"{dyn.tls_base}/?marker=scan-xdbg-pos"
+            f"&header=set-cookie:{quote('XDEBUG_SESSION=odda; path=/', safe='')}"
+        )
+        r = await curl(
+            url,
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow("scan-xdbg-pos")
+        finding = await h.wait_finding(flow["id"])
+
+        assert finding["rule_id"] == "cookie.xdebug-session"
+        assert finding["flow_id"] == flow["id"]
+        assert finding["severity"] == "high"
+        assert any("xdebug.org" in ref for ref in finding["refs"])
+        assert len(finding["evidence"]) == 1
+        first = finding["evidence"][0]
+        assert first["where"] == "response_headers"
+        assert "XDEBUG_SESSION=" in first["detail"]
+        assert len(h.findings_for(flow["id"])) == 1
+
+
+async def test_ordinary_setcookie_does_not_fire(odda_session) -> None:
+    """A Set-Cookie response for an ordinary session cookie is not the
+    Xdebug echo — no finding."""
+    async with odda_session() as h, dyn_server() as dyn:
+        proxy = await h.call("proxy_url", {})
+        url = (
+            f"{dyn.tls_base}/?marker=scan-xdbg-neg"
+            f"&header=set-cookie:{quote('sessionid=abc123; Path=/', safe='')}"
+        )
+        r = await curl(
+            url,
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow("scan-xdbg-neg")
+        await asyncio.sleep(0.5)
+        assert h.findings_for(flow["id"]) == []
