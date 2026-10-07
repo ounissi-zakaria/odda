@@ -242,6 +242,12 @@ def test_scanner_package_has_no_egress_imports() -> None:
         "contextlib",
         "dataclasses",
         "enum",
+        # ticket 05: dataset-adapter stdlib — one-shot digesting
+        # (hashlib), package-data loading (importlib.resources), and a
+        # memoized compile (functools). None can open a socket.
+        "functools",
+        "hashlib",
+        "importlib",
         "json",
         "logging",
         "pathlib",
@@ -741,6 +747,158 @@ async def test_prometheus_metrics_page_fires_and_prose_does_not(
             h, proxy, f"{fx.base}/{_PROM_MISS}?marker=t04-prom-clean", "t04-prom-clean"
         )
         await _assert_silent(h, miss["id"], "exposure.prometheus-metrics")
+
+
+# --- ticket 05: retirejs dataset ---
+
+
+def test_retirejs_dataset_ships_offline_as_package_data() -> None:
+    """The vendored retire.js repository (Apache-2.0) is the scanner's
+    only data source and ships inside the package: the dataset and its
+    license resolve through the same importlib.resources mechanism the
+    adapter loads them with, and pyproject's package-data ships the
+    directory (the userscripts/default precedent)."""
+    from importlib import resources
+
+    data = resources.files("odda.scanner.data")
+    dataset = data.joinpath("jsrepository.json")
+    license_file = data.joinpath("jsrepository.LICENSE")
+    assert dataset.is_file(), "vendored jsrepository.json missing from package"
+    assert license_file.is_file(), "Apache-2.0 license file missing from package"
+    assert "Apache License" in license_file.read_text(encoding="utf-8")
+
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    assert '"scanner/data/*"' in pyproject.read_text(encoding="utf-8"), (
+        "scanner/data must ship via [tool.setuptools.package-data]"
+    )
+
+
+async def test_outdated_jquery_filecontent_lands_finding(odda_session) -> None:
+    """A served JS body matching a vendored file-content pattern yields a
+    js.outdated-library Finding at the highest matched advisory severity,
+    one evidence entry per matched advisory (each naming its own severity),
+    with the library, detected version, extractor, and CVE refs inline.
+
+    jquery 1.6.1 against the vendored jquery advisories: exactly seven
+    apply — four mediums with floors 1.6.1 clears (1.6.3 and 1.9.0b1
+    unbounded, CVE-2020-7656 >= 1.2.1, CVE-2015-9251 >= 1.4.0) plus
+    CVE-2019-11358 (>= 1.1.4), CVE-2020-11023 (>= 1.0.3), and the lone
+    low at < 2.999.999; the high (CVE-2016-10707) is fenced out by
+    atOrAbove 3.0.0-rc.1 — so the aggregate severity is medium."""
+    _fx = "ticket05-jquery-old.js"
+    async with odda_session() as h, fixture_site([_fx]) as fx:
+        proxy = await h.call("proxy_url", {})
+        r = await curl(
+            f"{fx.base}/{_fx}?marker=scan-t05-jq",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow("scan-t05-jq")
+        finding = await h.wait_finding(flow["id"])
+
+        assert finding["rule_id"] == "js.outdated-library"
+        assert finding["flow_id"] == flow["id"]
+        assert finding["severity"] == "medium"
+        evidence = finding["evidence"]
+        assert len(evidence) == 7
+        assert all("jquery 1.6.1 (via filecontent)" in e["detail"] for e in evidence)
+        assert any("low: " in e["detail"] for e in evidence)
+        assert any("medium: " in e["detail"] for e in evidence)
+        assert {e["where"] for e in evidence} == {"response_body"}
+        assert "CVE-2011-4969" in finding["refs"]
+        assert "CVE-2019-11358" in finding["refs"]
+        assert "CVE-2020-11023" in finding["refs"]
+        assert len(h.findings_for(flow["id"])) == 1
+
+
+async def test_sha1_hash_extractor_detects_hashed_version(odda_session) -> None:
+    """A JS body whose SHA-1 matches a known vulnerable version is
+    detected via the hash extractor. The fixture is byte-identical to
+    upstream's own retire-example test asset — the preimage of the
+    dataset's 07f8b94c… → 0.0.1 hash — and its banner also matches the
+    file-content pattern, so this pins the exact-hash-first priority."""
+    _fx = "retire-example-0.0.1.min.js"
+    async with odda_session() as h, fixture_site([_fx]) as fx:
+        proxy = await h.call("proxy_url", {})
+        r = await curl(
+            f"{fx.base}/{_fx}?marker=scan-t05-hash",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow("scan-t05-hash")
+        finding = await h.wait_finding(flow["id"])
+
+        assert finding["rule_id"] == "js.outdated-library"
+        assert finding["severity"] == "low"
+        first = finding["evidence"][0]
+        assert "retire-example 0.0.1 (via sha1)" in first["detail"]
+        assert "vulnerable below 0.0.2" in first["detail"]
+        assert first["where"] == "response_body"
+        assert first["offset"] == 0
+        assert "CVE-XXXX-XXXX" in finding["refs"]
+
+
+async def test_filename_extractor_detects_path_version(odda_session) -> None:
+    """The filename extractor matches the flow record's path: a body
+    too inert for any content pattern still lands a finding when the
+    URL filename carries the vendored version pattern."""
+    _fx = "retire-example-0.0.1.js"
+    async with odda_session() as h, fixture_site([_fx]) as fx:
+        proxy = await h.call("proxy_url", {})
+        r = await curl(
+            f"{fx.base}/{_fx}?marker=scan-t05-name",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow("scan-t05-name")
+        finding = await h.wait_finding(flow["id"])
+
+        first = finding["evidence"][0]
+        assert "retire-example 0.0.1 (via filename)" in first["detail"]
+        assert first["where"] == "request_path"
+        assert finding["severity"] == "low"
+
+
+async def test_current_and_above_threshold_versions_yield_no_finding(
+    odda_session,
+) -> None:
+    """Versions outside the advisory bounds stay silent: a current
+    jquery (3.7.1, above every below-bound) and a retire-example at
+    the bound itself (0.0.2, not strictly below 0.0.2) produce no
+    js.outdated-library finding — while a positive control in the same
+    session proves the drain is live."""
+    current, at_bound, control = (
+        "ticket05-jquery-current.js",
+        "retire-example-0.0.2.js",
+        "ticket05-jquery-old.js",
+    )
+    async with odda_session() as h, fixture_site([current, at_bound, control]) as fx:
+        proxy = await h.call("proxy_url", {})
+        for name, marker in (
+            (current, "scan-t05-current"),
+            (at_bound, "scan-t05-bound"),
+            (control, "scan-t05-control"),
+        ):
+            r = await curl(
+                f"{fx.base}/{name}?marker={marker}",
+                proxy,
+                extra=["-o", "/dev/null", "-w", "%{http_code}"],
+            )
+            assert r.stdout == "200"
+
+        control_flow = await h.wait_flow("scan-t05-control")
+        await h.wait_finding(control_flow["id"])  # the drain is live
+
+        for marker in ("scan-t05-current", "scan-t05-bound"):
+            flow = await h.wait_flow(marker)
+            stale = h.findings_for(flow["id"])
+            assert not stale, f"no outdated-library finding for {marker}: {stale}"
 
 
 # --- ticket 06: user rules + rule tool trio ---

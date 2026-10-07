@@ -155,6 +155,15 @@ class Scanner:
         view = FlowView(self._data_dir, record)
         for rule in rules:
             try:
+                # Dataset-backed rules (ADR-0035) carry their own scan:
+                # the vendored data's extractors and per-advisory
+                # severities cannot fold into the declarative spec, so
+                # they hand back fully formed findings.
+                scan = getattr(rule, "scan", None)
+                if callable(scan):
+                    for finding in scan(view):
+                        self._emit(finding)
+                    continue
                 evidence = self._match(rule, view)
             except Exception:
                 logger.exception(
