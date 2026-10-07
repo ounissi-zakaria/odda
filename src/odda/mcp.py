@@ -1067,10 +1067,14 @@ _RULE_INSTALL_DOC = (
     "retroactively. Rule ids are permanent and globally unique — builtin "
     "ids and other slots' ids are taken. A rule file looks like:\n"
     + RULE_FILE_SKELETON
-    + "body_patterns are regexes over the stored response body (each "
-    "match becomes one evidence entry). Gates, all optional: schemes, "
-    "statuses, content_types (prefix match), browser_only (browser-driven "
-    "flows only)."
+    + "Match kinds (each match becomes one evidence entry): "
+    "body_patterns over the stored response body, header_patterns over "
+    "the stored response headers, request_query_patterns over request "
+    "URL query parameter names, request_header_patterns over stored "
+    "request header lines. Gates, all optional: schemes, statuses, "
+    "content_types (prefix match), browser_only (browser-driven flows "
+    "only), request_browser_only (same, for the request-side matchers "
+    "only)."
 )
 
 

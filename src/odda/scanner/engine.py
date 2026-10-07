@@ -43,6 +43,10 @@ _EVIDENCE_DETAIL_MAX = 200
 _RESPONSE_BODY = "response_body"
 # Evidence "where" for matches in the stored response headers.
 _RESPONSE_HEADERS = "response_headers"
+# Evidence "where" for matches on the request URL's query parameters.
+_REQUEST_QUERY = "request_query"
+# Evidence "where" for matches on the stored request headers.
+_REQUEST_HEADERS = "request_headers"
 
 
 class Scanner:
@@ -193,30 +197,26 @@ class Scanner:
     def _match(self, rule: Rule, view: FlowView) -> list[Evidence]:
         """Apply a rule's gates, then its match spec, to one flow view."""
         record = view.record
-        if rule.schemes and record.get("scheme") not in rule.schemes:
-            return []
-        if rule.statuses and record.get("status_code") not in rule.statuses:
-            return []
-        if rule.content_types and not _content_type_matches(
-            rule.content_types, view.content_type
+        browser = record.get("browser_id") is not None
+        query_patterns, request_header_patterns = _request_patterns(
+            rule, browser=browser
+        )
+        if not any(
+            (
+                rule.body_patterns,
+                rule.header_patterns,
+                query_patterns,
+                request_header_patterns,
+            )
         ):
             return []
-        if rule.browser_only and record.get("browser_id") is None:
+        if not _passes_gates(rule, record, view):
             return []
-        if not rule.body_patterns and not rule.header_patterns:
-            return []
-        evidence: list[Evidence] = []
-        if rule.body_patterns:
-            body = view.body
-            if body is not None:
-                evidence += _pattern_evidence(rule.body_patterns, body, _RESPONSE_BODY)
-        if rule.header_patterns:
-            headers = _stored_response_headers(view)
-            if headers is not None:
-                evidence += _pattern_evidence(
-                    rule.header_patterns, headers, _RESPONSE_HEADERS
-                )
-        return evidence
+        evidence = _response_evidence(rule, view)
+        return [
+            *evidence,
+            *_request_evidence(query_patterns, request_header_patterns, view),
+        ]
 
     def _emit(self, finding: Finding) -> None:
         """Record one finding; a failing write is logged and skipped."""
@@ -276,3 +276,120 @@ def _stored_response_headers(view: FlowView) -> str | None:
         return view.response_headers
     except FileNotFoundError:
         return None
+
+
+def _passes_gates(rule: Rule, record: dict[str, Any], view: FlowView) -> bool:
+    """Every set gate passes; an unset gate passes all flows.
+
+    Unset gates deliberately include error flows: a rule with no
+    status or content-type gate scans flows without a response side
+    too, which is how request-side rules reach error flows (their
+    request file exists even though nothing came back).
+    """
+    if rule.schemes and record.get("scheme") not in rule.schemes:
+        return False
+    if rule.statuses and record.get("status_code") not in rule.statuses:
+        return False
+    if rule.content_types and not _content_type_matches(
+        rule.content_types, view.content_type
+    ):
+        return False
+    if rule.browser_only:
+        return record.get("browser_id") is not None
+    return True
+
+
+def _request_patterns(
+    rule: Rule, *, browser: bool
+) -> tuple[tuple[re.Pattern[str], ...], tuple[re.Pattern[str], ...]]:
+    """The request-side pattern pair after its own browser gate.
+
+    ``request_browser_only`` gates only the request-side matchers, so
+    one rule can mix halves: an ungated response matcher next to a
+    request matcher that trusts browser-produced requests only (the
+    Xdebug rule's shape — Set-Cookie echo ungated, request-param half
+    gated).
+    """
+    if rule.request_browser_only and not browser:
+        return (), ()
+    return rule.request_query_patterns, rule.request_header_patterns
+
+
+def _response_evidence(rule: Rule, view: FlowView) -> list[Evidence]:
+    """Body and response-header matches; absent material is a skip."""
+    evidence: list[Evidence] = []
+    if rule.body_patterns:
+        body = view.body
+        if body is not None:
+            evidence += _pattern_evidence(rule.body_patterns, body, _RESPONSE_BODY)
+    if rule.header_patterns:
+        headers = _stored_response_headers(view)
+        if headers is not None:
+            evidence += _pattern_evidence(
+                rule.header_patterns, headers, _RESPONSE_HEADERS
+            )
+    return evidence
+
+
+def _request_evidence(
+    query_patterns: tuple[re.Pattern[str], ...],
+    request_header_patterns: tuple[re.Pattern[str], ...],
+    view: FlowView,
+) -> list[Evidence]:
+    """Query-parameter-name and request-header-line matches."""
+    evidence: list[Evidence] = []
+    if query_patterns:
+        evidence += _pair_evidence(query_patterns, _query_pairs(view), _REQUEST_QUERY)
+    if request_header_patterns:
+        evidence += _pair_evidence(
+            request_header_patterns, _request_header_lines(view), _REQUEST_HEADERS
+        )
+    return evidence
+
+
+def _query_pairs(view: FlowView) -> list[tuple[str, str]]:
+    """Query parameters as ``(match text, evidence detail)`` pairs.
+
+    Patterns match parameter names — the name is the signal — while
+    the recorded detail is the whole ``name=value`` pair so a finding
+    names the offending parameter. A flow without a stored request
+    file has nothing to match, which is a skip, not a failure.
+    """
+    try:
+        pairs = view.request_query
+    except FileNotFoundError:
+        return []
+    return [(name, f"{name}={value}") for name, value in pairs]
+
+
+def _request_header_lines(view: FlowView) -> list[tuple[str, str]]:
+    """Request header lines as ``(match text, evidence detail)`` pairs.
+
+    Both are the stored ``Name: value`` form (verbatim case, value
+    included — the credential itself is the evidence). A flow without
+    a stored request file is a skip, not a failure.
+    """
+    try:
+        headers = view.request_headers
+    except FileNotFoundError:
+        return []
+    return [(f"{name}: {value}", f"{name}: {value}") for name, value in headers]
+
+
+def _pair_evidence(
+    patterns: tuple[re.Pattern[str], ...],
+    items: Sequence[tuple[str, str]],
+    where: str,
+) -> list[Evidence]:
+    """One evidence entry per (item, pattern) match; offset is the index.
+
+    The request side matches parsed items, not one text blob, so an
+    evidence entry identifies its item by position in the parsed list
+    and by the pair's rendered detail.
+    """
+    return [
+        Evidence(where=where, offset=index, detail=detail[:_EVIDENCE_DETAIL_MAX])
+        for index, (text, detail) in enumerate(items)
+        for pattern in patterns
+        if pattern.search(text)
+    ]

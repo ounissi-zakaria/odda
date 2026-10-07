@@ -12,6 +12,7 @@ from odda.scanner.builtins import (
     cookies,
     disclosure,
     fingerprints,
+    request,
     retirejs,
     supplychain,
     takeover,
@@ -26,5 +27,6 @@ BUILTIN_RULES: tuple[Rule, ...] = (
     *supplychain.RULES,
     *fingerprints.RULES,
     *cookies.RULES,
+    *request.RULES,
     retirejs.RULE,
 )

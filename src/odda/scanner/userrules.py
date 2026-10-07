@@ -59,11 +59,17 @@ RULES = [
         severity=Severity.MEDIUM,  # info | low | medium | high | critical
         title="One-line title carried onto each finding",
         body_patterns=(r"regex-matched-against-the-stored-response-body",),
+        # Other match kinds (each match becomes one evidence entry):
+        # header_patterns — stored response header lines ("Name: value")
+        # request_query_patterns — request URL query parameter names
+        # request_header_patterns — stored request header lines
         # Optional gates — a flow must pass every gate that is set:
         # schemes=("http", "https"),  # request schemes only
         # statuses=(200, 404),  # response status codes only
         # content_types=("text/html",),  # content-type prefixes only
         # browser_only=False,  # True: browser-driven flows only
+        # request_browser_only=False,  # True: request-side matchers see
+        #   # browser-driven flows only
         # refs=("CWE-200",),  # carried onto findings
     ),
 ]

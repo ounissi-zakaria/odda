@@ -226,8 +226,9 @@ async def test_preboot_flows_are_not_scanned(odda_session, tmp_path) -> None:
 
 def test_scanner_package_has_no_egress_imports() -> None:
     """Structural zero-egress check: every import in the scanner package
-    is on the allowlist — no socket/ssl/urllib/http or any third-party
-    module (the scanner is stdlib-only and sends nothing, ADR-0034).
+    is on the allowlist — no socket/ssl/http or any third-party module
+    (the scanner is stdlib-only and sends nothing, ADR-0034); urllib
+    appears only as urllib.parse (query-string parsing, no network).
     asyncio is allowlisted for loop primitives (Event, task awaiting);
     egress would require the socket layer, which is not imported."""
     scanner_src = Path(__file__).resolve().parents[2] / "src" / "odda" / "scanner"
@@ -254,6 +255,7 @@ def test_scanner_package_has_no_egress_imports() -> None:
         "re",
         "shutil",  # slot removal (rmtree) — filesystem only, no sockets
         "typing",
+        "urllib",  # urllib.parse only — query-string parsing, no network
         # First-party, package-internal only (odda.scanner.*); the
         # scanner must not reach into flowstore/mitmproxy/mcp.
         "odda",
@@ -1262,3 +1264,215 @@ async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
         flow = await _drive(h, fx, "t06-boot-restored")
         finding = await _wait_rule_finding(h, flow["id"], "user.ticket06-canary")
         assert finding["flow_id"] == flow["id"]
+
+
+# --- ticket 03: request-side rules + browser gate ---
+
+# Query-parameter shapes the request-side rules match; markers are
+# unique to this ticket's flows.
+_JS = "jsessionid=t03-nav-session"
+_PW = "pwd=t03-nav-password"
+
+
+async def _drained_silent(h, fx, marker: str, *flow_ids: str) -> None:
+    """Prove the drain passed the given flows, then assert silence.
+
+    A finding-producing flow driven after them is awaited through to
+    its own finding; the queue is FIFO and the drain single-tasked, so
+    that finding landing proves every earlier entry was scanned — the
+    deterministic form of a negative assertion (the wait_finding
+    counterpart).
+    """
+    proxy = await h.call("proxy_url", {})
+    await curl(f"{fx.base}/{_FX}?marker={marker}", proxy, extra=["-o", "/dev/null"])
+    probe = await h.wait_flow(marker)
+    await h.wait_finding(probe["id"])
+    for flow_id in flow_ids:
+        assert h.findings_for(flow_id) == [], f"flow {flow_id}: unexpected findings"
+
+
+async def test_browser_session_and_password_params_in_url_land_findings(
+    odda_session,
+) -> None:
+    """Real Chrome navigation with a session-token query parameter yields
+    the request.session-token-in-url Finding (MEDIUM) with request-side
+    evidence; a password-shaped parameter on the same navigation yields
+    request.password-in-url."""
+    async with odda_session() as h, fixture_site(["index.html"]) as fx:
+        bid, tid = await h.open_browser()
+        await h.navigate(bid, tid, f"{fx.base}/?marker=t03-nav&{_JS}&{_PW}")
+        flow = await h.wait_flow("t03-nav")
+        assert flow["browser_id"] is not None
+
+        token = await _wait_rule_finding(h, flow["id"], "request.session-token-in-url")
+        assert token["severity"] == "medium"
+        assert token["flow_id"] == flow["id"]
+        ev = token["evidence"][0]
+        assert ev["where"] == "request_query"
+        assert isinstance(ev["offset"], int)
+        assert ev["detail"].startswith("jsessionid=")
+
+        pw = await _wait_rule_finding(h, flow["id"], "request.password-in-url")
+        assert pw["severity"] == "medium"
+        assert pw["evidence"][0]["where"] == "request_query"
+        assert pw["evidence"][0]["detail"].startswith("pwd=")
+
+
+async def test_request_send_probe_is_invisible_to_request_rules(
+    odda_session,
+) -> None:
+    """The same URL shape sent via request_send — session token, password
+    parameter, and an Authorization header all crafted in — yields NO
+    Finding: request_send flows carry no browser attribution, so the
+    browser-attribution gate holds."""
+    async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
+        await h.call(
+            "request_new",
+            {
+                "name": "t03-probe",
+                "host": "127.0.0.1",
+                "protocol": "http",
+                "port": fx.port,
+            },
+        )
+        h.write_request(
+            "t03-probe",
+            (
+                f"GET {fx.path}/?marker=t03-probe&{_JS}&{_PW} HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{fx.port}\r\n"
+                "Authorization: Bearer t03-probe-creds\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode(),
+        )
+        rec = await h.call_json("request_send", {"name": "t03-probe", "timeout": 10})
+        assert rec["browser_id"] is None
+
+        await _drained_silent(h, fx, "t03-probe-settle", rec["id"])
+
+
+async def test_browser_cleartext_authorization_http_only(odda_session) -> None:
+    """A browser request over http carrying an Authorization header yields
+    the request.cleartext-authorization Finding (HIGH); the https
+    counterpart and a non-browser curl with the same header do not."""
+    async with (
+        odda_session() as h,
+        fixture_site([_FX, "index.html"]) as fx,
+        dyn_server() as dyn,
+    ):
+        bid, tid = await h.open_browser(f"{fx.base}/")
+
+        # http: an in-page fetch with explicit credentials rides the
+        # browser's proxy attribution.
+        status = await h.eval(
+            bid,
+            tid,
+            "fetch('?marker=t03-auth-http', "
+            "{headers: {Authorization: 'Bearer t03-http'}})"
+            ".then(r => r.status)",
+        )
+        assert status == "200"
+        http_flow = await h.wait_flow("t03-auth-http")
+        assert http_flow["scheme"] == "http"
+        assert http_flow["browser_id"] is not None
+
+        finding = await _wait_rule_finding(
+            h, http_flow["id"], "request.cleartext-authorization"
+        )
+        assert finding["severity"] == "high"
+        ev = finding["evidence"][0]
+        assert ev["where"] == "request_headers"
+        assert ev["detail"].startswith("Authorization:")
+
+        # https: the same in-page fetch against the dyn server — the
+        # scheme gate keeps the rule silent.
+        await h.navigate(bid, tid, f"{dyn.tls_base}/")
+        status = await h.eval(
+            bid,
+            tid,
+            "fetch('?marker=t03-auth-https', "
+            "{headers: {Authorization: 'Bearer t03-https'}})"
+            ".then(r => r.status)",
+        )
+        assert status == "200"
+        https_flow = await h.wait_flow("t03-auth-https")
+        assert https_flow["scheme"] == "https"
+        assert https_flow["browser_id"] is not None
+
+        # Non-browser http with the same header: curl attributes to
+        # null, and the browser gate keeps the rule silent.
+        proxy = await h.call("proxy_url", {})
+        await curl(
+            f"{fx.base}/?marker=t03-auth-curl",
+            proxy,
+            extra=["-H", "Authorization: Bearer t03-curl", "-o", "/dev/null"],
+        )
+        curl_flow = await h.wait_flow("t03-auth-curl")
+        assert curl_flow["browser_id"] is None
+
+        await _drained_silent(
+            h, fx, "t03-auth-settle", https_flow["id"], curl_flow["id"]
+        )
+
+
+async def test_browser_xdebug_session_start_param_lands_finding(
+    odda_session,
+) -> None:
+    """A Chrome navigation with XDEBUG_SESSION_START in the URL yields the
+    cookie.xdebug-session Finding from the request side (the fixture's
+    plain 200 carries no Set-Cookie echo); a non-browser request with
+    the same param stays silent — the param half is browser-gated, the
+    Set-Cookie half is not."""
+    async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
+        bid, tid = await h.open_browser()
+        await h.navigate(
+            bid, tid, f"{fx.base}/?marker=t03-xdebug&XDEBUG_SESSION_START=t03"
+        )
+        flow = await h.wait_flow("t03-xdebug")
+        assert flow["browser_id"] is not None
+
+        finding = await _wait_rule_finding(h, flow["id"], "cookie.xdebug-session")
+        assert finding["severity"] == "high"
+        ev = finding["evidence"][0]
+        assert ev["where"] == "request_query"
+        assert ev["detail"].lower().startswith("xdebug_session_start=")
+
+        proxy = await h.call("proxy_url", {})
+        await curl(
+            f"{fx.base}/?marker=t03-xdebug-curl&XDEBUG_SESSION_START=t03",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        curl_flow = await h.wait_flow("t03-xdebug-curl")
+        assert curl_flow["browser_id"] is None
+        await _drained_silent(h, fx, "t03-xdebug-settle", curl_flow["id"])
+
+
+async def test_error_flow_from_browser_keeps_request_rules(odda_session) -> None:
+    """An error Flow from a dead-host browser navigation (no response
+    side) with a token in its URL still yields the request-side Finding —
+    error flows get request-side rules."""
+    async with odda_session() as h:
+        bid, tid = await h.open_browser()
+        # The navigation itself fails (the host never resolves — a dead
+        # target, unlike a Chrome-blocked port, still sends the request
+        # through the proxy); the failed attempt is exactly what leaves
+        # the attributed error flow, so the tool result is irrelevant
+        # either way.
+        await h.client.call_tool(
+            "navigate",
+            {
+                "browser_id": bid,
+                "tab_id": tid,
+                "url": "http://odda-dead.invalid/?marker=t03-dead&token=t03-dead-token",
+            },
+        )
+        flow = await h.wait_flow("t03-dead")
+        assert flow["status_code"] is None
+        assert flow["error"]
+        assert flow["browser_id"] is not None
+
+        finding = await _wait_rule_finding(
+            h, flow["id"], "request.session-token-in-url"
+        )
+        assert finding["evidence"][0]["detail"].startswith("token=")
