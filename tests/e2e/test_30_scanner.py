@@ -245,6 +245,7 @@ def test_scanner_package_has_no_egress_imports() -> None:
         "pathlib",
         "queue",
         "re",
+        "shutil",  # slot removal (rmtree) — filesystem only, no sockets
         "typing",
         # First-party, package-internal only (odda.scanner.*); the
         # scanner must not reach into flowstore/mitmproxy/mcp.
@@ -479,3 +480,368 @@ async def test_prometheus_metrics_page_fires_and_prose_does_not(
             h, proxy, f"{fx.base}/{_PROM_MISS}?marker=t04-prom-clean", "t04-prom-clean"
         )
         await _assert_silent(h, miss["id"], "exposure.prometheus-metrics")
+
+
+# --- ticket 06: user rules + rule tool trio ---
+
+_T06_CANARY = "odda-ticket06-canary"
+# One body drives both families: the canary marker for the user rules
+# under test, and a Python traceback banner so the builtin
+# disclosure.stack-trace finding doubles as the drain-settle probe for
+# negative assertions on later flows.
+_T06_BODY = (
+    "<html><body>ticket06 page; Traceback (most recent call last): "
+    f'File "/app/t06.py"; canary {_T06_CANARY} present</body></html>\n'
+)
+
+_RULE_CANARY = f'''from odda.scanner import Rule, Severity
+
+RULES = [
+    Rule(
+        id="user.ticket06-canary",
+        severity=Severity.MEDIUM,
+        title="Ticket06 canary marker disclosed",
+        body_patterns=(r"{_T06_CANARY}",),
+    ),
+]
+'''
+
+_RULE_ALT = f'''from odda.scanner import Rule, Severity
+
+RULES = [
+    Rule(
+        id="user.ticket06-alt",
+        severity=Severity.LOW,
+        title="Ticket06 alt marker disclosed",
+        body_patterns=(r"{_T06_CANARY}",),
+    ),
+]
+'''
+
+_RULE_COLLIDING = """from odda.scanner import Rule, Severity
+
+RULES = [
+    Rule(
+        id="disclosure.stack-trace",
+        severity=Severity.MEDIUM,
+        title="Collides with a builtin id",
+        body_patterns=(r"never-matches",),
+    ),
+]
+"""
+
+_RULE_DUP = f'''from odda.scanner import Rule, Severity
+
+RULES = [
+    Rule(
+        id="user.ticket06-dup",
+        severity=Severity.LOW,
+        title="Ticket06 duplicate-id probe",
+        body_patterns=(r"{_T06_CANARY}",),
+    ),
+]
+'''
+
+_RULE_BROKEN = "this is not python {{{"
+
+# Two rules in one slot: a normal matcher plus a rule whose scheme gate
+# raises at scan time (a str subclass whose __eq__ raises inside the
+# engine's ``in`` gate check) — the deterministic raising-rule
+# injection ticket 01 deferred. Containment must be per-rule, so the
+# sibling (and the builtin) still fire on the same flow.
+_RULE_PACK = f'''from odda.scanner import Rule, Severity
+
+
+class _Boom(str):
+    __hash__ = str.__hash__
+
+    def __eq__(self, other):
+        raise RuntimeError("ticket06 rule boom")
+
+
+RULES = [
+    Rule(
+        id="user.ticket06-sibling",
+        severity=Severity.LOW,
+        title="Ticket06 sibling marker disclosed",
+        body_patterns=(r"{_T06_CANARY}",),
+    ),
+    Rule(
+        id="user.ticket06-raiser",
+        severity=Severity.LOW,
+        title="Raises while gating",
+        schemes=(_Boom("http"),),
+        body_patterns=(r"{_T06_CANARY}",),
+    ),
+]
+'''
+
+
+def _slot_path(h, name: str) -> Path:
+    return h.data_dir / "rules" / name / "rule.py"
+
+
+async def _drive(h, fx, marker: str) -> dict:
+    proxy = await h.call("proxy_url", {})
+    await curl(f"{fx.base}/?marker={marker}", proxy, extra=["-o", "/dev/null"])
+    return await h.wait_flow(marker)
+
+
+async def _wait_rule_finding(h, flow_id: str, rule_id: str) -> dict:
+    """Bounded poll for one flow's finding from one specific rule."""
+    for _ in range(200):
+        for f in h.findings_for(flow_id):
+            if f["rule_id"] == rule_id:
+                return f
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"no {rule_id!r} finding for flow {flow_id!r}")
+
+
+async def test_rule_install_applies_to_flows_after_install_only(
+    odda_session,
+) -> None:
+    """Installing from source mid-session: matching traffic driven after
+    the install yields the rule's Finding; traffic that flowed before the
+    install does not retroactively match, even though its scan drains
+    after the install."""
+    async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
+        pre = await _drive(h, fx, "t06-pre-install")
+
+        r = await h.call("rule_install", {"name": "canary", "source": _RULE_CANARY})
+        assert r["name"] == "canary"
+        assert r["size"] > 0
+        assert r["rules"] == ["user.ticket06-canary"]
+        assert _slot_path(h, "canary").is_file()
+
+        post = await _drive(h, fx, "t06-post-install")
+        finding = await _wait_rule_finding(h, post["id"], "user.ticket06-canary")
+        assert finding["flow_id"] == post["id"]
+        assert finding["severity"] == "medium"
+        assert finding["title"] == "Ticket06 canary marker disclosed"
+        assert finding["evidence"][0]["where"] == "response_body"
+        assert _T06_CANARY in finding["evidence"][0]["detail"]
+
+        # The pre-install flow never matches the rule (rules apply from
+        # arrival, not from scan time); settled by the post flow's
+        # canary finding — the drain passed the pre flow's entry.
+        assert all(
+            f["rule_id"] != "user.ticket06-canary" for f in h.findings_for(pre["id"])
+        )
+
+
+async def test_rule_install_from_file_and_rule_list_rows(
+    odda_session, tmp_path
+) -> None:
+    """install from a file path persists the slot; rule_list shows builtin
+    and user rows with slot, id, severity, source, and state."""
+    rf = tmp_path / "t06_canary_rule.py"
+    rf.write_text(_RULE_CANARY)
+    async with odda_session() as h:
+        r = await h.call("rule_install", {"name": "alpha", "file": str(rf)})
+        assert r["name"] == "alpha"
+        assert r["size"] > 0
+        assert "user.ticket06-canary" in _slot_path(h, "alpha").read_text()
+
+        rows = await h.call_json("rule_list", {})
+        by_id = {row["id"]: row for row in rows}
+        assert by_id["disclosure.stack-trace"] == {
+            "slot": None,
+            "id": "disclosure.stack-trace",
+            "severity": "high",
+            "source": "builtin",
+            "state": "active",
+            "error": None,
+        }
+        assert by_id["user.ticket06-canary"] == {
+            "slot": "alpha",
+            "id": "user.ticket06-canary",
+            "severity": "medium",
+            "source": "user",
+            "state": "active",
+            "error": None,
+        }
+
+
+async def test_syntax_error_install_rejected_with_expected_shape(
+    odda_session,
+) -> None:
+    """A syntax-error source is rejected naming the problem and showing
+    the expected rule-file shape; nothing is persisted."""
+    async with odda_session() as h:
+        err = await h.call_error(
+            "rule_install", {"name": "bad", "source": _RULE_BROKEN}
+        )
+        assert "Failed to load rule slot 'bad'" in err
+        assert "SyntaxError" in err
+        # the expected file shape rides the rejection
+        assert "from odda.scanner import Rule, Severity" in err
+        assert "RULES = [" in err
+        assert not _slot_path(h, "bad").exists()
+
+
+async def test_colliding_rule_ids_rejected_naming_the_collision(
+    odda_session,
+) -> None:
+    """A rule id colliding with a builtin or another user rule's id is
+    rejected at install, naming the exact collision; the colliding slot
+    never reaches disk."""
+    async with odda_session() as h:
+        err = await h.call_error(
+            "rule_install", {"name": "clash-builtin", "source": _RULE_COLLIDING}
+        )
+        assert "Rule id 'disclosure.stack-trace'" in err
+        assert "builtin" in err
+        assert not _slot_path(h, "clash-builtin").exists()
+
+        await h.call("rule_install", {"name": "dup-a", "source": _RULE_DUP})
+        err = await h.call_error("rule_install", {"name": "dup-b", "source": _RULE_DUP})
+        assert "Rule id 'user.ticket06-dup'" in err
+        assert "'dup-a'" in err
+        assert not _slot_path(h, "dup-b").exists()
+
+
+async def test_rule_remove_keeps_past_findings_stops_future(odda_session) -> None:
+    """rule_remove deregisters the slot's rules live and deletes the slot;
+    past Findings remain in the index; subsequent matching traffic
+    produces no Finding from the removed rules."""
+    async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
+        await h.call("rule_install", {"name": "canary", "source": _RULE_CANARY})
+        before = await _drive(h, fx, "t06-remove-before")
+        await _wait_rule_finding(h, before["id"], "user.ticket06-canary")
+
+        r = await h.call("rule_remove", {"name": "canary"})
+        assert r == {
+            "name": "canary",
+            "removed": True,
+            "rules": ["user.ticket06-canary"],
+        }
+        assert not _slot_path(h, "canary").parent.exists()
+
+        after = await _drive(h, fx, "t06-remove-after")
+        # settle: this flow drained (the builtin fired on it), so the
+        # canary absence below is the removal, not drain lag
+        await _wait_rule_finding(h, after["id"], "disclosure.stack-trace")
+        assert all(
+            f["rule_id"] != "user.ticket06-canary" for f in h.findings_for(after["id"])
+        )
+        # past findings are never retracted
+        assert any(
+            f["rule_id"] == "user.ticket06-canary" for f in h.findings_for(before["id"])
+        )
+
+
+async def test_raising_rule_is_contained_per_rule(odda_session) -> None:
+    """A user rule that raises at scan time is logged and skipped: the
+    flow still lands fully in the flows index, and other rules — the
+    builtin and a sibling user rule from the same slot — still fire on
+    that flow."""
+    async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
+        r = await h.call("rule_install", {"name": "pack", "source": _RULE_PACK})
+        assert r["rules"] == ["user.ticket06-sibling", "user.ticket06-raiser"]
+
+        flow = await _drive(h, fx, "t06-raiser-boom")
+        # the flow landed fully: request, response headers, and body files
+        flow_dir = h.data_dir / "flows" / flow["id"]
+        assert (flow_dir / "request").is_file()
+        assert (flow_dir / "response_headers").is_file()
+        assert (flow_dir / "response_body.html").is_file()
+
+        await _wait_rule_finding(h, flow["id"], "disclosure.stack-trace")
+        await _wait_rule_finding(h, flow["id"], "user.ticket06-sibling")
+        assert all(
+            f["rule_id"] != "user.ticket06-raiser" for f in h.findings_for(flow["id"])
+        )
+
+
+async def test_rule_tool_validation_errors_verbatim(odda_session, tmp_path) -> None:
+    """file/source exclusivity, missing file, empty source, remove-missing,
+    and slot-name collision all error verbatim (the proxy-script
+    install contract)."""
+    rf = tmp_path / "t06_canary_rule.py"
+    rf.write_text(_RULE_CANARY)
+    async with odda_session() as h:
+        err = await h.call_error(
+            "rule_install", {"name": "both", "file": str(rf), "source": "1"}
+        )
+        assert "Provide either file or source, not both" in err
+
+        err = await h.call_error("rule_install", {"name": "neither"})
+        assert "Provide file <path> or source <py>" in err
+
+        err = await h.call_error(
+            "rule_install",
+            {"name": "missing", "file": str(tmp_path / "does-not-exist.py")},
+        )
+        assert "File not found:" in err
+
+        err = await h.call_error("rule_install", {"name": "empty", "source": "   "})
+        assert "source is empty" in err
+
+        err = await h.call_error("rule_remove", {"name": "nope"})
+        assert "Rule slot 'nope' not found" in err
+
+        await h.call("rule_install", {"name": "taken", "source": _RULE_CANARY})
+        err = await h.call_error("rule_install", {"name": "taken", "source": _RULE_ALT})
+        assert "Rule slot 'taken' already installed. Use force to overwrite." in err
+
+
+async def test_force_overwrite_swaps_the_slot_live(odda_session) -> None:
+    """force=True overwrites an existing slot: the old rule ids leave the
+    live set, the on-disk source is the new one, and subsequent traffic
+    finds only the replacement rule."""
+    async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
+        await h.call("rule_install", {"name": "swap", "source": _RULE_CANARY})
+        r = await h.call(
+            "rule_install", {"name": "swap", "source": _RULE_ALT, "force": True}
+        )
+        assert r["rules"] == ["user.ticket06-alt"]
+        assert "user.ticket06-alt" in _slot_path(h, "swap").read_text()
+
+        rows = await h.call_json("rule_list", {})
+        ids = {row["id"] for row in rows}
+        assert "user.ticket06-alt" in ids
+        assert "user.ticket06-canary" not in ids
+
+        flow = await _drive(h, fx, "t06-force-swap")
+        await _wait_rule_finding(h, flow["id"], "user.ticket06-alt")
+        assert all(
+            f["rule_id"] != "user.ticket06-canary" for f in h.findings_for(flow["id"])
+        )
+
+
+async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
+    odda_session, tmp_path
+) -> None:
+    """A slot installed in session A loads on session B's boot; a broken
+    slot (syntax error on disk) is skipped with its error visible in
+    rule_list while the good sibling slot still loads and fires."""
+    async with odda_session() as h:
+        await h.call("rule_install", {"name": "keeper", "source": _RULE_CANARY})
+        assert _slot_path(h, "keeper").is_file()
+
+    # a broken slot appears on disk out-of-band (hand-edited, corrupted)
+    broken = tmp_path / ".odda" / "rules" / "broken" / "rule.py"
+    broken.parent.mkdir(parents=True)
+    broken.write_text(_RULE_BROKEN)
+
+    async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
+        rows = await h.call_json("rule_list", {})
+        failed = [row for row in rows if row["state"] == "failed"]
+        assert len(failed) == 1
+        assert failed[0]["slot"] == "broken"
+        assert failed[0]["source"] == "user"
+        assert "SyntaxError" in failed[0]["error"]
+
+        keeper = next(row for row in rows if row["id"] == "user.ticket06-canary")
+        assert keeper == {
+            "slot": "keeper",
+            "id": "user.ticket06-canary",
+            "severity": "medium",
+            "source": "user",
+            "state": "active",
+            "error": None,
+        }
+
+        flow = await _drive(h, fx, "t06-boot-restored")
+        finding = await _wait_rule_finding(h, flow["id"], "user.ticket06-canary")
+        assert finding["flow_id"] == flow["id"]
