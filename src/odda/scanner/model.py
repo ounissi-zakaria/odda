@@ -161,6 +161,7 @@ class FlowView:
         self._request: str | None = None
         self._response_headers: str | None = None
         self._body: str | None = None
+        self._body_bytes: bytes | None = None
         self._content_type: str | None = None
 
     @property
@@ -185,6 +186,19 @@ class FlowView:
             if body_file is not None:
                 self._body = self._read(self._data_dir / body_file)
         return self._body
+
+    @property
+    def body_bytes(self) -> bytes | None:
+        """The stored response body as raw bytes, or ``None``.
+
+        The bytes-exact view of :attr:`body` for checks that must not
+        pass through text decoding — content hashing above all.
+        """
+        if self._body_bytes is None:
+            body_file = self.record.get("body_file")
+            if body_file is not None:
+                self._body_bytes = (self._data_dir / body_file).read_bytes()
+        return self._body_bytes
 
     @property
     def content_type(self) -> str | None:
