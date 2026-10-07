@@ -56,6 +56,7 @@ from odda.request import (
 )
 from odda.scanner.builtins import BUILTIN_RULES
 from odda.scanner.engine import Scanner
+from odda.scanner.userrules import RULE_FILE_SKELETON, UserRuleManager
 
 # Two or more names selects the multi-name pipeline mode (ADR-0019);
 # repeat >= 2 selects the concurrent-send mode (ADR-0020) — the same
@@ -124,10 +125,11 @@ def odda_tool(fn):
 
 @dataclass
 class OddaState:
-    """What the MCP lifespan owns: proxy, browser manager, flowstore dir."""
+    """What the MCP lifespan owns: proxy, browser manager, user rules."""
 
     proxy: ProxyServer
     browser: BrowserManager
+    user_rules: UserRuleManager
 
 
 def resolve_data_dir() -> Path:
@@ -175,10 +177,16 @@ async def odda_lifespan(
     # observation is live; teardown cancels the drain before the proxy
     # stops, so scanning never outlives the session that captured.
     scanner = Scanner(data_dir, rules=BUILTIN_RULES)
+    # User rule slots reload on boot alongside the proxy-script restore
+    # above, and before observation goes live, so the session's first
+    # flow is scanned against the full ruleset; a failing slot is
+    # logged and skipped, never blocking boot.
+    user_rules = UserRuleManager(scanner, data_dir, BUILTIN_RULES)
+    user_rules.restore_on_boot()
     flowstore.get_writer().set_observer(scanner.observe)
     scanner_task = asyncio.create_task(scanner.run())
     try:
-        yield OddaState(proxy=proxy, browser=browser)
+        yield OddaState(proxy=proxy, browser=browser, user_rules=user_rules)
     finally:
         scanner_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -1044,6 +1052,62 @@ async def proxy_script_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
 async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
     """Remove a proxy-script: live instance + on-disk source."""
     return ctx.request_context.lifespan_context.proxy.remove_script(name)
+
+
+# --- passive scanner: user rules ---
+
+
+# The rule-file contract rides the tool description (an agent cannot
+# infer the format); built from the one skeleton the load-failure
+# rejections also show, so the surfaces cannot drift.
+_RULE_INSTALL_DOC = (
+    "Install a passive-scanner rule slot from file or source. The slot "
+    "is a Python file whose module-level RULES list holds Rule objects; "
+    "installed rules scan flows captured after the install, never "
+    "retroactively. Rule ids are permanent and globally unique — builtin "
+    "ids and other slots' ids are taken. A rule file looks like:\n"
+    + RULE_FILE_SKELETON
+    + "body_patterns are regexes over the stored response body (each "
+    "match becomes one evidence entry). Gates, all optional: schemes, "
+    "statuses, content_types (prefix match), browser_only (browser-driven "
+    "flows only)."
+)
+
+
+@mcp_server.tool(description=_RULE_INSTALL_DOC)
+@odda_tool
+async def rule_install(
+    name: str,
+    file: str | None = None,
+    source: str | None = None,
+    *,
+    force: bool = False,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Install a passive-scanner rule slot from file or source."""
+    py = _read_install_source(file, source, "py")
+    if not py.strip():
+        raise ToolParamError("source is empty")
+    user_rules = ctx.request_context.lifespan_context.user_rules
+    if not force and user_rules.name_exists(name):
+        raise ToolParamError(
+            f"Rule slot '{name}' already installed. Use force to overwrite."
+        )
+    return user_rules.install(name, py)
+
+
+@mcp_server.tool(structured_output=False)
+@odda_tool
+async def rule_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
+    """List every scanner rule: builtin and user, with state."""
+    return _json_result(ctx.request_context.lifespan_context.user_rules.list_rules())
+
+
+@mcp_server.tool()
+@odda_tool
+async def rule_remove(name: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
+    """Remove a rule slot: live rules stop, past findings remain."""
+    return ctx.request_context.lifespan_context.user_rules.remove(name)
 
 
 def main() -> None:
