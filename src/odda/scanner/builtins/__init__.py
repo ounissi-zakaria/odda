@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from odda.scanner.builtins import disclosure, fingerprints, supplychain, takeover
+from odda.scanner.builtins import (
+    cookies,
+    disclosure,
+    fingerprints,
+    supplychain,
+    takeover,
+)
 
 if TYPE_CHECKING:
     from odda.scanner.model import Rule
@@ -18,4 +24,5 @@ BUILTIN_RULES: tuple[Rule, ...] = (
     *takeover.RULES,
     *supplychain.RULES,
     *fingerprints.RULES,
+    *cookies.RULES,
 )
