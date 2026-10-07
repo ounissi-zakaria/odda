@@ -8,14 +8,7 @@ not part of the author surface.
 
 from __future__ import annotations
 
-from odda.scanner.model import (
-    Correlator,
-    Evidence,
-    Finding,
-    FlowView,
-    Rule,
-    Severity,
-)
+from odda.scanner.model import Correlator, Evidence, Finding, FlowView, Rule, Severity
 
 __all__ = [
     "Correlator",

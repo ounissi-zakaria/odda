@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
-from pathlib import Path
-from typing import Any, Protocol
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     """Five-level triage scale; findings carry the value string."""
 
     INFO = "info"

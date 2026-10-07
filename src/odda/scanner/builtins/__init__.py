@@ -6,7 +6,11 @@ Adding a family means adding its module and extending
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from odda.scanner.builtins import disclosure
-from odda.scanner.model import Rule
+
+if TYPE_CHECKING:
+    from odda.scanner.model import Rule
 
 BUILTIN_RULES: tuple[Rule, ...] = (*disclosure.RULES,)

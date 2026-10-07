@@ -3,14 +3,17 @@
 A session-live passive scanner observes every flow the session writes
 — the flow record writer's post-append hook enqueues, an asyncio drain
 task owned by the lifespan scans — and appends findings to
-``<data_dir>/scanner/findings.jsonl`` (one line per rule–flow pair,
+``<data_dir>/scanner/findings.jsonl`` (one line per rule-flow pair,
 evidence aggregated). One builtin rule exists:
 ``disclosure.stack-trace`` (HIGH). External behavior only: traffic in
 via curl through proxy_url or request_send, findings out via a bounded
 poll of the index (the ``wait_flow`` precedent).
 """
 
+import ast
 import asyncio
+import json
+from pathlib import Path
 
 from tests.e2e.conftest import curl, fixture_site
 
@@ -46,7 +49,7 @@ async def test_stack_trace_response_lands_finding(odda_session) -> None:
 
 async def test_multi_match_aggregates_into_one_finding(odda_session) -> None:
     """Multiple trace matches inside one flow aggregate into that single
-    Finding's evidence — one Finding per rule–flow pair."""
+    Finding's evidence — one Finding per rule-flow pair."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
         proxy = await h.call("proxy_url", {})
         marker = "scan-aggregate"
@@ -91,9 +94,7 @@ async def test_request_send_flow_is_scanned(odda_session) -> None:
                 "\r\n"
             ).encode(),
         )
-        rec = await h.call_json(
-            "request_send", {"name": "scan-reqsend", "timeout": 10}
-        )
+        rec = await h.call_json("request_send", {"name": "scan-reqsend", "timeout": 10})
         assert isinstance(rec, dict)
 
         finding = await h.wait_finding(rec["id"])
@@ -177,20 +178,14 @@ async def test_scan_failure_never_touches_capture(odda_session) -> None:
 async def test_preboot_flows_are_not_scanned(odda_session, tmp_path) -> None:
     """Flows recorded before session boot are never scanned (forward-only):
     a seeded stack-trace flow predating the session produces no finding."""
-    import json as _json
-
     flows = tmp_path / ".odda" / "flows"
     seed_dir = flows / "00001"
     seed_dir.mkdir(parents=True)
     (seed_dir / "request").write_bytes(
-        b"GET /checkout?marker=scan-preboot HTTP/1.1\r\n"
-        b"Host: shop.internal\r\n"
-        b"\r\n"
+        b"GET /checkout?marker=scan-preboot HTTP/1.1\r\nHost: shop.internal\r\n\r\n"
     )
     (seed_dir / "response_headers").write_bytes(
-        b"HTTP/1.1 500 Internal Server Error\r\n"
-        b"Content-Type: text/html\r\n"
-        b"\r\n"
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/html\r\n\r\n"
     )
     (seed_dir / "response_body.html").write_text(
         "<pre>Traceback (most recent call last):\n</pre>"
@@ -208,7 +203,7 @@ async def test_preboot_flows_are_not_scanned(odda_session, tmp_path) -> None:
         "body_file": "flows/00001/response_body.html",
         "error": None,
     }
-    (flows / "flows.jsonl").write_text(_json.dumps(seeded) + "\n")
+    (flows / "flows.jsonl").write_text(json.dumps(seeded) + "\n")
 
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         proxy = await h.call("proxy_url", {})
@@ -226,3 +221,45 @@ async def test_preboot_flows_are_not_scanned(odda_session, tmp_path) -> None:
         assert not (h.data_dir / "scanner").exists()
         assert h.flow_count() == 2
         assert h.flow_record("00001") == seeded
+
+
+def test_scanner_package_has_no_egress_imports() -> None:
+    """Structural zero-egress check: every import in the scanner package
+    is on the allowlist — no socket/ssl/urllib/http or any third-party
+    module (the scanner is stdlib-only and sends nothing, ADR-0034).
+    asyncio is allowlisted for loop primitives (Event, task awaiting);
+    egress would require the socket layer, which is not imported."""
+    scanner_src = Path(__file__).resolve().parents[2] / "src" / "odda" / "scanner"
+    py_files = sorted(scanner_src.rglob("*.py"))
+    assert py_files, f"scanner package source not found at {scanner_src}"
+
+    allowed = {
+        "__future__",
+        "asyncio",  # loop primitives only, never open_connection et al
+        "collections",
+        "contextlib",
+        "dataclasses",
+        "enum",
+        "json",
+        "logging",
+        "pathlib",
+        "queue",
+        "re",
+        "typing",
+        # First-party, package-internal only (odda.scanner.*); the
+        # scanner must not reach into flowstore/mitmproxy/mcp.
+        "odda",
+    }
+    imported: set[str] = set()
+    for py in py_files:
+        tree = ast.parse(py.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+
+    assert imported <= allowed, (
+        f"scanner imports outside the zero-egress allowlist: "
+        f"{sorted(imported - allowed)}"
+    )

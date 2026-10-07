@@ -12,10 +12,12 @@ import contextlib
 import itertools
 import json
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -481,9 +483,7 @@ class FlowRecordWriter:
             except Exception:
                 logger.exception("flow observer failed; write path unaffected")
 
-    def set_observer(
-        self, observer: Callable[[dict[str, Any]], None] | None
-    ) -> None:
+    def set_observer(self, observer: Callable[[dict[str, Any]], None] | None) -> None:
         """Register (or clear) the post-append observer.
 
         Args:

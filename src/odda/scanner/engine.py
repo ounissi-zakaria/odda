@@ -23,7 +23,7 @@ import json
 import logging
 import queue
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from odda.scanner.model import Evidence, Finding, FlowView
 
@@ -70,12 +70,12 @@ class Scanner:
         self._data_dir = Path(data_dir)
         self._rules: tuple[Rule, ...] = tuple(rules)
         self._correlators: tuple[Correlator, ...] = tuple(correlators)
-        self._queue: queue.SimpleQueue[dict[str, object]] = queue.SimpleQueue()
+        self._queue: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
         self._wakeup = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._findings_path = self._data_dir / "scanner" / "findings.jsonl"
 
-    def observe(self, record: dict[str, object]) -> None:
+    def observe(self, record: dict[str, Any]) -> None:
         """Post-append hook target: enqueue the record and wake the drain.
 
         Called from the writer's thread (mitmproxy addon thread or the
@@ -111,10 +111,10 @@ class Scanner:
                     break
                 self._scan(record)
 
-    def _scan(self, record: dict[str, object]) -> None:
+    def _scan(self, record: dict[str, Any]) -> None:
         """Scan one flow record: rules, then correlators, all contained."""
         flow_id = str(record.get("id", "?"))
-        view = FlowView(self._data_dir, record)  # type: ignore[arg-type]
+        view = FlowView(self._data_dir, record)
         for rule in self._rules:
             try:
                 evidence = self._match(rule, view)
@@ -165,7 +165,7 @@ class Scanner:
         body = view.body
         if body is None:
             return []
-        evidence = [
+        return [
             Evidence(
                 where=_RESPONSE_BODY,
                 offset=match.start(),
@@ -174,7 +174,6 @@ class Scanner:
             for pattern in rule.body_patterns
             for match in pattern.finditer(body)
         ]
-        return evidence
 
     def _emit(self, finding: Finding) -> None:
         """Record one finding; a failing write is logged and skipped."""
