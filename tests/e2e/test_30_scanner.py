@@ -172,3 +172,57 @@ async def test_scan_failure_never_touches_capture(odda_session) -> None:
         )
         assert r2.stdout == "200"
         await h.wait_flow("scan-after-block")
+
+
+async def test_preboot_flows_are_not_scanned(odda_session, tmp_path) -> None:
+    """Flows recorded before session boot are never scanned (forward-only):
+    a seeded stack-trace flow predating the session produces no finding."""
+    import json as _json
+
+    flows = tmp_path / ".odda" / "flows"
+    seed_dir = flows / "00001"
+    seed_dir.mkdir(parents=True)
+    (seed_dir / "request").write_bytes(
+        b"GET /checkout?marker=scan-preboot HTTP/1.1\r\n"
+        b"Host: shop.internal\r\n"
+        b"\r\n"
+    )
+    (seed_dir / "response_headers").write_bytes(
+        b"HTTP/1.1 500 Internal Server Error\r\n"
+        b"Content-Type: text/html\r\n"
+        b"\r\n"
+    )
+    (seed_dir / "response_body.html").write_text(
+        "<pre>Traceback (most recent call last):\n</pre>"
+    )
+    seeded = {
+        "id": "00001",
+        "method": "GET",
+        "scheme": "http",
+        "host": "shop.internal",
+        "port": 80,
+        "path": "/checkout?marker=scan-preboot",
+        "browser_id": None,
+        "status_code": 500,
+        "total_duration_ms": 12.0,
+        "body_file": "flows/00001/response_body.html",
+        "error": None,
+    }
+    (flows / "flows.jsonl").write_text(_json.dumps(seeded) + "\n")
+
+    async with odda_session() as h, fixture_site(["index.html"]) as fx:
+        proxy = await h.call("proxy_url", {})
+        r = await curl(
+            f"{fx.base}/?marker=scan-postboot",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+        await h.wait_flow("scan-postboot")
+
+        await asyncio.sleep(0.5)
+        # The seeded stack trace was never scanned: no scanner subtree
+        # at all, and the history line is untouched.
+        assert not (h.data_dir / "scanner").exists()
+        assert h.flow_count() == 2
+        assert h.flow_record("00001") == seeded
