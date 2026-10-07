@@ -41,6 +41,9 @@ _EVIDENCE_DETAIL_MAX = 200
 # Evidence "where" for matches in the stored response body.
 _RESPONSE_BODY = "response_body"
 
+# Evidence "where" for matches in the stored response headers.
+_RESPONSE_HEADERS = "response_headers"
+
 
 class Scanner:
     """Session-live passive scanner.
@@ -160,20 +163,33 @@ class Scanner:
             return []
         if rule.browser_only and record.get("browser_id") is None:
             return []
-        if not rule.body_patterns:
+        if not rule.body_patterns and not rule.header_patterns:
             return []
-        body = view.body
-        if body is None:
-            return []
-        return [
-            Evidence(
-                where=_RESPONSE_BODY,
-                offset=match.start(),
-                detail=match.group(0)[:_EVIDENCE_DETAIL_MAX],
+        evidence: list[Evidence] = []
+        if rule.header_patterns:
+            headers = view.response_headers
+            evidence.extend(
+                Evidence(
+                    where=_RESPONSE_HEADERS,
+                    offset=match.start(),
+                    detail=match.group(0)[:_EVIDENCE_DETAIL_MAX],
+                )
+                for pattern in rule.header_patterns
+                for match in pattern.finditer(headers)
             )
-            for pattern in rule.body_patterns
-            for match in pattern.finditer(body)
-        ]
+        if rule.body_patterns:
+            body = view.body
+            if body is not None:
+                evidence.extend(
+                    Evidence(
+                        where=_RESPONSE_BODY,
+                        offset=match.start(),
+                        detail=match.group(0)[:_EVIDENCE_DETAIL_MAX],
+                    )
+                    for pattern in rule.body_patterns
+                    for match in pattern.finditer(body)
+                )
+        return evidence
 
     def _emit(self, finding: Finding) -> None:
         """Record one finding; a failing write is logged and skipped."""

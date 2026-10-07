@@ -79,6 +79,11 @@ class Rule:
             compile with ``re.MULTILINE`` (``^``/``$`` match per line,
             which frame-shaped patterns need); precompiled patterns
             pass through untouched.
+        header_patterns: Regexes matched against the flow's stored raw
+            response headers text (status line + header lines); each
+            match becomes one evidence entry (``where`` of
+            ``"response_headers"``). Plain strings compile with
+            ``re.MULTILINE`` like ``body_patterns``.
         schemes: Gate — schemes the rule applies to (``("http",)``);
             empty matches all.
         statuses: Gate — response status codes the rule applies to;
@@ -98,6 +103,7 @@ class Rule:
     severity: Severity
     title: str
     body_patterns: tuple[re.Pattern[str] | str, ...] = ()
+    header_patterns: tuple[re.Pattern[str] | str, ...] = ()
     schemes: tuple[str, ...] = ()
     statuses: tuple[int, ...] = ()
     content_types: tuple[str, ...] = ()
@@ -106,14 +112,15 @@ class Rule:
 
     def __post_init__(self) -> None:
         """Compile string patterns (MULTILINE) so the engine never recompiles."""
-        object.__setattr__(
-            self,
-            "body_patterns",
-            tuple(
-                p if isinstance(p, re.Pattern) else re.compile(p, re.MULTILINE)
-                for p in self.body_patterns
-            ),
-        )
+        for field in ("body_patterns", "header_patterns"):
+            object.__setattr__(
+                self,
+                field,
+                tuple(
+                    p if isinstance(p, re.Pattern) else re.compile(p, re.MULTILINE)
+                    for p in getattr(self, field)
+                ),
+            )
 
 
 class Correlator(Protocol):

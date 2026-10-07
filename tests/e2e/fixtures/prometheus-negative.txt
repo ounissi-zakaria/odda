@@ -1,0 +1,7 @@
+Service status
+==============
+
+All subsystems report healthy. Internal metrics are collected by the
+monitoring stack; dashboards are available to the SRE team on request.
+This page mentions metrics repeatedly, but it publishes no exposition
+document, no per-metric help text, and no type declarations.
