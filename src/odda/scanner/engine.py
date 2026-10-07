@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from odda.scanner.model import Evidence, Finding, FlowView
 
 if TYPE_CHECKING:
+    import re
     from collections.abc import AbstractSet, Sequence
 
     from odda.scanner.model import Correlator, Rule
@@ -40,6 +41,8 @@ _EVIDENCE_DETAIL_MAX = 200
 
 # Evidence "where" for matches in the stored response body.
 _RESPONSE_BODY = "response_body"
+# Evidence "where" for matches in the stored response headers.
+_RESPONSE_HEADERS = "response_headers"
 
 
 class Scanner:
@@ -200,20 +203,20 @@ class Scanner:
             return []
         if rule.browser_only and record.get("browser_id") is None:
             return []
-        if not rule.body_patterns:
+        if not rule.body_patterns and not rule.header_patterns:
             return []
-        body = view.body
-        if body is None:
-            return []
-        return [
-            Evidence(
-                where=_RESPONSE_BODY,
-                offset=match.start(),
-                detail=match.group(0)[:_EVIDENCE_DETAIL_MAX],
-            )
-            for pattern in rule.body_patterns
-            for match in pattern.finditer(body)
-        ]
+        evidence: list[Evidence] = []
+        if rule.body_patterns:
+            body = view.body
+            if body is not None:
+                evidence += _pattern_evidence(rule.body_patterns, body, _RESPONSE_BODY)
+        if rule.header_patterns:
+            headers = _stored_response_headers(view)
+            if headers is not None:
+                evidence += _pattern_evidence(
+                    rule.header_patterns, headers, _RESPONSE_HEADERS
+                )
+        return evidence
 
     def _emit(self, finding: Finding) -> None:
         """Record one finding; a failing write is logged and skipped."""
@@ -246,3 +249,30 @@ def _content_type_matches(specs: tuple[str, ...], actual: str | None) -> bool:
     """Check a content-type gate: prefix match, parameters stripped."""
     mime = (actual or "").split(";", 1)[0].strip().lower()
     return bool(mime) and any(mime.startswith(spec) for spec in specs)
+
+
+def _pattern_evidence(
+    patterns: tuple[re.Pattern[str], ...], text: str, where: str
+) -> list[Evidence]:
+    """All matches of the patterns against text, as evidence entries."""
+    return [
+        Evidence(
+            where=where,
+            offset=match.start(),
+            detail=match.group(0)[:_EVIDENCE_DETAIL_MAX],
+        )
+        for pattern in patterns
+        for match in pattern.finditer(text)
+    ]
+
+
+def _stored_response_headers(view: FlowView) -> str | None:
+    """The stored response headers, or ``None`` when the flow has none.
+
+    Error flows never wrote a ``response_headers`` file; a header rule
+    simply has nothing to look at, which is a skip, not a failure.
+    """
+    try:
+        return view.response_headers
+    except FileNotFoundError:
+        return None
