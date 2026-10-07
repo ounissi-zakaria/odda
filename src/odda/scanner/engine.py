@@ -155,13 +155,13 @@ class Scanner:
         view = FlowView(self._data_dir, record)
         for rule in rules:
             try:
-                # Dataset-backed rules (ADR-0035) carry their own scan:
+                # Dataset-backed rules (ADR-0035) override Rule.scan:
                 # the vendored data's extractors and per-advisory
                 # severities cannot fold into the declarative spec, so
                 # they hand back fully formed findings.
-                scan = getattr(rule, "scan", None)
-                if callable(scan):
-                    for finding in scan(view):
+                findings = rule.scan(view)
+                if findings is not None:
+                    for finding in findings:
                         self._emit(finding)
                     continue
                 evidence = self._match(rule, view)
@@ -196,8 +196,7 @@ class Scanner:
 
     def _match(self, rule: Rule, view: FlowView) -> list[Evidence]:
         """Apply a rule's gates, then its match spec, to one flow view."""
-        record = view.record
-        browser = record.get("browser_id") is not None
+        browser = view.is_browser
         query_patterns, request_header_patterns = _request_patterns(
             rule, browser=browser
         )
@@ -210,7 +209,7 @@ class Scanner:
             )
         ):
             return []
-        if not _passes_gates(rule, record, view):
+        if not _passes_gates(rule, view.record, view):
             return []
         evidence = _response_evidence(rule, view)
         return [
@@ -232,12 +231,16 @@ class Scanner:
                 ],
                 "refs": list(finding.refs),
             }
-            line = json.dumps(record, ensure_ascii=False) + "\n"
+            payload = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
             # Lazy data-dir precedent (ADR-0017): the scanner subtree
             # appears on the first finding, never at boot.
             self._findings_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._findings_path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
+            # One single-shot write on an append-mode binary handle:
+            # the whole line lands in one write(2), so a sibling
+            # session's appends can never interleave mid-line (the
+            # findings index is append-atomic, per the PRD).
+            with self._findings_path.open("ab") as fh:
+                fh.write(payload)
         except Exception:
             logger.exception(
                 "scanner could not record finding for rule %r; skipped",
@@ -295,7 +298,7 @@ def _passes_gates(rule: Rule, record: dict[str, Any], view: FlowView) -> bool:
     ):
         return False
     if rule.browser_only:
-        return record.get("browser_id") is not None
+        return view.is_browser
     return True
 
 
