@@ -1,4 +1,4 @@
-"""User rule slots: storage, loading, and live registration (ADR-0035).
+"""User rule slots: storage, loading, and live registration (ADR-0036).
 
 User rules are Python files persisted as slot directories under the
 global rules dir — ``<rules_dir>/<name>/rule.py``, machine-global and
@@ -9,10 +9,14 @@ arrives as a parameter the same way the data dir reaches the Scanner;
 ``odda.mcp`` passes ``odda.paths.global_rules_dir()``, the config-home
 root an ``ODDA_CONFIG_HOME`` override redirects. A slot's file imports
 the rule-author surface and exposes a module-level ``RULES`` list; one
-slot may register any number of rules. :class:`UserRuleManager` loads
-slots into a live Scanner at install time and again on session boot;
-a slot that fails to load is logged and skipped (one bad slot never
-blocks the rest), with its error kept for ``rule_list`` to show.
+slot may register any number of rules. Slots are the only rule source:
+no rules ship with odda, so the Scanner's ruleset is exactly the
+installed slots (empty at a fresh install). A slot may carry flat
+non-.py assets (datasets) next to its rule file — installing from a
+file path copies them along. :class:`UserRuleManager` loads slots into
+a live Scanner at install time and again on session boot; a slot that
+fails to load is logged and skipped (one bad slot never blocks the
+rest), with its error kept for ``rule_list`` to show.
 
 Two deliberate divergences from the proxy-script flow:
 
