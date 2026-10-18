@@ -287,6 +287,10 @@ def test_scanner_package_has_no_egress_imports() -> None:
         # breaks slots defining dataclasses (field resolution walks
         # sys.modules); no network surface.
         "types",
+        # hyperscan: the Vectorscan-backed scan engine (ticket 11) — an
+        # in-process native extension that processes bytes; it has no
+        # socket surface, so zero egress survives the engine swap.
+        "hyperscan",
         "typing",
         "urllib",  # urllib.parse only — query-string parsing, no network
         # First-party, package-internal only (odda.scanner.*); the
