@@ -46,6 +46,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
 from odda.browser import BrowserManager, BrowserOperationError
+from odda.paths import global_rules_dir
 from odda.proxy import ProxyServer
 from odda.request import (
     clone as clone_request,
@@ -180,8 +181,11 @@ async def odda_lifespan(
     # User rule slots reload on boot alongside the proxy-script restore
     # above, and before observation goes live, so the session's first
     # flow is scanned against the full ruleset; a failing slot is
-    # logged and skipped, never blocking boot.
-    user_rules = UserRuleManager(scanner, data_dir, BUILTIN_RULES)
+    # logged and skipped, never blocking boot. Slots persist in the
+    # machine-global rules dir under the config home — shared across
+    # every project on the machine, redirectable via ODDA_CONFIG_HOME —
+    # unlike the proxy-scripts, which stay per-project in the data dir.
+    user_rules = UserRuleManager(scanner, global_rules_dir(), BUILTIN_RULES)
     user_rules.restore_on_boot()
     flowstore.get_writer().set_observer(scanner.observe)
     scanner_task = asyncio.create_task(scanner.run())
