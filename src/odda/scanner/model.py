@@ -17,11 +17,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import cache
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 from urllib.parse import parse_qsl, urlsplit
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+try:  # private API, but the only parser shipped; a missing module
+    # just turns every gate off (patterns scan ungated, as before).
+    from re import _constants as _re_constants
+    from re._parser import parse as _re_parse
+except ImportError:  # pragma: no cover
+    _re_constants = None  # type: ignore[assignment]
+    _re_parse = None  # type: ignore[assignment]
 
 
 class Severity(StrEnum):
@@ -159,6 +168,106 @@ def _compile(
         p if isinstance(p, re.Pattern) else re.compile(p, re.MULTILINE)
         for p in patterns
     )
+
+
+# --- necessary-literal gates (ticket 08) ---
+#
+# A body-regex scan is one C call that holds the GIL for its whole
+# duration, so with scans off the event-loop thread (engine.run) a
+# multi-MB body still turns each unmatched pattern into a
+# tens-to-hundreds-of-ms loop stall. The gate below restores
+# interactivity: per pattern, a tuple of literal sets such that any
+# match must put at least one literal of each set into the scanned
+# text — spine literals as singleton sets, one any-of set per
+# alternation. A failing ``in`` check (fastsearch speed) replaces a
+# linear regex scan for free.
+#
+# Soundness is conservative by construction: case-insensitive
+# patterns (global or scoped), character classes, zero-width and
+# optional constructs contribute nothing, so a pattern without a
+# usable literal simply has no gate and scans ungated. The fuzz test
+# in tests/e2e/test_30_scanner.py pins the property that matters: a
+# real match is never gated out.
+
+_GATE_MIN_LITERAL = 3
+
+
+@cache
+def _literal_gates(source: str, flags: int) -> tuple[frozenset[str], ...] | None:
+    """Necessary-literal sets for one pattern, or ``None`` (no gate).
+
+    Args:
+        source: The pattern's source string.
+        flags: The pattern's compiled flags (case-insensitive
+            patterns never gate).
+
+    Returns:
+        A tuple of literal sets — every match of the pattern puts at
+        least one literal of each set into the scanned text — or
+        ``None`` when no sound gate is extractable.
+    """
+    if _re_parse is None or flags & re.IGNORECASE:
+        return None
+    try:
+        tree = _re_parse(source, flags)
+    except Exception:
+        return None
+    sets = _concat_gates(tree)
+    return tuple(sets) or None
+
+
+def _branch_gate(disjuncts: Any) -> frozenset[str] | None:
+    """One any-of set for an alternation.
+
+    Each disjunct contributes its strongest literal: a match takes
+    some branch, whose literal then appears in the scanned text.
+    """
+    alts = {
+        max(sets, key=len) for disjunct in disjuncts for sets in _concat_gates(disjunct)
+    }
+    return frozenset(alts) or None
+
+
+def _dispatch_gates(op: Any, av: Any, out: list[frozenset[str]]) -> None:
+    """Add the gate sets of one non-literal parse node to ``out``."""
+    if op is _re_constants.SUBPATTERN:
+        # av = (group, add_flags, del_flags, sub). Scoped inline flags
+        # ((?i:...)) make the group's literals case insensitive — not
+        # sound as case-sensitive gates, so a flagged group stays out.
+        if not av[1] & re.IGNORECASE:
+            out.extend(_concat_gates(av[-1]))
+    elif op in (_re_constants.MAX_REPEAT, _re_constants.MIN_REPEAT):
+        if av[0] >= 1:  # required at least once: in every match
+            out.extend(_concat_gates(av[-1]))
+    elif op is _re_constants.BRANCH:
+        branch = _branch_gate(av[1])
+        if branch is not None:
+            out.append(branch)
+    # classes, anchors, lookarounds, backreferences, and conditionals
+    # contribute nothing; skipping them is always sound.
+
+
+def _concat_gates(node: Any) -> list[frozenset[str]]:
+    """Literal gate sets of one parsed concatenation (see _literal_gates)."""
+    out: list[frozenset[str]] = []
+    run = ""
+    for op, av in node:
+        if op is _re_constants.LITERAL:
+            run += chr(av)
+            continue
+        if len(run) >= _GATE_MIN_LITERAL:
+            out.append(frozenset((run,)))
+        run = ""
+        _dispatch_gates(op, av, out)
+    if len(run) >= _GATE_MIN_LITERAL:
+        out.append(frozenset((run,)))
+    return out
+
+
+def _passes_literal_gates(pattern: re.Pattern[str], text: str) -> bool:
+    """Whether ``pattern`` should run on ``text``: no gate, or all pass."""
+    gates = _literal_gates(pattern.pattern, pattern.flags)
+    return gates is None or all(any(lit in text for lit in s) for s in gates)
 
 
 class Correlator(Protocol):
