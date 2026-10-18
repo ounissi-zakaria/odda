@@ -1621,3 +1621,28 @@ async def test_concurrent_sessions_observe_their_own_flows_only(
         index = _findings_index(a.data_dir)
         assert len(index) == 4
         assert len({(rec["rule_id"], rec["flow_id"]) for rec in index}) == 4
+
+
+# --- ticket 15: global rules dir + config-home resolver ---
+
+
+def test_config_home_resolver_honors_override_and_keeps_default_paths(
+    tmp_path, monkeypatch
+) -> None:
+    """The config-home resolver behind the global rules dir and the Base
+    profile: with the override unset it yields exactly the historical
+    hardcoded paths (byte-for-byte the pre-ticket shapes), and
+    ODDA_CONFIG_HOME redirects every child of the config home."""
+    from odda import paths
+
+    monkeypatch.delenv(paths.CONFIG_HOME_ENV, raising=False)
+    home = Path.home() / ".config" / "odda"
+    assert paths.config_home() == home
+    assert paths.base_profile_dir() == home / "chrome-profile"
+    assert paths.global_rules_dir() == home / "rules"
+
+    override = tmp_path / "t15-redirected-home"
+    monkeypatch.setenv(paths.CONFIG_HOME_ENV, str(override))
+    assert paths.config_home() == override
+    assert paths.base_profile_dir() == override / "chrome-profile"
+    assert paths.global_rules_dir() == override / "rules"
