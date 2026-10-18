@@ -145,11 +145,11 @@ The record of one Rule matching one Flow: a severity-tagged observation with agg
 _Avoid_: alert, issue, hit, match
 
 **Rule**:
-A single passive check over one Flow's captured material, gated on flow context (scheme, status, content type, attribution). Rule identifiers are permanent — they key Findings. Built-ins ship with odda; user Rules live in Rule slots that persist in the Global rules dir and survive sessions — machine-global, unlike Proxy-scripts.
+A single passive check over one Flow's captured material, gated on flow context (scheme, status, content type, attribution). Rule identifiers are permanent — they key Findings. No Rules ship with odda: the Scanner boots with an empty ruleset, and every Rule lives in a Rule slot persisted in the Global rules dir and surviving sessions — machine-global, unlike Proxy-scripts.
 _Avoid_: check, signature, template, detector
 
 **Rule slot**:
-One persisted unit of user Rules: a named directory in the Global rules dir holding a single Python file whose module-level `RULES` list defines the slot's Rules. Installed via `rule_install` (`force` overwrites by name), removed via `rule_remove`, re-loaded on every session boot; a slot that fails to load is skipped without blocking the others. Slots are machine-global and shared across projects, unlike Proxy-scripts, which persist per-project in the Data dir.
+One persisted unit of Rules: a named directory in the Global rules dir holding a single Python file whose module-level `RULES` list defines the slot's Rules. Installed via `rule_install` (`force` overwrites by name), removed via `rule_remove`, re-loaded on every session boot; a slot that fails to load is skipped without blocking the others. Slots are machine-global and shared across projects, unlike Proxy-scripts, which persist per-project in the Data dir.
 _Avoid_: rule file, custom rule, rule package
 
 **Global rules dir**:

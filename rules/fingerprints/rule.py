@@ -1,4 +1,4 @@
-"""Fingerprint-family builtin rules (ADR-0035's signal bar).
+"""Fingerprint-family rules (ADR-0035's signal bar), as an installable slot.
 
 Each rule here keys on a product fingerprint that confirms a
 known-exploitable surface — a teardown cookie only Apache Shiro sends,
@@ -9,7 +9,7 @@ the patterns never fire on prose that merely mentions the product.
 
 from __future__ import annotations
 
-from odda.scanner.model import Rule, Severity
+from odda.scanner import Rule, Severity
 
 # Telerik UI for ASP.NET AJAX embeds its assembly identity in the
 # WebResource.axd script URL (URL-encoded: `...Telerik.Web.UI%2c+
@@ -31,7 +31,7 @@ _PROMETHEUS_EXPOSITION = (
     r"# TYPE \1 (?:counter|gauge|histogram|summary)\b"
 )
 
-RULES: tuple[Rule, ...] = (
+RULES = [
     Rule(
         id="deser.apache-shiro-rememberme",
         severity=Severity.MEDIUM,
@@ -78,4 +78,4 @@ RULES: tuple[Rule, ...] = (
             "https://cwe.mitre.org/data/definitions/200.html",
         ),
     ),
-)
+]

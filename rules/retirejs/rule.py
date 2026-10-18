@@ -1,10 +1,12 @@
-"""retire.js dataset adapter: the ``js.outdated-library`` builtin (ADR-0035).
+"""retire.js dataset adapter: the ``js.outdated-library`` rule slot.
 
 The upstream retire.js vulnerability repository (Apache-2.0, license
-vendored alongside) is the whole data source: it ships as package data
-under ``odda/scanner/data/`` and is loaded offline through
-``importlib.resources`` — the userscripts/default asset precedent. No
-fetch happens at scan time; the vendored snapshot is definitive.
+vendored alongside) is the whole data source: it rides in this slot
+directory as ``jsrepository.json`` and is loaded offline from disk —
+no fetch happens at scan time; the vendored snapshot is definitive.
+Installing this slot from the file path copies the dataset (and its
+license) into the installed slot dir, so the rule stays
+self-contained, offline, and editable in place.
 
 Three of retire.js's four extractor kinds run over the flow store.
 ``filecontent`` regexes match the stored response body, ``hashes`` map
@@ -41,24 +43,22 @@ import logging
 import re
 from dataclasses import dataclass
 from functools import cache
-from importlib import resources
+from pathlib import Path
 from typing import Any
 
-from odda.scanner.engine import _RESPONSE_BODY
-from odda.scanner.model import (
-    Evidence,
-    Finding,
-    FlowView,
-    Rule,
-    Severity,
-    _passes_literal_gates,
-)
+from odda.scanner import Evidence, Finding, FlowView, Rule, Severity
+
+# The necessary-literal gate is the scanner engine's own pre-regex
+# optimization (a gate miss skips the linear scan over a multi-MB
+# body). It is not part of the pinned author surface, but slots run
+# in-process against the same machinery the engine uses — importing
+# it keeps this adapter's dataset scan as cheap as the engine's.
+from odda.scanner.model import _passes_literal_gates
 
 logger = logging.getLogger(__name__)
 
-# Package location of the vendored dataset (Apache-2.0; see
-# jsrepository.LICENSE next to it).
-_DATASET_PACKAGE = "odda.scanner.data"
+# The dataset rides in this slot directory, next to this file
+# (Apache-2.0; see jsrepository.LICENSE next to it).
 _DATASET_FILENAME = "jsrepository.json"
 
 # The named capture group every dataset pattern's version lands in.
@@ -69,9 +69,10 @@ _VERSION_GROUP = "version"
 # vendored regexes mean what upstream means.
 _VERSION_CLASS = r"[0-9][0-9.a-z_\\-]+"
 
-# Evidence "where" value for matches on the flow record's URL path —
-# the body "where" comes from the engine, which defines it.
+# Evidence "where" values: matches on the flow record's URL path point
+# there; body matches point at the stored response body.
 _REQUEST_PATH = "request_path"
+_RESPONSE_BODY = "response_body"
 
 # Content-type prefixes a flow must carry to be a JS body at all.
 _JS_CONTENT_TYPES: tuple[str, ...] = (
@@ -189,6 +190,8 @@ RULE = OutdatedLibraryRule(
     refs=("https://github.com/RetireJS/retire.js",),
 )
 
+RULES = [RULE]
+
 
 def _detect(
     library: _Library, path: str, body: str, digest: str
@@ -210,10 +213,10 @@ def _detect(
             if version:
                 return version, "filename", match.start()
     for pattern in library.filecontent:
-        # Necessary-literal gate first (ticket 08): a miss skips the
-        # linear scan — the dominant multi-MB-body cost. The hash and
-        # filename extractors above stay as they are (dict lookup and
-        # a search over the flow's short path).
+        # Necessary-literal gate first: a miss skips the linear scan —
+        # the dominant multi-MB-body cost. The hash and filename
+        # extractors above stay as they are (dict lookup and a search
+        # over the flow's short path).
         if not _passes_literal_gates(pattern, body):
             continue
         match = pattern.search(body)
@@ -279,13 +282,9 @@ def _comparable(component: str) -> int | str:
 
 @cache
 def _libraries() -> tuple[_Library, ...]:
-    """The compiled dataset, loaded from package data on first use."""
-    text = (
-        resources.files(_DATASET_PACKAGE)
-        .joinpath(_DATASET_FILENAME)
-        .read_text(encoding="utf-8")
-    )
-    document = json.loads(text)
+    """The compiled dataset, loaded from this slot dir on first use."""
+    dataset = Path(__file__).resolve().parent / _DATASET_FILENAME
+    document = json.loads(dataset.read_text(encoding="utf-8"))
     return tuple(_compile_library(name, entry) for name, entry in document.items())
 
 

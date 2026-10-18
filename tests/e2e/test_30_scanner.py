@@ -1,13 +1,14 @@
-"""Scanner tracer bullet: the first Finding lands end-to-end.
+"""Scanner end-to-end: findings land from seeded rule slots.
 
 A session-live passive scanner observes every flow the session writes
 — the flow record writer's post-append hook enqueues, an asyncio drain
 task owned by the lifespan scans — and appends findings to
 ``<data_dir>/scanner/findings.jsonl`` (one line per rule-flow pair,
-evidence aggregated). One builtin rule exists:
-``disclosure.stack-trace`` (HIGH). External behavior only: traffic in
-via curl through proxy_url or request_send, findings out via a bounded
-poll of the index (the ``wait_flow`` precedent).
+evidence aggregated). No rules ship with odda (ADR-0036): every test
+seeds the slots it needs from the repo's rules/ corpus through the
+real rule_install path. External behavior only: traffic in via curl
+through proxy_url or request_send, findings out via a bounded poll of
+the index (the ``wait_flow`` precedent).
 """
 
 import ast
@@ -16,12 +17,14 @@ import itertools
 import json
 import random
 import re
+import sys
 import time
 from pathlib import Path
+from types import ModuleType
 from urllib.parse import quote
 
-from odda.scanner.builtins import BUILTIN_RULES
-from odda.scanner.builtins.retirejs import _libraries
+import pytest
+
 from odda.scanner.engine import Scanner
 from odda.scanner.model import (
     Evidence,
@@ -32,6 +35,7 @@ from odda.scanner.model import (
     _literal_gates,
     _passes_literal_gates,
 )
+from odda.scanner.userrules import load_slot_source
 from tests.e2e.conftest import curl, dyn_server, fixture_site
 
 _FX = "stack-trace.html"
@@ -41,6 +45,7 @@ async def test_stack_trace_response_lands_finding(odda_session) -> None:
     """A stack-trace body driven through the proxy lands one Finding with
     rule id, flow id, severity high, title, located evidence, and refs."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         marker = "scan-tracer"
         r = await curl(
@@ -68,6 +73,7 @@ async def test_multi_match_aggregates_into_one_finding(odda_session) -> None:
     """Multiple trace matches inside one flow aggregate into that single
     Finding's evidence — one Finding per rule-flow pair."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         marker = "scan-aggregate"
         r = await curl(
@@ -93,6 +99,7 @@ async def test_request_send_flow_is_scanned(odda_session) -> None:
     request_send records flow on the event-loop thread, browser capture
     on the mitmproxy addon thread."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
+        await _seed_slot(h, "disclosure")
         await h.call(
             "request_new",
             {
@@ -124,6 +131,7 @@ async def test_clean_and_error_flows_produce_no_finding(odda_session) -> None:
     Finding, and the scanner's data-dir subtree appears lazily — absent
     until the first Finding."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         r = await curl(
             f"{fx.base}/?marker=scan-clean",
@@ -158,6 +166,7 @@ async def test_scan_failure_never_touches_capture(odda_session) -> None:
     a plain file — is logged and skipped; the flow still lands fully in
     the flows index and the session keeps capturing."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
+        await _seed_slot(h, "disclosure")
         blocked = h.data_dir / "scanner"
         blocked.parent.mkdir(parents=True, exist_ok=True)
         blocked.write_text("not a directory")
@@ -223,6 +232,7 @@ async def test_preboot_flows_are_not_scanned(odda_session, tmp_path) -> None:
     (flows / "flows.jsonl").write_text(json.dumps(seeded) + "\n")
 
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         r = await curl(
             f"{fx.base}/?marker=scan-postboot",
@@ -270,6 +280,13 @@ def test_scanner_package_has_no_egress_imports() -> None:
         "queue",
         "re",
         "shutil",  # slot removal (rmtree) — filesystem only, no sockets
+        # sys: registering the slot exec module in sys.modules for the
+        # exec's duration (see types above) — no network surface.
+        "sys",
+        # types: ModuleType for the slot exec namespace — a bare dict
+        # breaks slots defining dataclasses (field resolution walks
+        # sys.modules); no network surface.
+        "types",
         "typing",
         "urllib",  # urllib.parse only — query-string parsing, no network
         # First-party, package-internal only (odda.scanner.*); the
@@ -291,7 +308,7 @@ def test_scanner_package_has_no_egress_imports() -> None:
     )
 
 
-# --- ticket 02: disclosure builtin family ---
+# --- ticket 02: disclosure family ---
 
 _PK = "private-key.html"
 _PC = "public-cert.html"
@@ -301,6 +318,7 @@ async def test_private_key_block_lands_finding(odda_session) -> None:
     """A PEM private-key block in a response body yields a
     disclosure.private-key Finding (HIGH) with body evidence and refs."""
     async with odda_session() as h, fixture_site([_PK]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         marker = "scan-pk-pos"
         r = await curl(
@@ -333,6 +351,7 @@ async def test_public_certificate_block_does_not_fire(odda_session) -> None:
     """A public-key / certificate PEM block is not a private key — no
     finding for published trust material."""
     async with odda_session() as h, fixture_site([_PC]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         marker = "scan-pk-neg"
         r = await curl(
@@ -356,6 +375,7 @@ async def test_frontend_secret_assignment_lands_finding(odda_session) -> None:
     disclosure.frontend-secret Finding (MEDIUM) with the assignments and
     the logger line as evidence."""
     async with odda_session() as h, fixture_site([_FS]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         marker = "scan-fs-pos"
         r = await curl(
@@ -392,6 +412,7 @@ async def test_benign_key_names_do_not_fire(odda_session) -> None:
     keyword, apiKeyId, keydown) are not secrets — no finding, and the
     scanner's subtree stays absent."""
     async with odda_session() as h, fixture_site([_BK]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         marker = "scan-fs-neg"
         r = await curl(
@@ -411,6 +432,7 @@ async def test_frontend_secret_requires_2xx(odda_session) -> None:
     """The frontend-secret gate holds for 2xx responses only: the same
     assignment shape served with status 404 yields no finding."""
     async with odda_session() as h, dyn_server() as dyn:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         secret = 'const apiKey = "sk_live_26XyZ9Q8pL2mN4vB7cD3eF5g";'
         url = (
@@ -439,6 +461,7 @@ async def test_aws_key_in_body_lands_finding(odda_session) -> None:
     disclosure.aws-key Finding (HIGH); the near-miss decoys in the same
     body (truncated, lowercase, embedded) do not add evidence."""
     async with odda_session() as h, fixture_site([_AWB]) as fx:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         marker = "scan-aws-body"
         r = await curl(
@@ -468,6 +491,7 @@ async def test_aws_key_in_response_header_lands_finding(odda_session) -> None:
     disclosure.aws-key Finding whose evidence is located in the stored
     response headers (where="response_headers")."""
     async with odda_session() as h, dyn_server() as dyn:
+        await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
         url = (
             f"{dyn.tls_base}/?marker=scan-aws-hdr"
@@ -502,6 +526,7 @@ async def test_xdebug_setcookie_lands_finding(odda_session) -> None:
     remote-debug documentation, evidence located in the response
     headers."""
     async with odda_session() as h, dyn_server() as dyn:
+        await _seed_slot(h, "cookies")
         proxy = await h.call("proxy_url", {})
         url = (
             f"{dyn.tls_base}/?marker=scan-xdbg-pos"
@@ -532,6 +557,7 @@ async def test_ordinary_setcookie_does_not_fire(odda_session) -> None:
     """A Set-Cookie response for an ordinary session cookie is not the
     Xdebug echo — no finding."""
     async with odda_session() as h, dyn_server() as dyn:
+        await _seed_slot(h, "cookies")
         proxy = await h.call("proxy_url", {})
         url = (
             f"{dyn.tls_base}/?marker=scan-xdbg-neg"
@@ -557,6 +583,7 @@ async def test_shiro_rememberme_delete_me_lands_finding(odda_session) -> None:
     deserialization Finding (MEDIUM) with response-header evidence; an
     ordinary session cookie on the same server shape does not fire."""
     async with odda_session() as h, dyn_server() as dyn:
+        await _seed_slot(h, "fingerprints")
         proxy = await h.call("proxy_url", {})
         url = (
             f"{dyn.tls_base}/?marker=t04-shiro"
@@ -639,6 +666,7 @@ async def test_s3_nosuchbucket_fires_and_normal_s3_error_does_not(
     the BucketName value in evidence; a normal S3 XML error
     (AccessDenied) does not fire."""
     async with odda_session() as h, fixture_site([_S3_HITS, _S3_MISS]) as fx:
+        await _seed_slot(h, "takeover")
         proxy = await h.call("proxy_url", {})
         flow = await _fetch(h, proxy, f"{fx.base}/{_S3_HITS}?marker=t04-s3", "t04-s3")
 
@@ -662,6 +690,7 @@ async def test_shopify_shop_not_found_fires(odda_session) -> None:
     """A Shopify shop-not-found body yields the takeover Finding (HIGH);
     a page without the phrase does not fire."""
     async with odda_session() as h, fixture_site([_SHOPIFY, "index.html"]) as fx:
+        await _seed_slot(h, "takeover")
         proxy = await h.call("proxy_url", {})
         flow = await _fetch(
             h, proxy, f"{fx.base}/{_SHOPIFY}?marker=t04-shopify", "t04-shopify"
@@ -688,6 +717,7 @@ async def test_each_compromised_cdn_import_fires_and_clean_cdns_do_not(
     supply-chain Finding (HIGH) with the domain in evidence; imports
     from unaffected CDNs (cdnjs, unpkg, jsdelivr) do not fire."""
     async with odda_session() as h, fixture_site([_CDN_CLEAN]) as fx:
+        await _seed_slot(h, "supplychain")
         proxy = await h.call("proxy_url", {})
         for domain, src in _CDN_IMPORTS.items():
             body = (
@@ -720,6 +750,7 @@ async def test_telerik_vulnerable_version_fires_and_unknown_does_not(
         odda_session() as h,
         fixture_site([_TELERIK_HITS, _TELERIK_MISS]) as fx,
     ):
+        await _seed_slot(h, "fingerprints")
         proxy = await h.call("proxy_url", {})
         flow = await _fetch(
             h, proxy, f"{fx.base}/{_TELERIK_HITS}?marker=t04-telerik", "t04-telerik"
@@ -747,6 +778,7 @@ async def test_prometheus_metrics_page_fires_and_prose_does_not(
     (MEDIUM) with the HELP/TYPE pair in evidence; ordinary prose that
     mentions metrics does not fire."""
     async with odda_session() as h, fixture_site([_PROM_HITS, _PROM_MISS]) as fx:
+        await _seed_slot(h, "fingerprints")
         proxy = await h.call("proxy_url", {})
         flow = await _fetch(
             h, proxy, f"{fx.base}/{_PROM_HITS}?marker=t04-prom", "t04-prom"
@@ -768,27 +800,6 @@ async def test_prometheus_metrics_page_fires_and_prose_does_not(
 # --- ticket 05: retirejs dataset ---
 
 
-def test_retirejs_dataset_ships_offline_as_package_data() -> None:
-    """The vendored retire.js repository (Apache-2.0) is the scanner's
-    only data source and ships inside the package: the dataset and its
-    license resolve through the same importlib.resources mechanism the
-    adapter loads them with, and pyproject's package-data ships the
-    directory (the userscripts/default precedent)."""
-    from importlib import resources
-
-    data = resources.files("odda.scanner.data")
-    dataset = data.joinpath("jsrepository.json")
-    license_file = data.joinpath("jsrepository.LICENSE")
-    assert dataset.is_file(), "vendored jsrepository.json missing from package"
-    assert license_file.is_file(), "Apache-2.0 license file missing from package"
-    assert "Apache License" in license_file.read_text(encoding="utf-8")
-
-    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-    assert '"scanner/data/*"' in pyproject.read_text(encoding="utf-8"), (
-        "scanner/data must ship via [tool.setuptools.package-data]"
-    )
-
-
 async def test_outdated_jquery_filecontent_lands_finding(odda_session) -> None:
     """A served JS body matching a vendored file-content pattern yields a
     js.outdated-library Finding at the highest matched advisory severity,
@@ -803,6 +814,7 @@ async def test_outdated_jquery_filecontent_lands_finding(odda_session) -> None:
     atOrAbove 3.0.0-rc.1 — so the aggregate severity is medium."""
     _fx = "ticket05-jquery-old.js"
     async with odda_session() as h, fixture_site([_fx]) as fx:
+        await _seed_slot(h, "retirejs")
         proxy = await h.call("proxy_url", {})
         r = await curl(
             f"{fx.base}/{_fx}?marker=scan-t05-jq",
@@ -837,6 +849,7 @@ async def test_sha1_hash_extractor_detects_hashed_version(odda_session) -> None:
     file-content pattern, so this pins the exact-hash-first priority."""
     _fx = "retire-example-0.0.1.min.js"
     async with odda_session() as h, fixture_site([_fx]) as fx:
+        await _seed_slot(h, "retirejs")
         proxy = await h.call("proxy_url", {})
         r = await curl(
             f"{fx.base}/{_fx}?marker=scan-t05-hash",
@@ -864,6 +877,7 @@ async def test_filename_extractor_detects_path_version(odda_session) -> None:
     URL filename carries the vendored version pattern."""
     _fx = "retire-example-0.0.1.js"
     async with odda_session() as h, fixture_site([_fx]) as fx:
+        await _seed_slot(h, "retirejs")
         proxy = await h.call("proxy_url", {})
         r = await curl(
             f"{fx.base}/{_fx}?marker=scan-t05-name",
@@ -895,6 +909,7 @@ async def test_current_and_above_threshold_versions_yield_no_finding(
         "ticket05-jquery-old.js",
     )
     async with odda_session() as h, fixture_site([current, at_bound, control]) as fx:
+        await _seed_slot(h, "retirejs")
         proxy = await h.call("proxy_url", {})
         for name, marker in (
             (current, "scan-t05-current"),
@@ -921,7 +936,7 @@ async def test_current_and_above_threshold_versions_yield_no_finding(
 
 _T06_CANARY = "odda-ticket06-canary"
 # One body drives both families: the canary marker for the user rules
-# under test, and a Python traceback banner so the builtin
+# under test, and a Python traceback banner so a seeded
 # disclosure.stack-trace finding doubles as the drain-settle probe for
 # negative assertions on later flows.
 _T06_BODY = (
@@ -959,7 +974,7 @@ RULES = [
     Rule(
         id="disclosure.stack-trace",
         severity=Severity.MEDIUM,
-        title="Collides with a builtin id",
+        title="Collides with the disclosure slot's id",
         body_patterns=(r"never-matches",),
     ),
 ]
@@ -983,7 +998,7 @@ _RULE_BROKEN = "this is not python {{{"
 # raises at scan time (a str subclass whose __eq__ raises inside the
 # engine's ``in`` gate check) — the deterministic raising-rule
 # injection ticket 01 deferred. Containment must be per-rule, so the
-# sibling (and the builtin) still fire on the same flow.
+# sibling (and the seeded disclosure rule) still fire on the same flow.
 _RULE_PACK = f'''from odda.scanner import Rule, Severity
 
 
@@ -1064,37 +1079,39 @@ async def test_rule_install_applies_to_flows_after_install_only(
         )
 
 
-async def test_rule_install_from_file_and_rule_list_rows(
-    odda_session, tmp_path
-) -> None:
-    """install from a file path persists the slot; rule_list shows builtin
-    and user rows with slot, id, severity, source, and state."""
-    rf = tmp_path / "t06_canary_rule.py"
-    rf.write_text(_RULE_CANARY)
+async def test_rule_install_from_file_and_rule_list_rows(odda_session) -> None:
+    """install from a file path persists the slot and rule_list shows
+    exactly the installed slots' rules — user rows only (nothing ships
+    with odda), with slot, id, severity, source, and state."""
     async with odda_session() as h:
-        r = await h.call("rule_install", {"name": "alpha", "file": str(rf)})
-        assert r["name"] == "alpha"
+        r = await _seed_slot(h, "disclosure")
+        assert r["name"] == "disclosure"
         assert r["size"] > 0
-        assert "user.ticket06-canary" in _slot_path(h, "alpha").read_text()
+        assert r["rules"] == [
+            "disclosure.stack-trace",
+            "disclosure.private-key",
+            "disclosure.frontend-secret",
+            "disclosure.aws-key",
+        ]
+        assert "disclosure.stack-trace" in _slot_path(h, "disclosure").read_text()
 
         rows = await h.call_json("rule_list", {})
-        by_id = {row["id"]: row for row in rows}
-        assert by_id["disclosure.stack-trace"] == {
-            "slot": None,
-            "id": "disclosure.stack-trace",
-            "severity": "high",
-            "source": "builtin",
-            "state": "active",
-            "error": None,
-        }
-        assert by_id["user.ticket06-canary"] == {
-            "slot": "alpha",
-            "id": "user.ticket06-canary",
-            "severity": "medium",
-            "source": "user",
-            "state": "active",
-            "error": None,
-        }
+        assert rows == [
+            {
+                "slot": "disclosure",
+                "id": rule_id,
+                "severity": severity,
+                "source": "user",
+                "state": "active",
+                "error": None,
+            }
+            for rule_id, severity in (
+                ("disclosure.stack-trace", "high"),
+                ("disclosure.private-key", "high"),
+                ("disclosure.frontend-secret", "medium"),
+                ("disclosure.aws-key", "high"),
+            )
+        ]
 
 
 async def test_syntax_error_install_rejected_with_expected_shape(
@@ -1117,16 +1134,17 @@ async def test_syntax_error_install_rejected_with_expected_shape(
 async def test_colliding_rule_ids_rejected_naming_the_collision(
     odda_session,
 ) -> None:
-    """A rule id colliding with a builtin or another user rule's id is
-    rejected at install, naming the exact collision; the colliding slot
-    never reaches disk."""
+    """A rule id colliding with another slot's id is rejected at
+    install, naming the exact collision; the colliding slot never
+    reaches disk."""
     async with odda_session() as h:
+        await _seed_slot(h, "disclosure")
         err = await h.call_error(
-            "rule_install", {"name": "clash-builtin", "source": _RULE_COLLIDING}
+            "rule_install", {"name": "clash-slot", "source": _RULE_COLLIDING}
         )
         assert "Rule id 'disclosure.stack-trace'" in err
-        assert "builtin" in err
-        assert not _slot_path(h, "clash-builtin").exists()
+        assert "already registered by rule slot 'disclosure'" in err
+        assert not _slot_path(h, "clash-slot").exists()
 
         await h.call("rule_install", {"name": "dup-a", "source": _RULE_DUP})
         err = await h.call_error("rule_install", {"name": "dup-b", "source": _RULE_DUP})
@@ -1140,6 +1158,7 @@ async def test_rule_remove_keeps_past_findings_stops_future(odda_session) -> Non
     past Findings remain in the index; subsequent matching traffic
     produces no Finding from the removed rules."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
+        await _seed_slot(h, "disclosure")
         await h.call("rule_install", {"name": "canary", "source": _RULE_CANARY})
         before = await _drive(h, fx, "t06-remove-before")
         await _wait_rule_finding(h, before["id"], "user.ticket06-canary")
@@ -1153,7 +1172,7 @@ async def test_rule_remove_keeps_past_findings_stops_future(odda_session) -> Non
         assert not _slot_path(h, "canary").parent.exists()
 
         after = await _drive(h, fx, "t06-remove-after")
-        # settle: this flow drained (the builtin fired on it), so the
+        # settle: this flow drained (a disclosure finding fired on it), so the
         # canary absence below is the removal, not drain lag
         await _wait_rule_finding(h, after["id"], "disclosure.stack-trace")
         assert all(
@@ -1171,6 +1190,7 @@ async def test_raising_rule_is_contained_per_rule(odda_session) -> None:
     builtin and a sibling user rule from the same slot — still fire on
     that flow."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
+        await _seed_slot(h, "disclosure")
         r = await h.call("rule_install", {"name": "pack", "source": _RULE_PACK})
         assert r["rules"] == ["user.ticket06-sibling", "user.ticket06-raiser"]
 
@@ -1244,6 +1264,175 @@ async def test_force_overwrite_swaps_the_slot_live(odda_session) -> None:
         )
 
 
+# --- ticket 16: de-bundle — repo rule slots, assets, empty boot ---
+
+
+# The converted corpus lives outside the shipped package (ADR-0036):
+# one slot dir per family under the repo's rules/ tree, seeded through
+# the real rule_install path.
+_RULES_SRC = Path(__file__).resolve().parents[2] / "rules"
+
+# Every converted family, in one list (library-level tests scan against
+# the whole corpus the way sessions do when every slot is installed).
+_SLOT_FAMILIES = (
+    "cookies",
+    "disclosure",
+    "fingerprints",
+    "request",
+    "retirejs",
+    "supplychain",
+    "takeover",
+)
+
+
+def _slot_rules(family: str) -> list[Rule]:
+    """Load one repo rules/<family> slot through the slot loader."""
+    path = _RULES_SRC / family / "rule.py"
+    return load_slot_source(family, path.read_text(encoding="utf-8"), str(path))
+
+
+def _all_slot_rules() -> list[Rule]:
+    """Every repo slot family's rules, the full converted corpus."""
+    return [rule for family in _SLOT_FAMILIES for rule in _slot_rules(family)]
+
+
+def _slot_module(family: str) -> dict:
+    """Exec one repo slot family and return its module namespace."""
+    path = _RULES_SRC / family / "rule.py"
+    module = ModuleType(f"t16.slot.{family}")
+    module.__file__ = str(path)
+    sys.modules[module.__name__] = module
+    try:
+        exec(  # noqa: S102
+            compile(path.read_text(encoding="utf-8"), str(path), "exec"),
+            module.__dict__,
+        )
+    finally:
+        del sys.modules[module.__name__]
+    return module.__dict__
+
+
+async def _seed_slot(h, family: str) -> dict:
+    """Install the repo's rules/<family> slot through the real tool path."""
+    return await h.call(
+        "rule_install",
+        {"name": family, "file": str(_RULES_SRC / family / "rule.py")},
+    )
+
+
+async def test_rule_install_from_file_copies_sibling_assets(
+    odda_session, tmp_path
+) -> None:
+    """Installing from a file path copies the rule file's sibling
+    non-.py assets into the slot dir — a dataset-backed rule file reads
+    its data from its own directory, so the data must ride along. A
+    force-overwrite from a file with no assets leaves none behind."""
+    src = tmp_path / "t16-dataset-slot"
+    src.mkdir()
+    rule_file = src / "rule.py"
+    rule_file.write_text(_RULE_CANARY)
+    (src / "dataset.json").write_text('{"t16": true}')
+    (src / "NOTICE.txt").write_text("t16 asset")
+    (src / "helper.py").write_text("# a .py sibling never rides along\n")
+    (src / "subdir").mkdir()
+
+    async with odda_session() as h:
+        r = await h.call("rule_install", {"name": "assets", "file": str(rule_file)})
+        assert r["rules"] == ["user.ticket06-canary"]
+        assert r["assets"] == ["NOTICE.txt", "dataset.json"]
+        slot_dir = _slot_path(h, "assets").parent
+        assert _slot_path(h, "assets").is_file()
+        assert (slot_dir / "dataset.json").read_text(
+            encoding="utf-8"
+        ) == '{"t16": true}'
+        assert (slot_dir / "NOTICE.txt").is_file()
+        assert not (slot_dir / "helper.py").exists(), ".py siblings stay behind"
+        assert not (slot_dir / "subdir").exists(), "subdirectories stay behind"
+
+        # force-overwrite from an asset-less file: no stale assets linger
+        plain = tmp_path / "t16-plain.py"
+        plain.write_text(_RULE_ALT)
+        r2 = await h.call(
+            "rule_install", {"name": "assets", "file": str(plain), "force": True}
+        )
+        assert r2["assets"] == []
+        assert not (slot_dir / "dataset.json").exists()
+        assert not (slot_dir / "NOTICE.txt").exists()
+        assert "user.ticket06-alt" in _slot_path(h, "assets").read_text()
+
+
+async def test_empty_boot_scans_nothing_and_captures_fine(odda_session) -> None:
+    """A fresh install boots the Scanner with an empty ruleset — no
+    slots exist, nothing scans, nothing raises: traffic still captures
+    fully (clean, matching, and error flows alike), no findings index
+    appears, and rule_list shows the empty ruleset (ADR-0036's
+    deliberate empty boot)."""
+    async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
+        assert await h.call_json("rule_list", {}) == []
+
+        proxy = await h.call("proxy_url", {})
+        marker = "t16-empty-clean"
+        r = await curl(
+            f"{fx.base}/index.html?marker={marker}",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+        clean = await h.wait_flow(marker)
+        assert clean["error"] is None
+
+        # A body that would fire disclosure.stack-trace under the
+        # former builtins: with no slots installed it lands as a plain
+        # captured flow — the scan is a no-op, not a failure.
+        r = await curl(
+            f"{fx.base}/{_FX}?marker=t16-empty-match",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+        match = await h.wait_flow("t16-empty-match")
+        assert match["body_file"] is not None
+
+        await curl(
+            "http://127.0.0.1:9/?marker=t16-empty-err",
+            proxy,
+            extra=["-o", "/dev/null"],
+        )
+        err = await h.wait_flow("t16-empty-err")
+        assert err["error"]
+
+        await asyncio.sleep(0.5)
+        assert not (h.data_dir / "scanner").exists(), (
+            "empty boot must not write a findings index"
+        )
+        assert h.findings_for(clean["id"]) == []
+        assert h.findings_for(match["id"]) == []
+        assert h.findings_for(err["id"]) == []
+        assert await h.call_json("rule_list", {}) == []
+
+
+def test_package_ships_no_rules_or_datasets() -> None:
+    """The shipped package carries scanner machinery only: no rule
+    registrations (no builtins modules exist to import) and no rule
+    datasets (no data dir, no package-data entry) — the corpus lives
+    as installable slot sources under the repo's rules/ tree, outside
+    the package (ADR-0036)."""
+    scanner_src = Path(__file__).resolve().parents[2] / "src" / "odda" / "scanner"
+    names = {p.name for p in scanner_src.iterdir()}
+    assert "builtins" not in names, "no builtin rule modules may ship"
+    assert "data" not in names, "no rule datasets may ship"
+
+    with pytest.raises(ImportError):
+        from odda.scanner import builtins  # noqa: F401
+
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    assert '"scanner/data/*"' not in pyproject.read_text(encoding="utf-8"), (
+        "scanner package-data entry must be gone"
+    )
+    # the converted corpus does exist, outside the package
+    assert (_RULES_SRC / "retirejs" / "jsrepository.json").is_file()
+
+
 async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
     odda_session, config_home
 ) -> None:
@@ -1315,6 +1504,7 @@ async def test_browser_session_and_password_params_in_url_land_findings(
     evidence; a password-shaped parameter on the same navigation yields
     request.password-in-url."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
+        await _seed_slot(h, "request")
         bid, tid = await h.open_browser()
         await h.navigate(bid, tid, f"{fx.base}/?marker=t03-nav&{_JS}&{_PW}")
         flow = await h.wait_flow("t03-nav")
@@ -1342,6 +1532,8 @@ async def test_request_send_probe_is_invisible_to_request_rules(
     Finding: request_send flows carry no browser attribution, so the
     browser-attribution gate holds."""
     async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
+        await _seed_slot(h, "disclosure")
+        await _seed_slot(h, "request")
         await h.call(
             "request_new",
             {
@@ -1376,6 +1568,8 @@ async def test_browser_cleartext_authorization_http_only(odda_session) -> None:
         fixture_site([_FX, "index.html"]) as fx,
         dyn_server() as dyn,
     ):
+        await _seed_slot(h, "disclosure")
+        await _seed_slot(h, "request")
         bid, tid = await h.open_browser(f"{fx.base}/")
 
         # http: an in-page fetch with explicit credentials rides the
@@ -1440,6 +1634,8 @@ async def test_browser_xdebug_session_start_param_lands_finding(
     the same param stays silent — the param half is browser-gated, the
     Set-Cookie half is not."""
     async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
+        await _seed_slot(h, "cookies")
+        await _seed_slot(h, "disclosure")
         bid, tid = await h.open_browser()
         await h.navigate(
             bid, tid, f"{fx.base}/?marker=t03-xdebug&XDEBUG_SESSION_START=t03"
@@ -1469,6 +1665,7 @@ async def test_error_flow_from_browser_keeps_request_rules(odda_session) -> None
     side) with a token in its URL still yields the request-side Finding —
     error flows get request-side rules."""
     async with odda_session() as h:
+        await _seed_slot(h, "request")
         bid, tid = await h.open_browser()
         # The navigation itself fails (the host never resolves — a dead
         # target, unlike a Chrome-blocked port, still sends the request
@@ -1522,6 +1719,7 @@ async def test_sequential_sessions_are_forward_only(odda_session, tmp_path) -> N
     async with fixture_site([_FX, "index.html"]) as fx:
         # Session A: stack-trace-matching traffic, then close.
         async with odda_session() as a:
+            await _seed_slot(a, "disclosure")
             proxy = await a.call("proxy_url", {})
             r = await curl(
                 f"{fx.base}/{_FX}?marker=t07-seq-a", proxy, extra=_STATUS_ONLY
@@ -1582,6 +1780,7 @@ async def test_concurrent_sessions_observe_their_own_flows_only(
     so a second in-process session cannot be a true concurrent sibling.
     """
     async with fixture_site([_FX]) as fx, odda_session() as a:
+        await _seed_slot(a, "disclosure")
         async with odda_subprocess_session() as b:
             # Both sessions are live at once over the same data dir, each
             # with its own proxy and its own scanner drain.
@@ -1746,17 +1945,17 @@ async def test_drain_keeps_loop_live_and_ordered_during_slow_scans(
 
 
 def test_literal_gate_never_suppresses_a_match() -> None:
-    """The necessary-literal gate is sound: across every builtin and
-    dataset pattern, on seeded random texts spliced with the
-    patterns' own literal fragments, a pattern that matches always
-    passes its gate (a gate miss can only ever skip a pattern that
-    would not have matched). Also pins gate coverage, so a regex
-    parser or dataset drift cannot silently degrade every body scan
-    back to ungated linear passes."""
+    """The necessary-literal gate is sound: across every rule and
+    dataset pattern of the converted slot corpus, on seeded random
+    texts spliced with the patterns' own literal fragments, a pattern
+    that matches always passes its gate (a gate miss can only ever
+    skip a pattern that would not have matched). Also pins gate
+    coverage, so a regex parser or dataset drift cannot silently
+    degrade every body scan back to ungated linear passes."""
     patterns: list[re.Pattern[str]] = []
-    for library in _libraries():
+    for library in _slot_module("retirejs")["_libraries"]():
         patterns.extend(library.filecontent)
-    for rule in BUILTIN_RULES:
+    for rule in _all_slot_rules():
         patterns.extend(rule.body_patterns)
         patterns.extend(rule.header_patterns)
 
@@ -1798,8 +1997,8 @@ def test_literal_gate_never_suppresses_a_match() -> None:
 
 
 async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
-    """A 10 MB JavaScript body through the full builtin ruleset — the
-    retire.js filecontent scans above all — no longer stalls the
+    """A 10 MB JavaScript body through the full converted slot corpus —
+    the retire.js filecontent scans above all — no longer stalls the
     event loop for the scan's duration (ticket 08): with the scan off
     the loop thread and the necessary-literal gate in front of every
     body regex, a heartbeat on the drain's own loop keeps its ~5 ms
@@ -1821,7 +2020,7 @@ async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
         b'Traceback (most recent call last):\n  File "app.py", line 1\nboom\n',
     )
 
-    scanner = Scanner(data_dir, rules=BUILTIN_RULES)
+    scanner = Scanner(data_dir, rules=_all_slot_rules())
     drain = asyncio.create_task(scanner.run())
 
     beats: list[tuple[float, float]] = []

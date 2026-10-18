@@ -1,10 +1,9 @@
 """Stable rule-author surface for the passive scanner (ADR-0035).
 
-Rules are typed Python registrations, not a DSL: builtins are literals
-under :mod:`odda.scanner.builtins`, and user rule files import these
-types and expose a module-level ``RULES`` list. This module is the
-contract rule authors build against — the surface stays additive across
-odda upgrades (new optional fields, never renames).
+Rules are typed Python registrations, not a DSL: rule files import
+these types and expose a module-level ``RULES`` list. This module is
+the contract rule authors build against — the surface stays additive
+across odda upgrades (new optional fields, never renames).
 
 The match spec is declarative: regex patterns matched against the
 flow's stored material, with gates that restrict which flows a rule

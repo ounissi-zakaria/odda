@@ -1,4 +1,4 @@
-"""Cookie-family builtin rules (ADR-0035's signal bar).
+"""Cookie-family rules (ADR-0035's signal bar), as an installable slot.
 
 The Xdebug session echo is an RCE candidate: a server that answers
 with ``Set-Cookie: XDEBUG_SESSION=`` is running the Xdebug extension
@@ -18,9 +18,9 @@ into one finding.
 
 from __future__ import annotations
 
-from odda.scanner.model import Rule, Severity
+from odda.scanner import Rule, Severity
 
-RULES: tuple[Rule, ...] = (
+RULES = [
     Rule(
         id="cookie.xdebug-session",
         severity=Severity.HIGH,
@@ -30,4 +30,4 @@ RULES: tuple[Rule, ...] = (
         request_browser_only=True,
         refs=("https://xdebug.org/docs/step_debug",),
     ),
-)
+]

@@ -1,4 +1,4 @@
-"""Takeover-family builtin rules (ADR-0035's signal bar).
+"""Takeover-family rules (ADR-0035's signal bar), as an installable slot.
 
 The bodies below confirm a registerable dangling resource: the
 service's own "this resource is gone" answer, naming the resource.
@@ -8,9 +8,9 @@ registering the name would claim the traffic that resolves to it.
 
 from __future__ import annotations
 
-from odda.scanner.model import Rule, Severity
+from odda.scanner import Rule, Severity
 
-RULES: tuple[Rule, ...] = (
+RULES = [
     Rule(
         id="takeover.s3-nosuchbucket",
         severity=Severity.HIGH,
@@ -36,4 +36,4 @@ RULES: tuple[Rule, ...] = (
         body_patterns=(r"Sorry, this shop is currently unavailable",),
         refs=("https://can-i-take-over-xyz.vercel.app/",),
     ),
-)
+]

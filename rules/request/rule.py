@@ -1,4 +1,4 @@
-"""Request-family builtin rules (ADR-0035's signal bar).
+"""Request-family rules (ADR-0035's signal bar), as an installable slot.
 
 All three read the request side of a flow, and the request side is
 trusted material only when a browser produced it: an agent's own
@@ -15,7 +15,7 @@ substrings prose would trip (``assetsid`` is not a session id).
 
 from __future__ import annotations
 
-from odda.scanner.model import Rule, Severity
+from odda.scanner import Rule, Severity
 
 # Session-token-shaped query parameter names: the framework session
 # ids (Django/JSP/PHP/ASP.NET — ``sess\w*`` keeps the session* family)
@@ -29,7 +29,7 @@ _SESSION_TOKEN_PARAM: tuple[str, ...] = (
 # Password-shaped query parameter names.
 _PASSWORD_PARAM: tuple[str, ...] = (r"(?i:^(?:pass|pwd|passwd|password\w*)$)",)
 
-RULES: tuple[Rule, ...] = (
+RULES = [
     Rule(
         id="request.cleartext-authorization",
         severity=Severity.HIGH,
@@ -55,4 +55,4 @@ RULES: tuple[Rule, ...] = (
         browser_only=True,
         refs=("CWE-598", "https://cwe.mitre.org/data/definitions/598.html"),
     ),
-)
+]
