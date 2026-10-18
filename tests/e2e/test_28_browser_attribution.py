@@ -74,7 +74,7 @@ async def test_canary_exchange_is_never_recorded(odda_session) -> None:
 
 
 async def test_tokens_are_project_lifetime_and_dirs_inert(
-    odda_session, tmp_path: Path
+    odda_session, tmp_path: Path, config_home: Path
 ) -> None:
     """Two sessions over one data dir: tokens never repeat, and a past
     session's per-browser userscript dir neither leaks into the new
@@ -94,7 +94,7 @@ async def test_tokens_are_project_lifetime_and_dirs_inert(
     os.chdir(tmp_path)
     try:
         async with Client(odda_mcp.mcp_server) as client:
-            h2 = Harness(client, data_dir)
+            h2 = Harness(client, data_dir, config_home)
             t2, _ = await h2.open_browser()
             assert t2 != t1
 
