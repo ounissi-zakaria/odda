@@ -33,7 +33,7 @@ The durable, per-project form of a Browser: a directory under the Data dir holdi
 _Avoid_: saved browser, browser folder, browser entry
 
 **Base profile**:
-The global seed Chrome profile at `~/.config/odda/chrome-profile`, built once by the `init-chrome-profile` helper. Copied into a Browser record when the browser is first created — never on reopen — so every record diverges from the seed with use.
+The global seed Chrome profile at `chrome-profile` under the odda config home (`~/.config/odda` unless `ODDA_CONFIG_HOME` redirects it), built once by the `init-chrome-profile` helper. Copied into a Browser record when the browser is first created — never on reopen — so every record diverges from the seed with use.
 _Avoid_: template profile, master profile, default profile
 
 **Cookie jar**:
@@ -145,8 +145,16 @@ The record of one Rule matching one Flow: a severity-tagged observation with agg
 _Avoid_: alert, issue, hit, match
 
 **Rule**:
-A single passive check over one Flow's captured material, gated on flow context (scheme, status, content type, attribution). Rule identifiers are permanent — they key Findings. Built-ins ship with odda; user Rules persist in the Data dir and survive sessions, like Proxy-scripts.
+A single passive check over one Flow's captured material, gated on flow context (scheme, status, content type, attribution). Rule identifiers are permanent — they key Findings. Built-ins ship with odda; user Rules live in Rule slots that persist in the Global rules dir and survive sessions — machine-global, unlike Proxy-scripts.
 _Avoid_: check, signature, template, detector
+
+**Rule slot**:
+One persisted unit of user Rules: a named directory in the Global rules dir holding a single Python file whose module-level `RULES` list defines the slot's Rules. Installed via `rule_install` (`force` overwrites by name), removed via `rule_remove`, re-loaded on every session boot; a slot that fails to load is skipped without blocking the others. Slots are machine-global and shared across projects, unlike Proxy-scripts, which persist per-project in the Data dir.
+_Avoid_: rule file, custom rule, rule package
+
+**Global rules dir**:
+The directory Rule slots persist in: `rules/` under the odda config home (`~/.config/odda` by default; the `ODDA_CONFIG_HOME` environment variable redirects it, and the Base profile lives under the same root). Machine-global — one ruleset shared across every project and MCP session on the machine — which is why it never holds the per-project Data dir's flows or findings.
+_Avoid_: rules folder, user rules dir, rule store
 
 ## Testing
 

@@ -1013,7 +1013,7 @@ RULES = [
 
 
 def _slot_path(h, name: str) -> Path:
-    return h.data_dir / "rules" / name / "rule.py"
+    return h.config_home / "rules" / name / "rule.py"
 
 
 async def _drive(h, fx, marker: str) -> dict:
@@ -1245,7 +1245,7 @@ async def test_force_overwrite_swaps_the_slot_live(odda_session) -> None:
 
 
 async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
-    odda_session, tmp_path
+    odda_session, config_home
 ) -> None:
     """A slot installed in session A loads on session B's boot; a broken
     slot (syntax error on disk) is skipped with its error visible in
@@ -1255,7 +1255,7 @@ async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
         assert _slot_path(h, "keeper").is_file()
 
     # a broken slot appears on disk out-of-band (hand-edited, corrupted)
-    broken = tmp_path / ".odda" / "rules" / "broken" / "rule.py"
+    broken = config_home / "rules" / "broken" / "rule.py"
     broken.parent.mkdir(parents=True)
     broken.write_text(_RULE_BROKEN)
 
@@ -1865,3 +1865,73 @@ async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
     # ceiling must catch is the bug: pre-fix, the loop froze for the
     # whole 2.7 s scan.
     assert max(gaps) < 0.6, f"loop stalled {max(gaps):.3f}s during the drain"
+
+
+# --- ticket 15: global rules dir + config-home resolver ---
+
+
+def test_config_home_resolver_honors_override_and_keeps_default_paths(
+    tmp_path, monkeypatch
+) -> None:
+    """The config-home resolver behind the global rules dir and the Base
+    profile: with the override unset it yields exactly the historical
+    hardcoded paths (byte-for-byte the pre-ticket shapes), and
+    ODDA_CONFIG_HOME redirects every child of the config home."""
+    from odda import paths
+
+    monkeypatch.delenv(paths.CONFIG_HOME_ENV, raising=False)
+    home = Path.home() / ".config" / "odda"
+    assert paths.config_home() == home
+    assert paths.base_profile_dir() == home / "chrome-profile"
+    assert paths.global_rules_dir() == home / "rules"
+
+    override = tmp_path / "t15-redirected-home"
+    monkeypatch.setenv(paths.CONFIG_HOME_ENV, str(override))
+    assert paths.config_home() == override
+    assert paths.base_profile_dir() == override / "chrome-profile"
+    assert paths.global_rules_dir() == override / "rules"
+
+
+async def test_rule_slots_are_machine_global_across_data_dirs(
+    odda_subprocess_session, config_home, tmp_path
+) -> None:
+    """Rule slots are machine-global: two subprocess sessions over two
+    different data dirs but one config home share the slot store — a slot
+    installed in session A (project-a) is loaded by session B's next boot
+    (project-b) and fires on B's flows. Live registration stays
+    per-session and arrival-time: A's pre-install flow never matches the
+    rule, and no rules tree appears under either data dir."""
+    project_a = tmp_path / "project-a"
+    project_b = tmp_path / "project-b"
+    project_a.mkdir()
+    project_b.mkdir()
+
+    async with fixture_site(index_body=_T06_BODY) as fx:
+        async with odda_subprocess_session(cwd=project_a) as a:
+            pre = await _drive(a, fx, "t15-pre-install")
+            r = await a.call("rule_install", {"name": "shared", "source": _RULE_CANARY})
+            assert r["rules"] == ["user.ticket06-canary"]
+            assert _slot_path(a, "shared").is_file()
+
+            post = await _drive(a, fx, "t15-post-install")
+            await _wait_rule_finding(a, post["id"], "user.ticket06-canary")
+            # arrival-time: the pre-install flow drained after the install
+            # (post's finding proves it) yet never matches the rule
+            assert all(
+                f["rule_id"] != "user.ticket06-canary"
+                for f in a.findings_for(pre["id"])
+            )
+
+        # slots live in the config home, never in a data dir
+        assert not (project_a / ".odda" / "rules").exists()
+        assert not (project_b / ".odda" / "rules").exists()
+
+        async with odda_subprocess_session(cwd=project_b) as b:
+            rows = await b.call_json("rule_list", {})
+            canary = next(row for row in rows if row["id"] == "user.ticket06-canary")
+            assert canary["slot"] == "shared"
+            assert canary["state"] == "active"
+
+            flow = await _drive(b, fx, "t15-cross-boot")
+            finding = await _wait_rule_finding(b, flow["id"], "user.ticket06-canary")
+            assert finding["flow_id"] == flow["id"]

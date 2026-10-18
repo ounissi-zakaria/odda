@@ -1,9 +1,13 @@
 """User rule slots: storage, loading, and live registration (ADR-0035).
 
-User rules are Python files persisted as slot directories under
-``<data_dir>/rules/<name>/rule.py`` — the proxy-script storage
-convention (one Python file per named slot, directory created lazily
-on first install, ``shutil.rmtree`` on remove). A slot's file imports
+User rules are Python files persisted as slot directories under the
+global rules dir — ``<rules_dir>/<name>/rule.py``, machine-global and
+shared across every project on the machine — using the proxy-script
+storage convention (one Python file per named slot, directory created
+lazily on first install, ``shutil.rmtree`` on remove). The rules dir
+arrives as a parameter the same way the data dir reaches the Scanner;
+``odda.mcp`` passes ``odda.paths.global_rules_dir()``, the config-home
+root an ``ODDA_CONFIG_HOME`` override redirects. A slot's file imports
 the rule-author surface and exposes a module-level ``RULES`` list; one
 slot may register any number of rules. :class:`UserRuleManager` loads
 slots into a live Scanner at install time and again on session boot;
@@ -23,8 +27,8 @@ Two deliberate divergences from the proxy-script flow:
   never retroactively to backlog still queued for scanning.
 
 The module stays inside the scanner's zero-egress boundary: stdlib
-only, no flowstore/mitmproxy reach-ins — the data dir arrives as a
-parameter the same way it reaches the Scanner itself.
+only, no flowstore/mitmproxy reach-ins — the rules dir arrives as a
+parameter the same way the data dir reaches the Scanner itself.
 """
 
 from __future__ import annotations
@@ -44,7 +48,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-RULES_DIR_NAME = "rules"
 RULE_FILENAME = "rule.py"
 
 #: The rule-file contract, riding the sanctioned teaching surfaces: the
@@ -76,49 +79,43 @@ RULES = [
 """
 
 
-def _rules_dir(data_dir: Path) -> Path:
-    """Return the rules dir under ``data_dir`` (not created here)."""
-    return data_dir / RULES_DIR_NAME
-
-
-def _rule_path(data_dir: Path, name: str) -> Path:
+def _rule_path(rules_dir: Path, name: str) -> Path:
     """Return the on-disk rule file path for the slot named ``name``."""
-    return _rules_dir(data_dir) / name / RULE_FILENAME
+    return rules_dir / name / RULE_FILENAME
 
 
-def install_source(data_dir: Path, name: str, source: str) -> Path:
+def install_source(rules_dir: Path, name: str, source: str) -> Path:
     """Persist ``source`` as slot ``name``'s rule file, overwriting.
 
     Creates the rules dir and the per-slot dir lazily. This only writes
     the file; the live registration is the caller's step, so the boot
     scan and a force-overwrite reinstall share one write path.
     """
-    path = _rule_path(data_dir, name)
+    path = _rule_path(rules_dir, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source, encoding="utf-8")
     return path
 
 
-def remove_source(data_dir: Path, name: str) -> None:
+def remove_source(rules_dir: Path, name: str) -> None:
     """Delete slot ``name``'s directory.
 
     Raises:
         ValueError: If the slot is not on disk.
     """
-    d = _rules_dir(data_dir) / name
+    d = rules_dir / name
     if not d.exists():
         msg = f"Rule slot '{name}' not found"
         raise ValueError(msg)
     shutil.rmtree(d)
 
 
-def list_slots(data_dir: Path) -> list[dict[str, Any]]:
+def list_slots(rules_dir: Path) -> list[dict[str, Any]]:
     """List persisted rule slots from disk, sorted by name."""
-    d = _rules_dir(data_dir)
-    if not d.exists():
+    if not rules_dir.exists():
         return []
     slots: list[dict[str, Any]] = []
-    for entry in sorted(d.iterdir()):
+    for entry in sorted(rules_dir.iterdir()):
         if not entry.is_dir():
             continue
         rule_file = entry / RULE_FILENAME
@@ -127,9 +124,9 @@ def list_slots(data_dir: Path) -> list[dict[str, Any]]:
     return slots
 
 
-def name_exists(data_dir: Path, name: str) -> bool:
+def name_exists(rules_dir: Path, name: str) -> bool:
     """Return True if slot ``name`` is persisted on disk."""
-    return _rule_path(data_dir, name).exists()
+    return _rule_path(rules_dir, name).exists()
 
 
 def load_slot_source(name: str, source: str, filename: str) -> list[Rule]:
@@ -216,27 +213,28 @@ class UserRuleManager:
     """
 
     def __init__(
-        self, scanner: Scanner, data_dir: Path, builtins: Sequence[Rule]
+        self, scanner: Scanner, rules_dir: Path, builtins: Sequence[Rule]
     ) -> None:
-        """Bind the scanner, its data dir, and the builtin ruleset.
+        """Bind the scanner, the global rules dir, and the builtin ruleset.
 
         Args:
             scanner: The session's live scanner; slots register into it.
-            data_dir: The session's ``.odda`` directory; the rules
-                subtree appears lazily under it on the first install.
+            rules_dir: The machine-global rules dir (odda.mcp passes
+                ``odda.paths.global_rules_dir()``); the slot subtree
+                appears lazily under it on the first install.
             builtins: The builtin rules the scanner was constructed
                 with — their ids are permanently taken, so user rules
                 may never collide with one.
         """
         self._scanner = scanner
-        self._data_dir = Path(data_dir)
+        self._rules_dir = Path(rules_dir)
         self._builtins: tuple[Rule, ...] = tuple(builtins)
         self._builtin_ids = frozenset(rule.id for rule in self._builtins)
         self._slots: dict[str, _SlotState] = {}
 
     def name_exists(self, name: str) -> bool:
         """Return True if slot ``name`` is persisted on disk."""
-        return name_exists(self._data_dir, name)
+        return name_exists(self._rules_dir, name)
 
     def install(self, name: str, source: str) -> dict[str, Any]:
         """Validate, persist, and live-register slot ``name``.
@@ -256,7 +254,7 @@ class UserRuleManager:
                 with a builtin's or another slot's (the message names
                 the collision).
         """
-        path = _rule_path(self._data_dir, name)
+        path = _rule_path(self._rules_dir, name)
         try:
             rules = load_slot_source(name, source, str(path))
         except ValueError as exc:
@@ -264,7 +262,7 @@ class UserRuleManager:
             raise ValueError(msg) from None
         self._reject_id_collisions(name, rules)
         self._deregister(name)
-        install_source(self._data_dir, name, source)
+        install_source(self._rules_dir, name, source)
         self._scanner.register_rules(rules)
         self._slots[name] = _SlotState(rules=tuple(rules))
         return {
@@ -284,7 +282,7 @@ class UserRuleManager:
             ValueError: If the slot is not on disk.
         """
         removed = self._deregister(name)
-        remove_source(self._data_dir, name)
+        remove_source(self._rules_dir, name)
         return {"name": name, "removed": True, "rules": removed}
 
     def list_rules(self) -> list[dict[str, Any]]:
@@ -321,11 +319,11 @@ class UserRuleManager:
         flow is scanned against the full ruleset. A slot that fails to
         load (or collides on id) is logged and skipped with its error
         remembered for ``rule_list``; the rest still come up. No-op
-        when the rules dir doesn't exist yet (lazy data dir).
+        when the rules dir doesn't exist yet (lazy config home).
         """
-        for slot in list_slots(self._data_dir):
+        for slot in list_slots(self._rules_dir):
             name = slot["name"]
-            rule_file = _rule_path(self._data_dir, name)
+            rule_file = _rule_path(self._rules_dir, name)
             try:
                 rules = load_slot_source(
                     name, rule_file.read_text(encoding="utf-8"), str(rule_file)
