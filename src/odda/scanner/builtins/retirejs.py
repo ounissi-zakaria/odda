@@ -45,7 +45,14 @@ from importlib import resources
 from typing import Any
 
 from odda.scanner.engine import _RESPONSE_BODY
-from odda.scanner.model import Evidence, Finding, FlowView, Rule, Severity
+from odda.scanner.model import (
+    Evidence,
+    Finding,
+    FlowView,
+    Rule,
+    Severity,
+    _passes_literal_gates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +210,12 @@ def _detect(
             if version:
                 return version, "filename", match.start()
     for pattern in library.filecontent:
+        # Necessary-literal gate first (ticket 08): a miss skips the
+        # linear scan — the dominant multi-MB-body cost. The hash and
+        # filename extractors above stay as they are (dict lookup and
+        # a search over the flow's short path).
+        if not _passes_literal_gates(pattern, body):
+            continue
         match = pattern.search(body)
         if match is not None:
             version = match.group(_VERSION_GROUP)

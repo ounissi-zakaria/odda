@@ -12,10 +12,26 @@ poll of the index (the ``wait_flow`` precedent).
 
 import ast
 import asyncio
+import itertools
 import json
+import random
+import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 
+from odda.scanner.builtins import BUILTIN_RULES
+from odda.scanner.builtins.retirejs import _libraries
+from odda.scanner.engine import Scanner
+from odda.scanner.model import (
+    Evidence,
+    Finding,
+    FlowView,
+    Rule,
+    Severity,
+    _literal_gates,
+    _passes_literal_gates,
+)
 from tests.e2e.conftest import curl, dyn_server, fixture_site
 
 _FX = "stack-trace.html"
@@ -1621,3 +1637,231 @@ async def test_concurrent_sessions_observe_their_own_flows_only(
         index = _findings_index(a.data_dir)
         assert len(index) == 4
         assert len({(rec["rule_id"], rec["flow_id"]) for rec in index}) == 4
+
+
+# --- ticket 08: the drain never blocks the event loop ---
+
+# A rule whose scan() pins its thread for this long — the deterministic
+# stand-in for a multi-MB body against the linear-cost dataset regexes
+# (measured ~265 ms/MB on the ticket: a 10 MB JS body scanned in 2.7 s).
+_HOLD_S = 0.3
+
+
+class _SlowRule(Rule):
+    """Dataset-shaped rule: overrides ``scan`` and takes wall time."""
+
+    def scan(self, view: FlowView) -> list[Finding]:
+        time.sleep(_HOLD_S)
+        return [
+            Finding(
+                rule_id=self.id,
+                flow_id=str(view.record.get("id", "?")),
+                severity=self.severity,
+                title=self.title,
+                evidence=(Evidence(where="response_body", offset=0, detail="slow"),),
+            )
+        ]
+
+
+def _stored_flow(
+    data_dir: Path,
+    flow_id: str,
+    body: bytes = b"payload",
+    content_type: str = "text/plain",
+) -> dict:
+    """Write one flow's stored files and return its index record."""
+    flow_dir = data_dir / "flows" / flow_id
+    flow_dir.mkdir(parents=True)
+    (flow_dir / "response_body.txt").write_bytes(body)
+    (flow_dir / "response_headers").write_bytes(
+        b"HTTP/1.1 200 OK\r\nContent-Type: " + content_type.encode() + b"\r\n\r\n"
+    )
+    return {
+        "id": flow_id,
+        "method": "GET",
+        "scheme": "http",
+        "host": "fixture.local",
+        "port": 80,
+        "path": f"/{flow_id}.txt",
+        "browser_id": None,
+        "status_code": 200,
+        "total_duration_ms": 1.0,
+        "body_file": f"flows/{flow_id}/response_body.txt",
+        "error": None,
+    }
+
+
+async def test_drain_keeps_loop_live_and_ordered_during_slow_scans(
+    tmp_path,
+) -> None:
+    """Scans run off the event loop's thread (ticket 08): while a rule
+    takes hundreds of milliseconds per flow, a heartbeat task on the
+    drain's own loop keeps its ~5 ms cadence, the findings still land,
+    and queue order survives — flow 1's finding precedes flow 2's."""
+    data_dir = tmp_path / ".odda"
+    scanner = Scanner(
+        data_dir,
+        rules=(
+            _SlowRule(id="test.slow-scan", severity=Severity.INFO, title="Slow scan"),
+        ),
+    )
+    drain = asyncio.create_task(scanner.run())
+
+    beats: list[float] = []
+
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(0.005)
+            beats.append(time.monotonic())
+
+    hb = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0.05)  # warm-up beats
+
+    scanner.observe(_stored_flow(data_dir, "00001"))
+    scanner.observe(_stored_flow(data_dir, "00002"))
+
+    findings_path = data_dir / "scanner" / "findings.jsonl"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if findings_path.is_file() and len(findings_path.read_text().splitlines()) == 2:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)  # post-scan beats
+
+    hb.cancel()
+    drain.cancel()
+    await asyncio.gather(hb, drain, return_exceptions=True)
+
+    index = _findings_index(data_dir)
+    assert [rec["flow_id"] for rec in index] == ["00001", "00002"]
+    assert all(rec["rule_id"] == "test.slow-scan" for rec in index)
+
+    # The loop kept servicing the heartbeat while each scan pinned a
+    # worker for _HOLD_S. The pre-fix sync drain froze the loop for the
+    # whole queue (max gap >= 2 x _HOLD_S here); ~5-15 ms is the
+    # healthy range, so half a hold is a generous ceiling.
+    gaps = [b - a for a, b in itertools.pairwise(beats)]
+    assert gaps, "heartbeat never beat"
+    assert max(gaps) < _HOLD_S / 2, f"loop stalled {max(gaps):.3f}s during drain"
+
+
+def test_literal_gate_never_suppresses_a_match() -> None:
+    """The necessary-literal gate is sound: across every builtin and
+    dataset pattern, on seeded random texts spliced with the
+    patterns' own literal fragments, a pattern that matches always
+    passes its gate (a gate miss can only ever skip a pattern that
+    would not have matched). Also pins gate coverage, so a regex
+    parser or dataset drift cannot silently degrade every body scan
+    back to ungated linear passes."""
+    patterns: list[re.Pattern[str]] = []
+    for library in _libraries():
+        patterns.extend(library.filecontent)
+    for rule in BUILTIN_RULES:
+        patterns.extend(rule.body_patterns)
+        patterns.extend(rule.header_patterns)
+
+    gated = [p for p in patterns if _literal_gates(p.pattern, p.flags) is not None]
+    assert len(gated) >= len(patterns) * 3 // 4, (
+        f"gate coverage collapsed: {len(gated)}/{len(patterns)}"
+    )
+
+    rng = random.Random(20261007)
+    alphabet = list("ab(){}[]<>=:./*_- \n\"'0159azAZAPIkeyhttpsrc")
+    texts = [
+        'x mustache.version = "2.5.0"',
+        "/*! jQuery v3.1.1 */",
+        "/* PDFObject v2.1.1 */",
+        "Traceback (most recent call last): boom",
+        "AKIAIOSFODNN7EXAMPLE",
+        'api_key = "sk_live_abcdefghijklmnop"',
+        "https://cdn.polyfill.io/v3/polyfill.min.js",
+        "<Error><Code>NoSuchBucket</Code></Error>",
+        "// PDFObject v1.2.3",
+    ]
+    for _ in range(2500):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(5, 90)))
+        if rng.random() < 0.6:
+            fragments = re.findall(
+                r"[A-Za-z0-9_.:/\-]{3,}", patterns[rng.randrange(len(patterns))].pattern
+            )
+            if fragments:
+                cut = rng.randrange(len(text))
+                text = text[:cut] + rng.choice(fragments) + text[cut:]
+        texts.append(text)
+
+    for text in texts:
+        for pattern in patterns:
+            if pattern.search(text):
+                assert _passes_literal_gates(pattern, text), (
+                    f"gate suppressed a match: {pattern.pattern!r} vs {text!r}"
+                )
+
+
+async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
+    """A 10 MB JavaScript body through the full builtin ruleset — the
+    retire.js filecontent scans above all — no longer stalls the
+    event loop for the scan's duration (ticket 08): with the scan off
+    the loop thread and the necessary-literal gate in front of every
+    body regex, a heartbeat on the drain's own loop keeps its ~5 ms
+    cadence (pre-fix the loop froze for the whole 2.7 s scan;
+    thread-offload alone still hitched ~0.3 s per un-gated regex).
+    Queue order survives: the small flow behind the big one still
+    lands its finding, and the big benign body lands none."""
+    data_dir = tmp_path / ".odda"
+    chunk = "var a=1;function f(){return a+1;}\n"
+    big = _stored_flow(
+        data_dir,
+        "bigjs01",
+        (chunk * (10 * 1024 * 1024 // len(chunk))).encode(),
+        content_type="application/javascript",
+    )
+    small = _stored_flow(
+        data_dir,
+        "trace02",
+        b'Traceback (most recent call last):\n  File "app.py", line 1\nboom\n',
+    )
+
+    scanner = Scanner(data_dir, rules=BUILTIN_RULES)
+    drain = asyncio.create_task(scanner.run())
+
+    beats: list[tuple[float, float]] = []
+
+    async def heartbeat() -> None:
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.005)
+            now = time.monotonic()
+            beats.append((now, now - last))
+            last = now
+
+    hb = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0.05)
+
+    window_start = time.monotonic()
+    scanner.observe(big)
+    scanner.observe(small)
+    findings_path = data_dir / "scanner" / "findings.jsonl"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if findings_path.is_file() and findings_path.read_text().splitlines():
+            break
+        await asyncio.sleep(0.005)
+    window_end = time.monotonic()
+    await asyncio.sleep(0.05)
+
+    hb.cancel()
+    drain.cancel()
+    await asyncio.gather(hb, drain, return_exceptions=True)
+
+    index = _findings_index(data_dir)
+    assert [rec["rule_id"] for rec in index] == ["disclosure.stack-trace"]
+    assert index[0]["flow_id"] == "trace02"
+
+    gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
+    assert gaps, "heartbeat never beat during the scan window"
+    # Sequential runs see a ~70 ms worst gap (the residual tail below);
+    # under the suite's own 3-worker xdist load the same regex ops
+    # stretch ~5x, so the ceiling must leave room for it. What the
+    # ceiling must catch is the bug: pre-fix, the loop froze for the
+    # whole 2.7 s scan.
+    assert max(gaps) < 0.6, f"loop stalled {max(gaps):.3f}s during the drain"
