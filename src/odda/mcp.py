@@ -55,7 +55,6 @@ from odda.request import (
     send_pipeline as send_request_pipeline,
     send_repeat as send_request_repeat,
 )
-from odda.scanner.builtins import BUILTIN_RULES
 from odda.scanner.engine import Scanner
 from odda.scanner.userrules import RULE_FILE_SKELETON, UserRuleManager
 
@@ -177,15 +176,18 @@ async def odda_lifespan(
     # before the yield so no tools/call can produce a flow before
     # observation is live; teardown cancels the drain before the proxy
     # stops, so scanning never outlives the session that captured.
-    scanner = Scanner(data_dir, rules=BUILTIN_RULES)
-    # User rule slots reload on boot alongside the proxy-script restore
+    # The ruleset boots empty (ADR-0036): no rules ship with odda —
+    # every rule arrives as a slot in the global rules dir.
+    scanner = Scanner(data_dir)
+    # Rule slots reload on boot alongside the proxy-script restore
     # above, and before observation goes live, so the session's first
-    # flow is scanned against the full ruleset; a failing slot is
-    # logged and skipped, never blocking boot. Slots persist in the
-    # machine-global rules dir under the config home — shared across
-    # every project on the machine, redirectable via ODDA_CONFIG_HOME —
-    # unlike the proxy-scripts, which stay per-project in the data dir.
-    user_rules = UserRuleManager(scanner, global_rules_dir(), BUILTIN_RULES)
+    # flow is scanned against the full persisted ruleset; a failing
+    # slot is logged and skipped, never blocking boot. Slots persist in
+    # the machine-global rules dir under the config home — shared
+    # across every project on the machine, redirectable via
+    # ODDA_CONFIG_HOME — unlike the proxy-scripts, which stay
+    # per-project in the data dir.
+    user_rules = UserRuleManager(scanner, global_rules_dir())
     user_rules.restore_on_boot()
     flowstore.get_writer().set_observer(scanner.observe)
     scanner_task = asyncio.create_task(scanner.run())
@@ -1101,7 +1103,7 @@ async def rule_install(
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def rule_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
-    """List every scanner rule: builtin and user, with state."""
+    """List every installed rule: slot, severity, and state."""
     return _json_result(ctx.request_context.lifespan_context.user_rules.list_rules())
 
 

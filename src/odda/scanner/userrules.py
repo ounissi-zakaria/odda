@@ -18,10 +18,10 @@ Two deliberate divergences from the proxy-script flow:
 
 - Install validates *before* persisting. Rule ids are permanent and
   global — they key the append-only findings index — so a source that
-  fails to load, or whose ids collide with a builtin's or another
-  slot's, must never reach disk. (A rejected proxy-script is left on
-  disk so boot retries it; a rejected rule slot would instead poison
-  every future boot's id space.)
+  fails to load, or whose ids collide with another slot's, must never
+  reach disk. (A rejected proxy-script is left on disk so boot retries
+  it; a rejected rule slot would instead poison every future boot's
+  id space.)
 - The engine snapshots the live rules at each flow's *arrival*, so an
   installed rule applies to flows arriving after the install only —
   never retroactively to backlog still queued for scanning.
@@ -226,7 +226,7 @@ class _SlotState:
     error: str | None = None
 
 
-def _row(rule: Rule, slot: str | None, source: str) -> dict[str, Any]:
+def _row(rule: Rule, slot: str, source: str) -> dict[str, Any]:
     """One ``rule_list`` row; keys stay uniform across row kinds."""
     return {
         "slot": slot,
@@ -249,24 +249,19 @@ class UserRuleManager:
     half-registered slot.
     """
 
-    def __init__(
-        self, scanner: Scanner, rules_dir: Path, builtins: Sequence[Rule]
-    ) -> None:
-        """Bind the scanner, the global rules dir, and the builtin ruleset.
+    def __init__(self, scanner: Scanner, rules_dir: Path) -> None:
+        """Bind the scanner and the global rules dir.
 
         Args:
             scanner: The session's live scanner; slots register into it.
+                It boots with an empty ruleset (ADR-0036) — slots are
+                the only rule source.
             rules_dir: The machine-global rules dir (odda.mcp passes
                 ``odda.paths.global_rules_dir()``); the slot subtree
                 appears lazily under it on the first install.
-            builtins: The builtin rules the scanner was constructed
-                with — their ids are permanently taken, so user rules
-                may never collide with one.
         """
         self._scanner = scanner
         self._rules_dir = Path(rules_dir)
-        self._builtins: tuple[Rule, ...] = tuple(builtins)
-        self._builtin_ids = frozenset(rule.id for rule in self._builtins)
         self._slots: dict[str, _SlotState] = {}
 
     def name_exists(self, name: str) -> bool:
@@ -300,8 +295,7 @@ class UserRuleManager:
         Raises:
             ValueError: If the source fails to load — the message then
                 shows the expected file shape — or a rule id collides
-                with a builtin's or another slot's (the message names
-                the collision).
+                with another slot's (the message names the collision).
         """
         path = _rule_path(self._rules_dir, name)
         try:
@@ -341,12 +335,12 @@ class UserRuleManager:
     def list_rules(self) -> list[dict[str, Any]]:
         """List every rule the session knows.
 
-        Builtin rows come first (registration order), then one row per
-        user rule grouped by slot name; a failed slot — one whose file
-        would not load at boot — contributes a single row carrying its
-        load error instead of rules.
+        One row per rule grouped by slot name; a failed slot — one
+        whose file would not load at boot — contributes a single row
+        carrying its load error instead of rules. With no slots there
+        are no rows: the ruleset is exactly the installed slots.
         """
-        rows = [_row(rule, None, "builtin") for rule in self._builtins]
+        rows: list[dict[str, Any]] = []
         for name in sorted(self._slots):
             state = self._slots[name]
             if state.error is not None:
@@ -404,7 +398,7 @@ class UserRuleManager:
         return ids
 
     def _reject_id_collisions(self, name: str, rules: Sequence[Rule]) -> None:
-        """Reject ids colliding with builtins, other slots, or a twin.
+        """Reject ids colliding with other slots or a twin.
 
         The slot's own current ids don't count — that is the force-
         overwrite path, handled by deregistering before re-registering.
@@ -418,12 +412,6 @@ class UserRuleManager:
                 )
                 raise ValueError(msg)
             seen.add(rule.id)
-            if rule.id in self._builtin_ids:
-                msg = (
-                    f"Rule id '{rule.id}' is already a builtin rule id; rule "
-                    "ids are permanent and global — choose a different id"
-                )
-                raise ValueError(msg)
             for slot, state in self._slots.items():
                 if slot == name:
                     continue
