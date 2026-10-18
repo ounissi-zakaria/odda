@@ -270,6 +270,13 @@ def test_scanner_package_has_no_egress_imports() -> None:
         "queue",
         "re",
         "shutil",  # slot removal (rmtree) — filesystem only, no sockets
+        # sys: registering the slot exec module in sys.modules for the
+        # exec's duration (see types above) — no network surface.
+        "sys",
+        # types: ModuleType for the slot exec namespace — a bare dict
+        # breaks slots defining dataclasses (field resolution walks
+        # sys.modules); no network surface.
+        "types",
         "typing",
         "urllib",  # urllib.parse only — query-string parsing, no network
         # First-party, package-internal only (odda.scanner.*); the
@@ -1242,6 +1249,64 @@ async def test_force_overwrite_swaps_the_slot_live(odda_session) -> None:
         assert all(
             f["rule_id"] != "user.ticket06-canary" for f in h.findings_for(flow["id"])
         )
+
+
+# --- ticket 16: de-bundle — repo rule slots, assets, empty boot ---
+
+
+# The converted corpus lives outside the shipped package (ADR-0036):
+# one slot dir per family under the repo's rules/ tree, seeded through
+# the real rule_install path.
+_RULES_SRC = Path(__file__).resolve().parents[2] / "rules"
+
+
+async def _seed_slot(h, family: str) -> dict:
+    """Install the repo's rules/<family> slot through the real tool path."""
+    return await h.call(
+        "rule_install",
+        {"name": family, "file": str(_RULES_SRC / family / "rule.py")},
+    )
+
+
+async def test_rule_install_from_file_copies_sibling_assets(
+    odda_session, tmp_path
+) -> None:
+    """Installing from a file path copies the rule file's sibling
+    non-.py assets into the slot dir — a dataset-backed rule file reads
+    its data from its own directory, so the data must ride along. A
+    force-overwrite from a file with no assets leaves none behind."""
+    src = tmp_path / "t16-dataset-slot"
+    src.mkdir()
+    rule_file = src / "rule.py"
+    rule_file.write_text(_RULE_CANARY)
+    (src / "dataset.json").write_text('{"t16": true}')
+    (src / "NOTICE.txt").write_text("t16 asset")
+    (src / "helper.py").write_text("# a .py sibling never rides along\n")
+    (src / "subdir").mkdir()
+
+    async with odda_session() as h:
+        r = await h.call("rule_install", {"name": "assets", "file": str(rule_file)})
+        assert r["rules"] == ["user.ticket06-canary"]
+        assert r["assets"] == ["NOTICE.txt", "dataset.json"]
+        slot_dir = _slot_path(h, "assets").parent
+        assert _slot_path(h, "assets").is_file()
+        assert (slot_dir / "dataset.json").read_text(
+            encoding="utf-8"
+        ) == '{"t16": true}'
+        assert (slot_dir / "NOTICE.txt").is_file()
+        assert not (slot_dir / "helper.py").exists(), ".py siblings stay behind"
+        assert not (slot_dir / "subdir").exists(), "subdirectories stay behind"
+
+        # force-overwrite from an asset-less file: no stale assets linger
+        plain = tmp_path / "t16-plain.py"
+        plain.write_text(_RULE_ALT)
+        r2 = await h.call(
+            "rule_install", {"name": "assets", "file": str(plain), "force": True}
+        )
+        assert r2["assets"] == []
+        assert not (slot_dir / "dataset.json").exists()
+        assert not (slot_dir / "NOTICE.txt").exists()
+        assert "user.ticket06-alt" in _slot_path(h, "assets").read_text()
 
 
 async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(

@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from odda.scanner.model import Rule, Severity
@@ -87,14 +89,38 @@ def _rule_path(rules_dir: Path, name: str) -> Path:
 def install_source(rules_dir: Path, name: str, source: str) -> Path:
     """Persist ``source`` as slot ``name``'s rule file, overwriting.
 
-    Creates the rules dir and the per-slot dir lazily. This only writes
+    Creates the rules dir and the per-slot dir lazily. An existing
+    slot dir is replaced wholesale, so assets carried by a previous
+    file-install never linger under a swapped slot. This only writes
     the file; the live registration is the caller's step, so the boot
     scan and a force-overwrite reinstall share one write path.
     """
     path = _rule_path(rules_dir, name)
+    if path.parent.exists():
+        shutil.rmtree(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source, encoding="utf-8")
     return path
+
+
+def install_assets(rules_dir: Path, name: str, source_file: Path | str) -> list[str]:
+    """Copy ``source_file``'s sibling non-.py assets into the slot dir.
+
+    A dataset-backed rule file reads its data from its own directory
+    (the retire.js slot's ``jsrepository.json``), so installing from a
+    file path must carry the file's flat non-Python siblings along.
+    ``.py`` siblings and subdirectories stay behind: one slot is one
+    rule file plus flat data assets. Returns the copied file names.
+    """
+    src = Path(source_file).resolve().parent
+    dst = rules_dir / name
+    copied: list[str] = []
+    for entry in sorted(src.iterdir()):
+        if not entry.is_file() or entry.suffix == ".py":
+            continue
+        shutil.copy2(entry, dst / entry.name)
+        copied.append(entry.name)
+    return copied
 
 
 def remove_source(rules_dir: Path, name: str) -> None:
@@ -134,6 +160,11 @@ def load_slot_source(name: str, source: str, filename: str) -> list[Rule]:
 
     Runs under the same trust boundary as proxy-scripts: the source is
     arbitrary Python, executed for its module-level ``RULES`` list.
+    The namespace is a real module, registered in ``sys.modules`` for
+    the exec's duration: slot code is arbitrary Python, and stdlib
+    machinery (dataclass field resolution above all) looks classes up
+    through ``sys.modules[cls.__module__]`` — a bare dict namespace
+    would make any slot defining a dataclass fail to load.
 
     Raises:
         ValueError: If the source fails to exec, exposes no ``RULES``
@@ -141,12 +172,18 @@ def load_slot_source(name: str, source: str, filename: str) -> list[Rule]:
             severity. The message names the exact problem; the install
             surface appends the expected file shape.
     """
-    ns: dict[str, Any] = {"__name__": f"odda.rule-slots.{name}", "__file__": filename}
+    modname = f"odda.rule-slots.{name}"
+    module = ModuleType(modname, f"rule slot '{name}' exec namespace")
+    module.__file__ = filename
+    ns: dict[str, Any] = module.__dict__
+    sys.modules[modname] = module
     try:
         exec(compile(source, filename, "exec"), ns)  # noqa: S102
     except Exception as exc:
         msg = f"Failed to load rule slot '{name}': {type(exc).__name__}: {exc}"
         raise ValueError(msg) from exc
+    finally:
+        del sys.modules[modname]
     if "RULES" not in ns:
         msg = f"Rule slot '{name}' defines no module-level RULES list"
         raise ValueError(msg)
@@ -236,7 +273,9 @@ class UserRuleManager:
         """Return True if slot ``name`` is persisted on disk."""
         return name_exists(self._rules_dir, name)
 
-    def install(self, name: str, source: str) -> dict[str, Any]:
+    def install(
+        self, name: str, source: str, *, assets_from: Path | str | None = None
+    ) -> dict[str, Any]:
         """Validate, persist, and live-register slot ``name``.
 
         Validation precedes the write (unlike proxy-scripts): a rule
@@ -245,8 +284,18 @@ class UserRuleManager:
         caller) deregisters its old rules first, so a slot's ids are
         always exactly the file's.
 
+        Args:
+            name: The slot's name (its directory under the rules dir).
+            source: The rule file's Python source.
+            assets_from: The file path the source was read from, when
+                it arrived as a file: the file's sibling non-.py
+                assets (datasets) are copied into the slot dir, so a
+                dataset-backed rule rides along self-contained.
+                Inline source installs carry no assets.
+
         Returns:
-            ``{"name": ..., "size": N, "rules": [rule ids...]}``.
+            ``{"name": ..., "size": N, "rules": [rule ids...],
+            "assets": [copied file names...]}``.
 
         Raises:
             ValueError: If the source fails to load — the message then
@@ -263,12 +312,16 @@ class UserRuleManager:
         self._reject_id_collisions(name, rules)
         self._deregister(name)
         install_source(self._rules_dir, name, source)
+        assets = (
+            install_assets(self._rules_dir, name, assets_from) if assets_from else []
+        )
         self._scanner.register_rules(rules)
         self._slots[name] = _SlotState(rules=tuple(rules))
         return {
             "name": name,
             "size": path.stat().st_size,
             "rules": [rule.id for rule in rules],
+            "assets": assets,
         }
 
     def remove(self, name: str) -> dict[str, Any]:

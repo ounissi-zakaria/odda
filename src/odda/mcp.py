@@ -1070,7 +1070,9 @@ _RULE_INSTALL_DOC = (
     "Install a passive-scanner rule slot from file or source. The slot "
     "is a Python file whose module-level RULES list holds Rule objects; "
     "installed rules scan flows captured after the install, never "
-    "retroactively. A rule file looks like:\n" + RULE_FILE_SKELETON
+    "retroactively. Installing from a file path copies the file's "
+    "sibling non-.py assets (datasets) into the slot. A rule file looks "
+    "like:\n" + RULE_FILE_SKELETON
 )
 
 
@@ -1093,7 +1095,7 @@ async def rule_install(
         raise ToolParamError(
             f"Rule slot '{name}' already installed. Use force to overwrite."
         )
-    return user_rules.install(name, py)
+    return user_rules.install(name, py, assets_from=file)
 
 
 @mcp_server.tool(structured_output=False)
