@@ -1,4 +1,4 @@
-"""Disclosure-family builtin rules (ADR-0035's signal bar).
+"""Disclosure-family rules (ADR-0035's signal bar), as an installable slot.
 
 Each pattern below must be actionable when it fires — specific, rare,
 exploitable or leakable. Frame shapes carry the specificity (a
@@ -12,7 +12,7 @@ have and ordinary prose does not.
 
 from __future__ import annotations
 
-from odda.scanner.model import Rule, Severity
+from odda.scanner import Rule, Severity
 
 _STACK_TRACE_PATTERNS: tuple[str, ...] = (
     # Python interpreter traceback banner.
@@ -60,7 +60,7 @@ _FRONTEND_SECRET_PATTERNS: tuple[str, ...] = (
 # truncated, lowercase, and embedded look-alikes stay out.
 _AWS_KEY_ID_PATTERN = r"\bAKIA[0-9A-Z]{16}\b"
 
-RULES: tuple[Rule, ...] = (
+RULES = [
     Rule(
         id="disclosure.stack-trace",
         severity=Severity.HIGH,
@@ -92,4 +92,4 @@ RULES: tuple[Rule, ...] = (
         header_patterns=(_AWS_KEY_ID_PATTERN,),
         refs=("CWE-798", "https://cwe.mitre.org/data/definitions/798.html"),
     ),
-)
+]

@@ -25,7 +25,7 @@ import queue
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from odda.scanner.model import Evidence, Finding, FlowView
+from odda.scanner.model import Evidence, Finding, FlowView, _passes_literal_gates
 
 if TYPE_CHECKING:
     import re
@@ -112,10 +112,11 @@ class Scanner:
         """Add rules to the live set (the user-rule install path).
 
         Callers run on the event-loop thread (MCP tool handlers, the
-        boot scan); the drain scans synchronously between awaits and
-        queued entries keep their arrival-time snapshots, so the set is
-        never observed mid-mutation. Applies forward only: flows that
-        arrived before the registration never match the new rules.
+        boot scan); the drain scans each flow in a worker thread, one
+        at a time between awaits, and queued entries keep their
+        arrival-time snapshots, so the set is never observed
+        mid-mutation. Applies forward only: flows that arrived before
+        the registration never match the new rules.
         """
         self._rules.extend(rules)
 
@@ -132,9 +133,15 @@ class Scanner:
         """Drain queued flow records against the rules until cancelled.
 
         The task the MCP lifespan owns: started before the session
-        serves, cancelled at teardown. A flow enqueued but not drained
-        when the session dies is never scanned — the accepted loss of
-        the enqueue-and-drain model (ADR-0034).
+        serves, cancelled at teardown. Each flow's scan runs in a
+        worker thread (one flow at a time, in queue order) so scan
+        cost — linear in body size, seconds for multi-MB JS — never
+        blocks the loop serving tool calls (ticket 08). Cancellation
+        stops the drain between flows; one in-flight scan may still
+        finish (and append its finding) past the cancel. A flow
+        enqueued but not drained when the session dies is never
+        scanned — the accepted loss of the enqueue-and-drain model
+        (ADR-0034).
         """
         self._loop = asyncio.get_running_loop()
         # Anything enqueued before the task's first tick still drains.
@@ -147,7 +154,12 @@ class Scanner:
                     record, rules = self._queue.get_nowait()
                 except queue.Empty:
                     break
-                self._scan(record, rules)
+                # Off the loop thread: scan cost is linear in body size
+                # (multi-MB JS bodies scan for seconds, ticket 08), and
+                # the loop here serves every concurrent MCP tool call.
+                # Still strictly one flow at a time, in queue order —
+                # each scan is awaited before the next dequeue.
+                await asyncio.to_thread(self._scan, record, rules)
 
     def _scan(self, record: dict[str, Any], rules: tuple[Rule, ...]) -> None:
         """Scan one flow record against its arrival-time rule snapshot."""
@@ -257,16 +269,25 @@ def _content_type_matches(specs: tuple[str, ...], actual: str | None) -> bool:
 def _pattern_evidence(
     patterns: tuple[re.Pattern[str], ...], text: str, where: str
 ) -> list[Evidence]:
-    """All matches of the patterns against text, as evidence entries."""
-    return [
-        Evidence(
-            where=where,
-            offset=match.start(),
-            detail=match.group(0)[:_EVIDENCE_DETAIL_MAX],
+    """All matches of the patterns against text, as evidence entries.
+
+    Each pattern runs its necessary-literal gate first (ticket 08):
+    a gate miss on a large body skips the regex scan — one C call
+    that would hold the GIL for the whole linear pass.
+    """
+    evidence: list[Evidence] = []
+    for pattern in patterns:
+        if not _passes_literal_gates(pattern, text):
+            continue
+        evidence.extend(
+            Evidence(
+                where=where,
+                offset=match.start(),
+                detail=match.group(0)[:_EVIDENCE_DETAIL_MAX],
+            )
+            for match in pattern.finditer(text)
         )
-        for pattern in patterns
-        for match in pattern.finditer(text)
-    ]
+    return evidence
 
 
 def _stored_response_headers(view: FlowView) -> str | None:

@@ -46,6 +46,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
 from odda.browser import BrowserManager, BrowserOperationError
+from odda.paths import global_rules_dir
 from odda.proxy import ProxyServer
 from odda.request import (
     clone as clone_request,
@@ -54,7 +55,6 @@ from odda.request import (
     send_pipeline as send_request_pipeline,
     send_repeat as send_request_repeat,
 )
-from odda.scanner.builtins import BUILTIN_RULES
 from odda.scanner.engine import Scanner
 from odda.scanner.userrules import RULE_FILE_SKELETON, UserRuleManager
 
@@ -176,12 +176,18 @@ async def odda_lifespan(
     # before the yield so no tools/call can produce a flow before
     # observation is live; teardown cancels the drain before the proxy
     # stops, so scanning never outlives the session that captured.
-    scanner = Scanner(data_dir, rules=BUILTIN_RULES)
-    # User rule slots reload on boot alongside the proxy-script restore
+    # The ruleset boots empty (ADR-0036): no rules ship with odda —
+    # every rule arrives as a slot in the global rules dir.
+    scanner = Scanner(data_dir)
+    # Rule slots reload on boot alongside the proxy-script restore
     # above, and before observation goes live, so the session's first
-    # flow is scanned against the full ruleset; a failing slot is
-    # logged and skipped, never blocking boot.
-    user_rules = UserRuleManager(scanner, data_dir, BUILTIN_RULES)
+    # flow is scanned against the full persisted ruleset; a failing
+    # slot is logged and skipped, never blocking boot. Slots persist in
+    # the machine-global rules dir under the config home — shared
+    # across every project on the machine, redirectable via
+    # ODDA_CONFIG_HOME — unlike the proxy-scripts, which stay
+    # per-project in the data dir.
+    user_rules = UserRuleManager(scanner, global_rules_dir())
     user_rules.restore_on_boot()
     flowstore.get_writer().set_observer(scanner.observe)
     scanner_task = asyncio.create_task(scanner.run())
@@ -1066,7 +1072,9 @@ _RULE_INSTALL_DOC = (
     "Install a passive-scanner rule slot from file or source. The slot "
     "is a Python file whose module-level RULES list holds Rule objects; "
     "installed rules scan flows captured after the install, never "
-    "retroactively. A rule file looks like:\n" + RULE_FILE_SKELETON
+    "retroactively. Installing from a file path copies the file's "
+    "sibling non-.py assets (datasets) into the slot. A rule file looks "
+    "like:\n" + RULE_FILE_SKELETON
 )
 
 
@@ -1089,13 +1097,13 @@ async def rule_install(
         raise ToolParamError(
             f"Rule slot '{name}' already installed. Use force to overwrite."
         )
-    return user_rules.install(name, py)
+    return user_rules.install(name, py, assets_from=file)
 
 
 @mcp_server.tool(structured_output=False)
 @odda_tool
 async def rule_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
-    """List every scanner rule: builtin and user, with state."""
+    """List every installed rule: slot, severity, and state."""
     return _json_result(ctx.request_context.lifespan_context.user_rules.list_rules())
 
 

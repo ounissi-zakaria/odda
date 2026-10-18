@@ -1,4 +1,4 @@
-"""Supply-chain-family builtin rules (ADR-0035's signal bar).
+"""Supply-chain-family rules (ADR-0035's signal bar), as an installable slot.
 
 The 2024 polyfill.io supply-chain incident: one operator was caught
 serving mobile-malware redirects from polyfill.io and its Chinese CDN
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from odda.scanner.model import Rule, Severity
+from odda.scanner import Rule, Severity
 
 # Domains the incident reporting caught serving the payload: Sansec's
 # polyfill.io research plus the BootCDN/Bootcss/Staticfile mirrors the
@@ -39,7 +39,7 @@ _SCRIPT_SRC_FROM_MALICIOUS_CDN = re.compile(
     re.IGNORECASE,
 )
 
-RULES: tuple[Rule, ...] = (
+RULES = [
     Rule(
         id="js.malicious-cdn-import",
         severity=Severity.HIGH,
@@ -50,4 +50,4 @@ RULES: tuple[Rule, ...] = (
             "https://sansec.io/research/polyfill-supply-chain-attack",
         ),
     ),
-)
+]

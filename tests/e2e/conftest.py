@@ -308,7 +308,7 @@ async def script_server(script: str, *args: str) -> AsyncIterator[ServerHandle]:
 
 
 class Harness:
-    """One MCP session + one data dir; the assertion conventions every test shares.
+    """One MCP session + one data dir + one config home; the assertion conventions every test shares.
 
     ``call`` asserts the tool *succeeded* and returns the natural value:
     dict results pass through (structuredContent); unstructured tools
@@ -320,9 +320,10 @@ class Harness:
     tool <name>: `` prefix, param names never ``--flag`` spellings.
     """
 
-    def __init__(self, client: Client, data_dir: Path) -> None:
+    def __init__(self, client: Client, data_dir: Path, config_home: Path) -> None:
         self.client = client
         self.data_dir = data_dir
+        self.config_home = config_home
 
     async def call(self, name: str, args: dict | None = None) -> object:
         """Call a tool, assert success, return the natural value (dict via
@@ -528,8 +529,24 @@ async def slow_load_server(site_dir: Path) -> AsyncIterator[ServerHandle]:
         await _stop(handle)
 
 
+@pytest.fixture(autouse=True)
+def config_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Per-test ODDA_CONFIG_HOME: every test runs against its own config home.
+
+    odda's machine-global state — the global rules dir, the Base profile —
+    roots at the ODDA_CONFIG_HOME override, so pointing it at the test's
+    tmp keeps the suite off the real ``~/.config/odda`` for every session
+    a test boots, in-process or subprocess (the subprocess fixture
+    forwards it explicitly: the stdio client passes only a safelisted env).
+    """
+    home = tmp_path / "config-home"
+    home.mkdir()
+    monkeypatch.setenv("ODDA_CONFIG_HOME", str(home))
+    return home
+
+
 @pytest.fixture
-def odda_session(tmp_path: Path) -> Iterator[object]:
+def odda_session(tmp_path: Path, config_home: Path) -> Iterator[object]:
     """Per-test MCP session factory: ``async with odda_session() as h:``.
 
     A sync fixture returning an async context manager: the session is
@@ -552,7 +569,7 @@ def odda_session(tmp_path: Path) -> Iterator[object]:
                 assert flowstore.DATA_DIR == data_dir, (
                     "lifespan did not set the data dir for this session"
                 )
-                yield Harness(client, data_dir)
+                yield Harness(client, data_dir, config_home)
         finally:
             os.chdir(old_cwd)
 
@@ -560,7 +577,7 @@ def odda_session(tmp_path: Path) -> Iterator[object]:
 
 
 @pytest.fixture
-def odda_subprocess_session(tmp_path: Path) -> Iterator[object]:
+def odda_subprocess_session(tmp_path: Path, config_home: Path) -> Iterator[object]:
     """Per-test subprocess MCP session factory: ``async with
     odda_subprocess_session() as h:`` — the production
     one-process-per-session shape over stdio, sharing the test's data dir.
@@ -571,24 +588,31 @@ def odda_subprocess_session(tmp_path: Path) -> Iterator[object]:
     live sibling session must be its own process — ``python -m odda mcp``
     with its cwd at the test's tmp dir (same ``.odda`` data dir) and
     PYTHONPATH pointing at this checkout's ``src`` so the child runs the
-    code under test, not any installed odda.
+    code under test, not any installed odda. ``_session(cwd=...)`` boots
+    the child against a different project dir (its own ``.odda``); the
+    config-home override is forwarded explicitly because the stdio
+    client passes the child only a safelisted environment plus
+    ``env``.
     """
     from mcp.client.stdio import StdioServerParameters
 
     src = Path(__file__).resolve().parents[2] / "src"
     assert src.is_dir(), f"checkout src not found at {src}"
-    data_dir = tmp_path / ".odda"
 
     @asynccontextmanager
-    async def _session() -> AsyncIterator[Harness]:
+    async def _session(cwd: Path | None = None) -> AsyncIterator[Harness]:
+        cwd = tmp_path if cwd is None else cwd
         params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "odda", "mcp"],
-            env={"PYTHONPATH": str(src)},
-            cwd=tmp_path,
+            env={
+                "PYTHONPATH": str(src),
+                "ODDA_CONFIG_HOME": str(config_home),
+            },
+            cwd=cwd,
         )
         async with Client(params) as client:
-            yield Harness(client, data_dir)
+            yield Harness(client, cwd / ".odda", config_home)
 
     return _session
 
@@ -597,6 +621,7 @@ __all__ = [
     "FIXTURES",
     "Harness",
     "ServerHandle",
+    "config_home",
     "curl",
     "dyn_server",
     "fixture_site",

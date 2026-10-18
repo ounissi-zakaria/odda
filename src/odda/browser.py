@@ -39,6 +39,7 @@ from odda import (
     wrap as wrap_mod,
 )
 from odda.chrome_args import build_chrome_args
+from odda.paths import base_profile_dir
 from odda.proxy import AUTH_CANARY_URL, PROXY_AUTH_PASSWORD
 
 if TYPE_CHECKING:
@@ -124,8 +125,6 @@ def _draw_annotations(
     return "\n".join(["n,ref,x,y,w,h", *rows])
 
 
-BASE_PROFILE_DIR = Path.home() / ".config" / "odda" / "chrome-profile"
-
 # Chrome-managed junk deleted from the base profile once by
 # ``_slim_base_profile`` (called from ``init_chrome_profile`` after the user
 # closes Chrome). Root junk is dropped at the profile root; profile junk one
@@ -168,7 +167,7 @@ _SEED_JUNK_PROFILE: frozenset[str] = frozenset(
 
 
 def _slim_base_profile() -> None:
-    """Delete Chrome-managed junk from ``BASE_PROFILE_DIR`` once.
+    """Delete Chrome-managed junk from the Base profile once.
 
     Called from :func:`init_chrome_profile` after the user closes Chrome, so
     the base profile stays slim for every subsequent seed copy. Deletes
@@ -176,10 +175,11 @@ def _slim_base_profile() -> None:
     level inside each profile dir (``Default`` / ``Profile N``) only; deeper
     same-named dirs (extension/site storage) survive.
     """
+    base = base_profile_dir()
     with suppress(OSError):
         for name in _SEED_JUNK_ROOT:
-            shutil.rmtree(BASE_PROFILE_DIR / name, ignore_errors=True)
-        for profile in BASE_PROFILE_DIR.iterdir():
+            shutil.rmtree(base / name, ignore_errors=True)
+        for profile in base.iterdir():
             if profile.is_dir() and (
                 profile.name == "Default" or profile.name.startswith("Profile ")
             ):
@@ -281,9 +281,10 @@ def _prepare_record_profile(browser_id: str) -> str:
     profile_dir = _record_profile_dir(browser_id)
     if not profile_dir.is_dir():
         profile_dir.mkdir(parents=True)
-        if BASE_PROFILE_DIR.is_dir():
+        base = base_profile_dir()
+        if base.is_dir():
             with suppress(OSError):
-                shutil.copytree(BASE_PROFILE_DIR, profile_dir, dirs_exist_ok=True)
+                shutil.copytree(base, profile_dir, dirs_exist_ok=True)
     return str(profile_dir)
 
 
@@ -334,7 +335,7 @@ def init_chrome_profile() -> dict[str, Any]:
 
     Finds a Chrome executable, refuses to start if the base profile is
     already locked by a running Chrome, launches Chrome with
-    ``--user-data-dir=<BASE_PROFILE_DIR>`` plus the minimal first-run
+    ``--user-data-dir=<base profile dir>`` plus the minimal first-run
     flags, and blocks until the user closes the window. After close, slims
     Chrome-managed junk from the profile once (so each subsequent seed copy
     stays small). The configured profile is then copied into each new
@@ -348,7 +349,7 @@ def init_chrome_profile() -> dict[str, Any]:
             directory is locked by another Chrome instance.
     """
     chrome = _find_chrome_executable()
-    profile_dir = BASE_PROFILE_DIR
+    profile_dir = base_profile_dir()
 
     if (profile_dir / "SingletonLock").exists():
         msg = (

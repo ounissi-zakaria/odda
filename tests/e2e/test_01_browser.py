@@ -330,17 +330,14 @@ async def test_legacy_dirs_are_not_records(odda_session) -> None:
         assert err == "Browser abcde not found."
 
 
-async def test_base_profile_seeds_creation_only(
-    odda_session, tmp_path, monkeypatch
-) -> None:
-    """A new record's profile is seeded from the base profile at creation;
-    reopen never re-seeds — the record's own diverged state wins."""
-    import odda.browser as odda_browser
-
-    base = tmp_path / "base-profile"
+async def test_base_profile_seeds_creation_only(odda_session, config_home) -> None:
+    """A new record's profile is seeded from the Base profile at creation;
+    reopen never re-seeds — the record's own diverged state wins. The
+    Base profile resolves under the config home, so the seed comes from
+    wherever ODDA_CONFIG_HOME points (this test's tmp home)."""
+    base = config_home / "chrome-profile"
     base.mkdir()
     (base / "seed-marker").write_text("seeded")
-    monkeypatch.setattr(odda_browser, "BASE_PROFILE_DIR", base)
 
     async with odda_session() as h:
         bid, _tid = await h.open_browser()
