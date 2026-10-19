@@ -42,13 +42,16 @@ Patterns the engine refuses — backreferences, lookarounds, ``\b``/``\B``,
 possessive/atomic repeats, and patterns over the engine's size budget —
 compile into the same pass as *approximate prefilters* (the engine's
 prefilter mode: they may over-report, never under-report).
-:meth:`FastScan.prefiltered` reports which input indices run approximated;
-their spans are approximation hits (end offsets are real, starts are
-reported as 0). Patterns the engine can neither scan nor approximate —
-above all patterns that can match the empty string, where ``finditer``
-emits zero-width spans no engine run could reproduce — are refused at
-build with a ``ValueError`` naming the pattern; callers run those on the
-stdlib path outright.
+:meth:`FastScan.prefiltered` reports which input indices run approximated.
+Their spans come back *confirmed* (ADR-0037): the true stdlib pattern
+runs — and only on bodies whose approximation hit — and its find-iterator's
+spans replace the approximation's, so parity with ``finditer`` holds for
+them exactly as for engine-exact patterns, and a body no approximation
+hits never pays a stdlib scan. Patterns the engine can neither scan nor
+approximate — above all patterns that can match the empty string, where
+``finditer`` emits zero-width spans no engine run could reproduce — are
+refused at build with a ``ValueError`` naming the pattern; callers run
+those on the stdlib path outright.
 """
 
 from __future__ import annotations
@@ -391,6 +394,21 @@ def _reversed_utf8(text: str) -> bytes | bytearray:
     return data
 
 
+def _confirmed_spans(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
+    """Confirm one approximated pattern on a body its approximation hit.
+
+    The true stdlib pattern is the only authority on what the
+    approximation over-reported: its find-iterator's spans replace the
+    approximation's wholesale, so a confirmed prefilter reports exactly
+    the stdlib spans. This runs on the caller's thread — for the
+    scanner, the drain's worker (ticket 10's offload) — and
+    catastrophic backtracking inside a confirmation is the accepted
+    tail (ADR-0037): no match budget, revisited only on a real session
+    wedge.
+    """
+    return [match.span() for match in pattern.finditer(text)]
+
+
 class _Exact:
     """One engine-exact pattern: reversed expression plus divergence tags."""
 
@@ -423,9 +441,10 @@ class _Pre:
 class FastScan:
     """Multi-pattern find-all: patterns in, per-pattern spans out.
 
-    Each span list is identical to the stdlib find-iterator's for
-    engine-exact patterns; approximate prefitters report supersets. Build
-    one per ruleset (compile once, scan many); the engine releases the GIL
+    Every span list is identical to the stdlib find-iterator's — for
+    engine-exact patterns by construction, for approximate prefilters
+    by confirmation on the approximation's hits (ADR-0037). Build one
+    per ruleset (compile once, scan many); the engine releases the GIL
     around its scan calls.
     """
 
@@ -550,9 +569,10 @@ class FastScan:
             One span list per input pattern, in input order. For
             engine-exact patterns every span equals the stdlib
             find-iterator's. For prefiltered patterns the spans are
-            approximation hits — end offsets are real, starts are 0, hits
-            may over-report; every body truly matching the pattern reports
-            at least one span.
+            confirmed: the true pattern ran on this body (its
+            approximation hit), so its find-iterator's spans stand —
+            a body no approximation hits reports an empty list without
+            a stdlib scan.
         """
         results: list[list[tuple[int, int]]] = [[] for _ in self._patterns]
         ascii_text = text.isascii()
@@ -579,16 +599,18 @@ class FastScan:
             )[1],
         )
         for slot, spec in enumerate(self._prefilters):
-            byte_ends = ends[slot] if ascii_text else _char_ends(data, ends[slot])
-            spans: list[tuple[int, int]] = sorted({(0, end) for end in byte_ends})
-            if not spans and not ascii_text:
+            if ends[slot]:
+                # Approximation hit: the true pattern confirms, and its
+                # spans replace the approximation's over-reports.
+                results[spec.index] = _confirmed_spans(spec.pattern, text)
+            elif not ascii_text:
                 # The engine's Unicode tables are not Python's; when the
-                # approximation came back empty on a non-ASCII body, let
-                # the true pattern stand in for the superset guarantee.
-                match = spec.pattern.search(text)
-                if match:
-                    spans = [match.span()]
-            results[spec.index] = spans
+                # approximation came back empty on a non-ASCII body, it
+                # can under-report — the true pattern stands in for the
+                # superset guarantee before any no-hit conclusion.
+                confirmed = _confirmed_spans(spec.pattern, text)
+                if confirmed:
+                    results[spec.index] = confirmed
 
     def _scan_exact(
         self,

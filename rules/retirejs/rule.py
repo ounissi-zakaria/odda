@@ -29,9 +29,9 @@ because a reinstall re-executes this slot module. Patterns whose shape
 the engine's compiler cannot afford — bounded repeats unroll in it, so
 wide atoms or unbounded sub-repeats under them compile for seconds to
 minutes — stay on the gated stdlib path, as do patterns the seam
-refuses outright (zero-width constructs) and approximated prefilters
-(backreferences), which the true pattern confirms on every
-approximation hit.
+refuses outright (zero-width constructs); patterns the engine only
+approximates (backreferences) ride the pass too, confirmed by the
+true pattern on every approximation hit (ADR-0037).
 
 A version matches an advisory exactly as upstream retire.js decides it:
 vulnerable iff strictly below ``below`` (when present) and at-or-above
@@ -66,7 +66,7 @@ from odda.scanner.fastscan import FastScan
 # body). It is not part of the pinned author surface, but slots run
 # in-process against the same machinery the engine uses — this
 # adapter keeps it in front of every stdlib residual the fast-scan
-# pass leaves behind (build-refused and approximated patterns).
+# pass leaves behind (build-refused and over-budget shapes).
 from odda.scanner.model import _passes_literal_gates
 
 try:  # private API, but the only parser shipped; a missing module
@@ -176,14 +176,13 @@ class _Route:
     ``slot`` indexes the corpus pass's per-pattern result list; ``-1``
     marks a pattern that never entered the database (shape the engine
     compiler cannot afford, or a build refusal) and scans stdlib,
-    gated. ``approximated`` marks a slot the engine could only
-    prefilter: its spans are approximation hits, so the true pattern
-    confirms before any match counts.
+    gated. Routed slots' spans are confirmed (ADR-0037): exact and
+    approximated patterns alike report the find-iterator's own spans,
+    so every match below is real.
     """
 
     pattern: re.Pattern[str]
     slot: int
-    approximated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,13 +316,13 @@ def _filecontent_match(
 ) -> re.Match[str] | None:
     """The leftmost match of one routed filecontent pattern, or ``None``.
 
-    Seam-exact patterns anchor at the pass's first span start — the
-    same leftmost-first match ``search`` returns, without rescanning
-    the body. Approximated prefilters only promise that SOME span
-    appears when the body matches, so the true pattern confirms (gate
-    first: a gate miss proves the hit was an over-report). Patterns
-    that never entered the database scan stdlib, gated, exactly as
-    every pattern did before the seam.
+    Routed patterns anchor at the pass's first span start — the same
+    leftmost-first match ``search`` returns, without rescanning the
+    body. The spans are the find-iterator's own for exact and
+    approximated slots alike (the seam confirms approximations on
+    their hits, ADR-0037), so the first span is a true match start.
+    Patterns that never entered the database scan stdlib, gated,
+    exactly as every pattern did before the seam.
     """
     if route.slot < 0:
         if not _passes_literal_gates(route.pattern, body):
@@ -332,10 +331,6 @@ def _filecontent_match(
     spans = results[route.slot]
     if not spans:
         return None
-    if route.approximated:
-        if not _passes_literal_gates(route.pattern, body):
-            return None
-        return route.pattern.search(body)
     return route.pattern.match(body, spans[0][0])
 
 
@@ -420,15 +415,12 @@ def _filecontent_corpus() -> _Corpus:
     ]
     scan, accepted = _build_filecontent_scan(screenable)
     slot_of = {original: slot for slot, original in enumerate(accepted)}
-    approximated = {accepted[slot] for slot in scan.prefiltered}
     entries: list[tuple[_Library, tuple[_Route, ...]]] = []
     position = 0
     for library in libraries:
         routes = []
         for pattern in library.filecontent:
-            routes.append(
-                _Route(pattern, slot_of.get(position, -1), position in approximated)
-            )
+            routes.append(_Route(pattern, slot_of.get(position, -1)))
             position += 1
         entries.append((library, tuple(routes)))
     return _Corpus(scan=scan, entries=tuple(entries))
