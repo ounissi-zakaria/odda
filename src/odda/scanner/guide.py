@@ -50,15 +50,8 @@ from odda.scanner import Evidence, Finding, FlowView, Rule, Severity
 # assets into the slot, so the JSON arrives self-contained.
 _SLOT_DIR = Path(__file__).resolve().parent
 
-# Severity names do not sort in triage order — compare through an
-# explicit rank when the highest matched severity wins.
-_SEVERITY_RANK = {
-    Severity.INFO: 0,
-    Severity.LOW: 1,
-    Severity.MEDIUM: 2,
-    Severity.HIGH: 3,
-    Severity.CRITICAL: 4,
-}
+# Severity.rank is the scale's own triage order (info 0 … critical 4)
+# — compare through it when the highest matched severity wins.
 
 
 @dataclass(frozen=True)
@@ -122,7 +115,7 @@ class OutdatedSoftwareRule(Rule):
                 )
             )
             refs.extend(r for r in entry.refs if r not in refs)
-            if _SEVERITY_RANK[entry.severity] > _SEVERITY_RANK[worst]:
+            if entry.severity.rank > worst.rank:
                 worst = entry.severity
         if not evidence:
             return []
@@ -347,9 +340,10 @@ this file when passed to `rule_install` as a file path:
 
 Body patterns of the live ruleset compile into one multi-pattern
 engine database — one pass per body, whatever the rule count —
-rebuilt whenever slots change. Prefer shapes the engine scans exactly:
-literals, character classes, alternation, groups, anchors, and small
-bounded repeats (`\\d{{1,4}}`, `[a-z]{{2,10}}`).
+rebuilt whenever slots change. The engine scans literals, character
+classes, alternation, groups, anchors, and small bounded repeats
+(`\\d{{1,4}}`, `[a-z]{{2,10}}`) exactly; those shapes carry no
+tradeoff.
 
 Patterns the engine cannot scan exactly — backreferences
 (`(token)\\1`), lookarounds (`(?=...)`, `(?!...)`, `(?<=...)`,
@@ -358,9 +352,10 @@ Patterns the engine cannot scan exactly — backreferences
 approximation flags candidate bodies, and the true pattern confirms
 only on those. The confirm is a full stdlib scan of that body for that
 pattern — per-body cost returns, but bodies the approximation misses
-pay nothing. Prefer rewriting such a pattern in exact shape when you
-can (a quote-pair check as two alternatives, a lookaround as a plain
-class); keep the lookaround when the rewrite would over-match.
+pay nothing. An exact-shape rewrite (a quote-pair check as two
+alternatives, a lookaround as a plain class) removes the confirm
+outright; a rewrite that over-matches trades a bounded confirm for a
+wrong finding, so the lookaround then stays.
 
 Bounded repeats over wide content are the compile hazard: the engine
 unrolls a bounded repeat into one state per step, so wide content

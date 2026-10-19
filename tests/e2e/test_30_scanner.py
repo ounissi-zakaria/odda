@@ -27,17 +27,17 @@ from urllib.parse import quote
 import pytest
 
 from odda.scanner.engine import Scanner
-from odda.scanner.model import (
-    Evidence,
-    Finding,
-    FlowView,
-    Rule,
-    Severity,
-    _literal_gates,
-    _passes_literal_gates,
-)
+from odda.scanner.gates import _literal_gates, passes_literal_gates
+from odda.scanner.model import Evidence, Finding, FlowView, Rule, Severity
 from odda.scanner.userrules import RULE_FILE_SKELETON, load_slot_source
-from tests.e2e.conftest import curl, dyn_server, fixture_site
+from tests.e2e.conftest import (
+    _findings_index,
+    _seed_slot,
+    _slot_rules,
+    curl,
+    dyn_server,
+    fixture_site,
+)
 
 _FX = "stack-trace.html"
 
@@ -1416,12 +1416,6 @@ _SLOT_FAMILIES = (
 )
 
 
-def _slot_rules(family: str) -> list[Rule]:
-    """Load one repo rules/<family> slot through the slot loader."""
-    path = _RULES_SRC / family / "rule.py"
-    return load_slot_source(family, path.read_text(encoding="utf-8"), str(path))
-
-
 def _all_slot_rules() -> list[Rule]:
     """Every repo slot family's rules, the full converted corpus."""
     return [rule for family in _SLOT_FAMILIES for rule in _slot_rules(family)]
@@ -1441,14 +1435,6 @@ def _slot_module(family: str) -> dict:
     finally:
         del sys.modules[module.__name__]
     return module.__dict__
-
-
-async def _seed_slot(h, family: str) -> dict:
-    """Install the repo's rules/<family> slot through the real tool path."""
-    return await h.call(
-        "rule_install",
-        {"name": family, "file": str(_RULES_SRC / family / "rule.py")},
-    )
 
 
 async def test_rule_install_from_file_copies_sibling_assets(
@@ -1828,18 +1814,6 @@ async def test_error_flow_from_browser_keeps_request_rules(odda_session) -> None
 _STATUS_ONLY = ["-o", "/dev/null", "-w", "%{http_code}"]
 
 
-def _findings_index(data_dir: Path) -> list[dict]:
-    """Every findings.jsonl record on the data dir ([] when absent).
-
-    Harness-free on purpose: the assertions between sessions (one
-    closed, the next not yet booted) have no live session to ask.
-    """
-    f = data_dir / "scanner" / "findings.jsonl"
-    if not f.is_file():
-        return []
-    return [json.loads(line) for line in f.read_text().splitlines()]
-
-
 async def test_sequential_sessions_are_forward_only(odda_session, tmp_path) -> None:
     """Two sequential sessions on ONE shared data dir: session A's flows
     are scanned exactly once — by A, while A lives — and session B, booting
@@ -2135,7 +2109,7 @@ def test_literal_gate_never_suppresses_a_match() -> None:
     for text in texts:
         for pattern in patterns:
             if pattern.search(text):
-                assert _passes_literal_gates(pattern, text), (
+                assert passes_literal_gates(pattern, text), (
                     f"gate suppressed a match: {pattern.pattern!r} vs {text!r}"
                 )
 
@@ -2146,7 +2120,7 @@ def test_ci_gate_fold_sweep_pins_the_soundness_edge() -> None:
     the gate folds fully, so every character an ASCII letter can
     (?i)-match must casefold to exactly that letter's fold — anything
     else and a folded literal could miss a real match."""
-    from odda.scanner.model import _gate_fold
+    from odda.scanner.gates import _gate_fold
 
     for code in list(range(0x600)) + list(range(0x1E00, 0x2200)):
         char = chr(code)
@@ -2648,412 +2622,6 @@ async def test_confirmation_over_multi_mb_body_keeps_residual_ceiling(
     # The residual ceiling the spec keeps (ticket 13): confirmations
     # hold the GIL one finditer step at a time, never the whole sweep.
     assert max(gaps) < 0.6, f"loop stalled {max(gaps):.3f}s during the drain"
-
-
-# --- ticket 14: body memoization ---
-
-_T14 = "t14-memo"
-_FIXTURES = Path(__file__).resolve().parent / "fixtures"
-
-
-def _memo_flow(
-    data_dir: Path,
-    flow_id: str,
-    body: bytes,
-    *,
-    content_type: str = "text/html",
-    status_code: int = 200,
-    query: str = "t14param=yes",
-) -> dict:
-    """One stored flow with request-side material, for memoization tests.
-
-    The ``_stored_flow`` shape plus a stored request file (request-stage
-    rules need it) and parameterized status/content type, so
-    flow-context gates can vary while the body stays byte-identical.
-    """
-    flow_dir = data_dir / "flows" / flow_id
-    flow_dir.mkdir(parents=True)
-    (flow_dir / "response_body.txt").write_bytes(body)
-    (flow_dir / "response_headers").write_bytes(
-        f"HTTP/1.1 {status_code} X\r\n"
-        f"Content-Type: {content_type}\r\n"
-        "X-T14-Hit: yes\r\n\r\n".encode()
-    )
-    path = f"/{flow_id}.txt" + (f"?{query}" if query else "")
-    (flow_dir / "request").write_bytes(
-        f"GET {path} HTTP/1.1\r\nHost: fixture.local\r\n\r\n".encode()
-    )
-    return {
-        "id": flow_id,
-        "method": "GET",
-        "scheme": "http",
-        "host": "fixture.local",
-        "port": 80,
-        "path": path,
-        "browser_id": None,
-        "status_code": status_code,
-        "total_duration_ms": 1.0,
-        "body_file": f"flows/{flow_id}/response_body.txt",
-        "error": None,
-    }
-
-
-async def _drain_findings(
-    scanner: Scanner,
-    data_dir: Path,
-    records: list[dict],
-    expected: int | None = None,
-) -> tuple[list[dict], float]:
-    """Observe every record and drain until each lands a finding.
-
-    Returns the findings index and the wall time from first observe to
-    the settled index (the drain-time observable memoization moves).
-    """
-    drain = asyncio.create_task(scanner.run())
-    findings_path = data_dir / "scanner" / "findings.jsonl"
-    t0 = time.monotonic()
-    for record in records:
-        scanner.observe(record)
-    settle_at = expected if expected is not None else len(records)
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        if (
-            findings_path.is_file()
-            and findings_path.read_bytes().count(b"\n") >= settle_at
-        ):
-            break
-        await asyncio.sleep(0.01)
-    elapsed = time.monotonic() - t0
-    await asyncio.sleep(0.1)  # a late extra finding fails the exact counts
-    drain.cancel()
-    await asyncio.gather(drain, return_exceptions=True)
-    return _findings_index(data_dir), elapsed
-
-
-async def test_duplicate_body_burst_drains_in_small_fraction_of_unique_time(
-    tmp_path,
-) -> None:
-    """The drain-time win (ticket 14): twelve identical 4 MB bodies
-    drain in a small fraction of the time twelve unique bodies take
-    under the same rules — the engine pass, the stdlib residual pass,
-    and the pattern evidence assembly all replay from the memo, so a
-    duplicate pays only the digest read. Both bursts record one finding
-    per flow: memoization never merges or drops observations."""
-    rules = (
-        Rule(
-            id="t14.burst",
-            severity=Severity.LOW,
-            title="Burst marker",
-            body_patterns=(
-                rf"{_T14}=[0-9]+",
-                "never-there-literal-one",
-                "absent-literal-two",
-                r"window\._nothing",
-                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}",
-            ),
-        ),
-        Rule(  # backreferences: engine-refused, the stdlib residual
-            # passes — gates pass (each literal rides the filler line),
-            # none ever matches, so their whole linear cost is unique-
-            # body-only and skipped wholesale on memo hits. A realistic
-            # ruleset carries hundreds of patterns; these give the
-            # unique burst enough work that the fraction clears load
-            # noise, not just the quiet-machine margin.
-            id="t14.burst-residual",
-            severity=Severity.INFO,
-            title="Burst residual",
-            body_patterns=tuple(
-                rf"({literal})-\1"
-                for literal in (
-                    "'payload",
-                    "function",
-                    "return",
-                    "var",
-                    "t14",
-                    "abcdefghijklmnopqrstuvwxyz",
-                    "0123456789",
-                    "payload-abc",
-                    "function f",
-                    "return a",
-                    "var a",
-                    "f(){return",
-                )
-            ),
-        ),
-    )
-    line = "var t14 = 'payload-abcdefghijklmnopqrstuvwxyz-0123456789';\n"
-    filler = line * (4 * 1024 * 1024 // len(line))
-
-    def burst(marker_value: int, nonce: int | None) -> bytes:
-        tail = "" if nonce is None else f"// nonce {nonce}\n"
-        return f"{_T14}={marker_value}\n{filler}{tail}".encode()
-
-    async def drain_elapsed(data_dir: Path, bodies: list[bytes]) -> tuple[float, int]:
-        records = [
-            _memo_flow(data_dir, f"{i:05d}", body) for i, body in enumerate(bodies)
-        ]
-        scanner = Scanner(data_dir, rules=rules)
-        index, elapsed = await _drain_findings(scanner, data_dir, records)
-        return elapsed, len(index)
-
-    unique_dir = tmp_path / "unique"
-    dup_dir = tmp_path / "duplicates"
-    unique_elapsed, unique_findings = await drain_elapsed(
-        unique_dir, [burst(1000 + i, i) for i in range(12)]
-    )
-    dup_elapsed, dup_findings = await drain_elapsed(dup_dir, [burst(7, None)] * 12)
-
-    assert unique_findings == dup_findings == 12
-    assert unique_elapsed > 0.4, (
-        f"unique burst too fast to compare: {unique_elapsed:.3f}s"
-    )
-    assert dup_elapsed * 3 < unique_elapsed, (
-        f"duplicate burst {dup_elapsed:.3f}s not a small fraction of "
-        f"unique {unique_elapsed:.3f}s"
-    )
-
-
-async def test_body_memo_stays_bounded_under_pressure(tmp_path) -> None:
-    """The memo is bounded (ticket 14): under a burst of unique bodies
-    whose stored results dwarf the byte budget, and then more unique
-    bodies than the hard entry cap, the stored bytes never exceed the
-    budget, the entry count never exceeds the cap, and no finding is
-    lost to eviction — every flow records its own observation."""
-    from odda.scanner.engine import _MEMO_BUDGET_BYTES, _MEMO_MAX_ENTRIES
-
-    rule = Rule(
-        id="t14.pressure",
-        severity=Severity.LOW,
-        title="Pressure marker",
-        body_patterns=(rf"{_T14}-[0-9]+",),
-    )
-    data_dir = tmp_path / ".odda"
-    # Phase A: match-heavy bodies — each stores thousands of evidence
-    # entries, so the byte budget evicts long before the cap binds.
-    heavy = [(f"{_T14}-7\n" * 2500 + f"// nonce {i}\n").encode() for i in range(60)]
-    # Phase B: more unique bodies than the entry cap, each tiny.
-    tiny = [f"{_T14}-{1000 + i}\n".encode() for i in range(1100)]
-    records = [
-        _memo_flow(data_dir, f"{i:05d}", body) for i, body in enumerate([*heavy, *tiny])
-    ]
-    scanner = Scanner(data_dir, rules=(rule,))
-    index, _ = await _drain_findings(scanner, data_dir, records)
-    # The one sanctioned internals touch (the bounded-growth
-    # observation): entries and stored bytes under their ceilings.
-    memo = scanner._memo  # noqa: SLF001
-    assert len(index) == len(records)
-    assert len(memo) <= _MEMO_MAX_ENTRIES
-    assert memo.bytes <= _MEMO_BUDGET_BYTES
-    assert len(memo) < len(records), "no eviction under pressure"
-
-
-async def test_duplicate_body_flows_each_record_their_own_findings(
-    tmp_path,
-) -> None:
-    """The acceptance lock (ticket 14): two flows carrying byte-identical
-    bodies each record their own findings with their own flow ids —
-    the second flow's body stage replays from the memo, yet nothing is
-    merged or dropped, and the request/header stages stay per flow:
-    every rule of the three stages fires on both flows with identical
-    evidence."""
-    data_dir = tmp_path / ".odda"
-    rules = (
-        Rule(
-            id="t14.body",
-            severity=Severity.LOW,
-            title="Memo body marker",
-            body_patterns=(rf"{_T14}-[0-9]+",),
-        ),
-        Rule(
-            id="t14.header",
-            severity=Severity.INFO,
-            title="Memo header marker",
-            header_patterns=("X-T14-Hit",),
-        ),
-        Rule(
-            id="t14.query",
-            severity=Severity.INFO,
-            title="Memo query marker",
-            request_query_patterns=("t14param",),
-        ),
-    )
-    body = f"leading text\n{_T14}-7 trailing text\n".encode()
-    scanner = Scanner(data_dir, rules=rules)
-    records = [_memo_flow(data_dir, flow_id, body) for flow_id in ("00001", "00002")]
-    index, _ = await _drain_findings(scanner, data_dir, records)
-
-    by_flow_rule = {(rec["flow_id"], rec["rule_id"]): rec for rec in index}
-    assert set(by_flow_rule) == {
-        (flow_id, rule_id)
-        for flow_id in ("00001", "00002")
-        for rule_id in ("t14.body", "t14.header", "t14.query")
-    }
-    for rule_id in ("t14.body", "t14.header", "t14.query"):
-        first = dict(by_flow_rule[("00001", rule_id)])
-        second = dict(by_flow_rule[("00002", rule_id)])
-        assert first.pop("flow_id") == "00001"
-        assert second.pop("flow_id") == "00002"
-        assert first == second, rule_id
-
-
-async def test_memoized_body_results_stay_pre_gate(tmp_path) -> None:
-    """Gates are flow context and filter per flow, after the memo
-    (ticket 14): four flows share one body while the status and
-    content-type gates disagree — the pair both gates fail seeds the
-    memo, so the gated-in successors fire on its cached results. A
-    cache that stored post-gate results would have the first flow's
-    empty result silence the second; the emitted evidence is the full
-    pre-gate result every time."""
-    rules = (
-        Rule(
-            id="t14.status-gated",
-            severity=Severity.LOW,
-            title="Status gated marker",
-            body_patterns=(rf"{_T14}-[0-9]+",),
-            statuses=(200,),
-        ),
-        Rule(
-            id="t14.type-gated",
-            severity=Severity.LOW,
-            title="Type gated marker",
-            body_patterns=(rf"{_T14}-[0-9]+",),
-            content_types=("text/javascript",),
-        ),
-    )
-    data_dir = tmp_path / ".odda"
-    body = f"{_T14}-7 same bytes every flow\n".encode()
-    specs = (
-        ("00001", 500, "text/html"),  # both gates fail — seeds the memo
-        ("00002", 200, "text/html"),  # status gate passes
-        ("00003", 200, "text/javascript"),  # both pass
-        ("00004", 500, "text/javascript"),  # content-type gate passes
-    )
-    records = [
-        _memo_flow(data_dir, flow_id, body, status_code=status, content_type=ctype)
-        for flow_id, status, ctype in specs
-    ]
-    scanner = Scanner(data_dir, rules=rules)
-    index, _ = await _drain_findings(scanner, data_dir, records)
-
-    fired = {(rec["flow_id"], rec["rule_id"]) for rec in index}
-    assert fired == {
-        ("00002", "t14.status-gated"),
-        ("00003", "t14.status-gated"),
-        ("00003", "t14.type-gated"),
-        ("00004", "t14.type-gated"),
-    }
-    assert all(rec["evidence"][0]["detail"] == f"{_T14}-7" for rec in index)
-
-
-async def test_dataset_rule_gate_difference_stays_per_flow(tmp_path) -> None:
-    """Dataset-backed scan() overrides are memoized too (ticket 14), and
-    their own flow-context screens stay per flow: retire.js gates on
-    the response content type, so of three flows with the same jQuery
-    body the two JavaScript ones fire — the third replaying the first's
-    cached scan under its own flow id — and the plain-text one stays
-    silent: its differing context is a different cache key, a fresh
-    scan, and its own gated-out empty result."""
-    rules = tuple(_slot_rules("retirejs"))
-    body = (_FIXTURES / "ticket05-jquery-old.js").read_bytes()
-    data_dir = tmp_path / ".odda"
-    records = [
-        _memo_flow(data_dir, "00001", body, content_type="text/javascript"),
-        _memo_flow(data_dir, "00002", body, content_type="text/plain"),
-        _memo_flow(data_dir, "00003", body, content_type="text/javascript"),
-    ]
-    scanner = Scanner(data_dir, rules=rules)
-    # 00002 stays silent: two findings settle the drain
-    index, _ = await _drain_findings(scanner, data_dir, records, expected=2)
-
-    fired = [rec["flow_id"] for rec in index if rec["rule_id"] == "js.outdated-library"]
-    assert fired == ["00001", "00003"]
-    first, third = [rec for rec in index if rec["flow_id"] in ("00001", "00003")]
-    assert first["flow_id"] == "00001" and third["flow_id"] == "00003"
-    assert all(rec["flow_id"] != "00002" for rec in index)
-    first.pop("flow_id")
-    third.pop("flow_id")
-    assert first == third
-
-
-async def test_rule_installed_after_body_seen_matches_its_rearrival(
-    tmp_path,
-) -> None:
-    """The epoch key (ticket 14): a rule installed after a body was seen
-    still matches that body's later re-arrival — the install builds a
-    new epoch, the memo is keyed by it, so the duplicate cannot be
-    answered by the earlier epoch's cached results. The pre-install
-    flow never matches the new rule (arrival-time semantics), while
-    the rule that saw the body the first time keeps firing on the
-    replay."""
-    data_dir = tmp_path / ".odda"
-    early = Rule(
-        id="t14.seen-first",
-        severity=Severity.LOW,
-        title="Seen first",
-        body_patterns=(rf"{_T14}-[0-9]+",),
-    )
-    body = f"{_T14}-7 body seen twice\n".encode()
-    scanner = Scanner(data_dir, rules=(early,))
-    scanner.observe(_memo_flow(data_dir, "00001", body))
-    late = Rule(
-        id="t14.installed-late",
-        severity=Severity.INFO,
-        title="Installed late",
-        body_patterns=(rf"{_T14}-7",),
-    )
-    scanner.register_rules((late,))  # next epoch: the memo clears with it
-    scanner.observe(_memo_flow(data_dir, "00002", body))
-    findings_path = data_dir / "scanner" / "findings.jsonl"
-    drain = asyncio.create_task(scanner.run())
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if findings_path.is_file() and findings_path.read_bytes().count(b"\n") >= 3:
-            break
-        await asyncio.sleep(0.01)
-    await asyncio.sleep(0.1)
-    drain.cancel()
-    await asyncio.gather(drain, return_exceptions=True)
-
-    index = _findings_index(data_dir)
-    assert sorted((rec["rule_id"], rec["flow_id"]) for rec in index) == [
-        ("t14.installed-late", "00002"),
-        ("t14.seen-first", "00001"),
-        ("t14.seen-first", "00002"),
-    ]
-
-
-async def test_same_body_captured_twice_records_both_flows_findings(
-    odda_session,
-) -> None:
-    """The user-visible duplicate (ticket 14): the same captured response
-    arriving twice through the proxy — a re-fetched page — lands one
-    finding per flow, byte-identical except the flow id. The scanner
-    never merges or drops the second observation, memoization
-    notwithstanding."""
-    async with odda_session() as h, fixture_site([_FX]) as fx:
-        await _seed_slot(h, "disclosure")
-        proxy = await h.call("proxy_url", {})
-        flows = []
-        for marker in ("t14-dup-one", "t14-dup-two"):
-            r = await curl(
-                f"{fx.base}/{_FX}?marker={marker}",
-                proxy,
-                extra=["-o", "/dev/null", "-w", "%{http_code}"],
-            )
-            assert r.stdout == "200"
-            flows.append(await h.wait_flow(marker))
-        first, second = flows
-
-        first_finding = await h.wait_finding(first["id"])
-        second_finding = await h.wait_finding(second["id"])
-
-        assert first_finding["rule_id"] == "disclosure.stack-trace"
-        assert second_finding["rule_id"] == "disclosure.stack-trace"
-        assert first_finding["flow_id"] == first["id"]
-        assert second_finding["flow_id"] == second["id"]
-        first_finding.pop("flow_id")
-        second_finding.pop("flow_id")
-        assert first_finding == second_finding
 
 
 # --- ticket 15: global rules dir + config-home resolver ---

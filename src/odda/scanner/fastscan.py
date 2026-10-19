@@ -52,40 +52,62 @@ approximate — above all patterns that can match the empty string, where
 ``finditer`` emits zero-width spans no engine run could reproduce — are
 refused at build with a ``ValueError`` naming the pattern; callers run
 those on the stdlib path outright.
+
+Shared scan plumbing
+====================
+
+This module is also the scanner's shared plumbing home, imported by the
+literal gates (``odda.scanner.gates``), the engine, and rule slots: the
+one guarded private-parser pair (:data:`sre_constants`, :func:`sre_parse`)
+every pattern-walking part parses through, and the GIL-cadenced chunk
+iteration (:func:`chunked`, :func:`read_chunked`) the fold, containment,
+decode, reversal, and digest passes run through.
 """
 
 from __future__ import annotations
 
 import re
 import time
-from re import _constants as _sre
-from re._parser import parse as _sre_parse
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import hyperscan
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
+    from pathlib import Path
+
+try:  # The scanner's one private-parser import guard (private API, but
+    # the only parser shipped): the literal gates, the engine's
+    # expansion screen, and slot shape screens all parse patterns
+    # through this pair. A missing module just turns every consumer
+    # off — gates pass, patterns stay on the stdlib path.
+    from re import _constants as sre_constants
+    from re._parser import parse as sre_parse
+except ImportError:  # pragma: no cover
+    sre_constants = None  # type: ignore[assignment]
+    sre_parse = None  # type: ignore[assignment]
+
+_T = TypeVar("_T")
 
 # Anchor translation for the reversed expression. ``$`` becomes ``^`` (and
 # forces MULTILINE, whose "after any newline" is a superset of the reversed
 # image of Python's trailing-newline ``$``); ``^`` becomes ``$``; the buffer
 # anchors swap; ``\b``/``\B`` have no engine equivalent under UCP.
 _AT_REVERSED = {
-    _sre.AT_BEGINNING: "$",
-    _sre.AT_BEGINNING_STRING: r"\z",
-    _sre.AT_END: "^",
-    _sre.AT_END_STRING: r"\A",
-    _sre.AT_BOUNDARY: None,
-    _sre.AT_NON_BOUNDARY: None,
+    sre_constants.AT_BEGINNING: "$",
+    sre_constants.AT_BEGINNING_STRING: r"\z",
+    sre_constants.AT_END: "^",
+    sre_constants.AT_END_STRING: r"\A",
+    sre_constants.AT_BOUNDARY: None,
+    sre_constants.AT_NON_BOUNDARY: None,
 }
 _CATEGORY = {
-    _sre.CATEGORY_DIGIT: r"\d",
-    _sre.CATEGORY_NOT_DIGIT: r"\D",
-    _sre.CATEGORY_SPACE: r"\s",
-    _sre.CATEGORY_NOT_SPACE: r"\S",
-    _sre.CATEGORY_WORD: r"\w",
-    _sre.CATEGORY_NOT_WORD: r"\W",
+    sre_constants.CATEGORY_DIGIT: r"\d",
+    sre_constants.CATEGORY_NOT_DIGIT: r"\D",
+    sre_constants.CATEGORY_SPACE: r"\s",
+    sre_constants.CATEGORY_NOT_SPACE: r"\S",
+    sre_constants.CATEGORY_WORD: r"\w",
+    sre_constants.CATEGORY_NOT_WORD: r"\W",
 }
 _UNI_CLASS_CATEGORIES = frozenset(_CATEGORY)
 # Characters where the engine's simple case folding differs from Python's
@@ -122,17 +144,17 @@ def _class_source(items: Sequence) -> str:
     parts: list[str] = []
     negate = ""
     for op, av in items:
-        if op is _sre.NEGATE:
+        if op is sre_constants.NEGATE:
             negate = "^"
-        elif op is _sre.LITERAL:
+        elif op is sre_constants.LITERAL:
             parts.append(_escape(chr(av), in_class=True))
-        elif op is _sre.RANGE:
+        elif op is sre_constants.RANGE:
             parts.append(
                 _escape(chr(av[0]), in_class=True)
                 + "-"
                 + _escape(chr(av[1]), in_class=True)
             )
-        elif op is _sre.CATEGORY:
+        elif op is sre_constants.CATEGORY:
             parts.append(_CATEGORY[av])
         else:
             raise _UnsupportedError(f"character-class item {op}")
@@ -143,15 +165,20 @@ def _min_length(tree) -> int:
     """Minimum match length in characters; 0 means it can match empty."""
     total = 0
     for op, av in tree:
-        if op in (_sre.LITERAL, _sre.IN, _sre.ANY, _sre.NOT_LITERAL):
+        if op in (
+            sre_constants.LITERAL,
+            sre_constants.IN,
+            sre_constants.ANY,
+            sre_constants.NOT_LITERAL,
+        ):
             total += 1
-        elif op is _sre.SUBPATTERN:
+        elif op is sre_constants.SUBPATTERN:
             total += _min_length(av[3])
-        elif op in (_sre.MAX_REPEAT, _sre.MIN_REPEAT):
+        elif op in (sre_constants.MAX_REPEAT, sre_constants.MIN_REPEAT):
             total += av[0] * _min_length(av[2])
-        elif op is _sre.BRANCH:
+        elif op is sre_constants.BRANCH:
             total += min(_min_length(branch) for branch in av[1])
-        elif op is _sre.AT:
+        elif op is sre_constants.AT:
             continue
         else:
             # Lookarounds, backreferences, conditionals, possessive and
@@ -170,7 +197,7 @@ def _reversed_repeat(av) -> str:
     body, atom = _reversed_single(sub)
     if not atom:
         body = f"(?:{body})"
-    if mx == _sre.MAXREPEAT:
+    if mx == sre_constants.MAXREPEAT:
         if mn == 0:
             return body + "*"
         if mn == 1:
@@ -190,25 +217,25 @@ def _reversed_item(node) -> tuple[str, bool]:
     without grouping).
     """
     op, av = node
-    if op is _sre.LITERAL:
+    if op is sre_constants.LITERAL:
         return _escape(chr(av)), True
-    if op is _sre.IN:
+    if op is sre_constants.IN:
         return _class_source(av), True
-    if op is _sre.ANY:
+    if op is sre_constants.ANY:
         return ".", True
-    if op is _sre.NOT_LITERAL:
+    if op is sre_constants.NOT_LITERAL:
         return f"[^{_escape(chr(av), in_class=True)}]", True
-    if op is _sre.AT:
+    if op is sre_constants.AT:
         token = _AT_REVERSED[av]
         if token is None:
             raise _UnsupportedError(f"anchor {av}")
         return token, True
-    if op is _sre.SUBPATTERN:
+    if op is sre_constants.SUBPATTERN:
         return f"(?:{_reversed_source(av[3])})", True
-    if op is _sre.BRANCH:
+    if op is sre_constants.BRANCH:
         alts = "|".join(_reversed_source(branch) for branch in av[1])
         return f"(?:{alts})", True
-    if op in (_sre.MAX_REPEAT, _sre.MIN_REPEAT):
+    if op in (sre_constants.MAX_REPEAT, sre_constants.MIN_REPEAT):
         return _reversed_repeat(av), True
     raise _UnsupportedError(f"construct {op}")
 
@@ -231,12 +258,12 @@ def _walk_tree(tree, fn) -> None:
     for node in tree:
         fn(node)
         op, av = node
-        if op is _sre.SUBPATTERN:
+        if op is sre_constants.SUBPATTERN:
             _walk_tree(av[3], fn)
-        elif op is _sre.BRANCH:
+        elif op is sre_constants.BRANCH:
             for branch in av[1]:
                 _walk_tree(branch, fn)
-        elif op in (_sre.MAX_REPEAT, _sre.MIN_REPEAT):
+        elif op in (sre_constants.MAX_REPEAT, sre_constants.MIN_REPEAT):
             _walk_tree(av[2], fn)
 
 
@@ -246,7 +273,7 @@ def _inline_flags(tree) -> int:
     def collect(node) -> None:
         nonlocal flags
         op, av = node
-        if op is _sre.SUBPATTERN and av[1]:
+        if op is sre_constants.SUBPATTERN and av[1]:
             flags |= av[1]
 
     _walk_tree(tree, collect)
@@ -259,7 +286,7 @@ def _contains_at_end(tree) -> bool:
     def check(node) -> None:
         nonlocal found
         op, av = node
-        if op is _sre.AT and av is _sre.AT_END:
+        if op is sre_constants.AT and av is sre_constants.AT_END:
             found = True
 
     _walk_tree(tree, check)
@@ -272,8 +299,9 @@ def _uses_unicode_class(tree) -> bool:
     def check(node) -> None:
         nonlocal uses
         op, av = node
-        if op is _sre.IN and any(
-            item[0] is _sre.CATEGORY and item[1] in _UNI_CLASS_CATEGORIES for item in av
+        if op is sre_constants.IN and any(
+            item[0] is sre_constants.CATEGORY and item[1] in _UNI_CLASS_CATEGORIES
+            for item in av
         ):
             uses = True
 
@@ -289,7 +317,7 @@ def _reverse_expression(pattern: re.Pattern) -> tuple[str, int, bool, bool]:
     case folding can diverge on the Turkish dotted I.
     """
     flags = pattern.flags
-    tree = _sre_parse(pattern.pattern, flags)
+    tree = sre_parse(pattern.pattern, flags)
     if _min_length(tree) == 0:
         raise _UnsupportedError("can match the empty string")
     source = _reversed_source(tree)
@@ -361,11 +389,53 @@ def _char_ends(data: bytes, byte_ends: Sequence[int]) -> list[int]:
     return out
 
 
-# Reversal slice for the exact-path encode: one ``text[::-1]`` of a
-# 10 MB body is a single >10 ms C call holding the GIL, which stalls
-# the event loop serving the drain; the slices drop the GIL between
-# chunks so the loop keeps its cadence.
-_REVERSE_CHUNK = 1 << 18
+# Slice length of the shared GIL cadence (see ``chunked``): one 10 MB
+# text pass is a single uninterruptible C call that stalls the event
+# loop serving the drain for its whole duration; the slices drop the
+# GIL between chunks, so the loop keeps its cadence whatever the body
+# size (ticket 12's numbers contract).
+GIL_CHUNK = 1 << 18
+
+
+def chunked(
+    items: Sequence[_T], chunk: int = GIL_CHUNK, *, step: int | None = None
+) -> Iterator[_T]:
+    """Yield ``items`` in bounded slices, offering the GIL between them.
+
+    The GIL-yield contract every chunked scan pass shares (folds,
+    containment windows, decodes, reversals): each slice keeps the
+    caller's work one short C call, and this generator sleeps zero
+    after every yield, so the event loop serving the drain regains the
+    GIL between slices and keeps its cadence whatever the body size.
+    A caller returning early abandons the generator — no trailing
+    sleep, no cleanup to run.
+
+    Args:
+        items: The sequence to slice (a ``str`` slices into ``str``).
+        chunk: Slice length; the shared GIL cadence by default.
+        step: Distance between slice starts (``chunk`` by default).
+            Below ``chunk`` the slices overlap — window scans pass
+            ``chunk - len(needle) + 1`` so an occurrence straddling a
+            boundary is never missed.
+    """
+    stride = chunk if step is None else step
+    for start in range(0, len(items), stride):
+        yield items[start : start + chunk]
+        time.sleep(0)  # offer the loop thread the GIL between slices
+
+
+def read_chunked(path: Path, chunk: int = GIL_CHUNK) -> Iterator[bytes]:
+    """Read a stored file in bounded chunks, offering the GIL between.
+
+    The same GIL-yield contract as :func:`chunked`, over a file: each
+    read is one bounded C call and the generator sleeps zero after
+    every yield. The handle closes when the generator is exhausted or
+    abandoned (a generator's ``with`` closes on collection).
+    """
+    with path.open("rb") as handle:
+        while data := handle.read(chunk):
+            yield data
+            time.sleep(0)  # offer the loop thread the GIL between reads
 
 
 def _reversed_utf8(text: str) -> bytes | bytearray:
@@ -379,18 +449,18 @@ def _reversed_utf8(text: str) -> bytes | bytearray:
     scans any bytes-like buffer, so no final whole-body join copy is
     ever materialized.
     """
-    if len(text) <= _REVERSE_CHUNK:
+    if len(text) <= GIL_CHUNK:
         return text[::-1].encode()
-    parts = [
-        text[start : start + _REVERSE_CHUNK][::-1].encode()
-        for start in range(0, len(text), _REVERSE_CHUNK)
-    ]
+    parts = [part[::-1].encode() for part in chunked(text)]
     data = bytearray(sum(len(part) for part in parts))
     pos = 0
-    for part in reversed(parts):
+    # Assembly walks the parts back to front, one part per step
+    # (chunk 1 yields one-element slices), the shared GIL cadence
+    # between writes.
+    for group in chunked(parts[::-1], 1):
+        part = group[0]
         data[pos : pos + len(part)] = part
         pos += len(part)
-        time.sleep(0)  # offer the loop thread the GIL between slices
     return data
 
 
