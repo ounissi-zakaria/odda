@@ -454,7 +454,11 @@ def _reversed_utf8(text: str) -> bytes | bytearray:
     parts = [part[::-1].encode() for part in chunked(text)]
     data = bytearray(sum(len(part) for part in parts))
     pos = 0
-    for part in chunked(parts[::-1], 1):  # one part per step: write, then yield
+    # Assembly walks the parts back to front, one part per step
+    # (chunk 1 yields one-element slices), the shared GIL cadence
+    # between writes.
+    for group in chunked(parts[::-1], 1):
+        part = group[0]
         data[pos : pos + len(part)] = part
         pos += len(part)
     return data
