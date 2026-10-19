@@ -46,7 +46,7 @@ where = ["src"]
 "" = "src"
 
 [tool.setuptools.package-data]
-odda = ["userscripts/default/*.js"]
+odda = ["scanner/rule-guide.md", "userscripts/default/*.js"]
 
 [tool.ruff]
 target-version = "py311"

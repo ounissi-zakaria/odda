@@ -56,7 +56,7 @@ from odda.request import (
     send_repeat as send_request_repeat,
 )
 from odda.scanner.engine import Scanner
-from odda.scanner.guide import RULE_GUIDE
+from odda.scanner.guide import load_rule_guide
 from odda.scanner.userrules import UserRuleManager
 
 # Two or more names selects the multi-name pipeline mode (ADR-0019);
@@ -1067,8 +1067,9 @@ async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str
 # The install surface's one docs resource (ADR-0038): the full
 # authoring guide — rule fields, FlowView, worked examples — which no
 # tool surface can carry and no author can proceed without. Its
-# rule-file section is built from the same RULE_FILE_SKELETON every
-# load-failure rejection shows, so guide and errors cannot drift.
+# rule-file section is spliced, at serve time, from the same
+# RULE_FILE_SKELETON every load-failure rejection shows, so guide and
+# errors cannot drift.
 @mcp_server.resource(
     "odda://scanner/rule-guide",
     name="rule-guide",
@@ -1082,7 +1083,7 @@ async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str
 )
 def scanner_rule_guide() -> str:
     """Serve the rule guide payload (single-sourced skeleton)."""
-    return RULE_GUIDE
+    return load_rule_guide()
 
 
 # The description carries the install contract plus the one-line
