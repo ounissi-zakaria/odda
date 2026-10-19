@@ -35,6 +35,16 @@ the guide's rule-file section is generated from the same
 the guide and the errors cannot drift (the e2e suite pins the
 equality, and the payload's section coverage, from the client side).
 
+Storage follows the removal's own precedent. The prose lives in
+`src/odda/scanner/rule-guide.md`, shipped as package data and read
+through a thin loader at serve time — the same shape the removed
+`odda://docs/*` resources used (markdown in `src/odda/docs/`,
+b3c3b9d), recovered because pages of prose are reviewable and
+editable as markdown, not as a Python f-string with doubled braces
+and escaped backslashes. Only the splice stays dynamic: the md
+carries a `{{RULE_FILE_SKELETON}}` placeholder, the loader binds the
+constant into it, and the client-side equality pin guards the splice.
+
 CODING_STANDARDS gains the exception test that keeps this from
 reopening the door the removal closed: a docs resource may exist only
 for content no tool surface can carry and an agent cannot proceed
