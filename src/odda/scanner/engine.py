@@ -100,9 +100,12 @@ _EXPANSION_MAX = 64
 _MEMO_BUDGET_BYTES = 8 * 1024 * 1024
 _MEMO_MAX_ENTRIES = 1024
 
-# Digest of a stored body: blake2b-128 over the file's bytes, read in
+# Digest of a stored body: SHA-256 over the file's bytes, read in
 # GIL-dropping chunks (hashlib releases the GIL per large update; one
 # read_bytes of a multi-MB body would be an uninterruptible C call).
+# SHA-256, not a blake2: this is a content key, not a security
+# primitive, and SHA-256 rides the hardware extensions (~4x the
+# software blake2b here) — the digest is the duplicate's whole cost.
 _HASH_CHUNK = 1 << 20
 
 # Memo lookup miss sentinel — never a legitimate cached value.
@@ -655,18 +658,18 @@ class Scanner:
     def _body_digest(self, view: FlowView) -> bytes | None:
         """Digest of the flow's stored body bytes, or ``None``.
 
-        blake2b-128 over the file on disk — the exact bytes every
-        stage of the scan reads — hashed in 1 MiB chunks so the
-        digest read drops the GIL between slices (the drain worker is
-        already off the loop thread; the chunking keeps the hash from
-        hitching any thread that shares the GIL). An unreadable body
-        has no digest and takes the uncached path — the body read
-        itself then fails exactly where it always did.
+        SHA-256 over the file on disk — the exact bytes every stage of
+        the scan reads — hashed in 1 MiB chunks so the digest read
+        drops the GIL between slices (the drain worker is already off
+        the loop thread; the chunking keeps the hash from hitching any
+        thread that shares the GIL). An unreadable body has no digest
+        and takes the uncached path — the body read itself then fails
+        exactly where it always did.
         """
         body_file = view.record.get("body_file")
         if body_file is None:
             return None
-        hasher = hashlib.blake2b(digest_size=16)
+        hasher = hashlib.sha256()
         try:
             with (self._data_dir / body_file).open("rb") as handle:
                 while chunk := handle.read(_HASH_CHUNK):

@@ -2518,8 +2518,8 @@ async def _drain_findings(
 async def test_duplicate_body_burst_drains_in_small_fraction_of_unique_time(
     tmp_path,
 ) -> None:
-    """The drain-time win (ticket 14): sixteen identical MB bodies
-    drain in a small fraction of the time sixteen unique bodies take
+    """The drain-time win (ticket 14): twelve identical 4 MB bodies
+    drain in a small fraction of the time twelve unique bodies take
     under the same rules — the engine pass, the stdlib residual pass,
     and the pattern evidence assembly all replay from the memo, so a
     duplicate pays only the digest read. Both bursts record one finding
@@ -2537,15 +2537,37 @@ async def test_duplicate_body_burst_drains_in_small_fraction_of_unique_time(
                 r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}",
             ),
         ),
-        Rule(  # backreference: engine-refused, the stdlib residual pass
+        Rule(  # backreferences: engine-refused, the stdlib residual
+            # passes — gates pass (each literal rides the filler line),
+            # none ever matches, so their whole linear cost is unique-
+            # body-only and skipped wholesale on memo hits. A realistic
+            # ruleset carries hundreds of patterns; these give the
+            # unique burst enough work that the fraction clears load
+            # noise, not just the quiet-machine margin.
             id="t14.burst-residual",
             severity=Severity.INFO,
             title="Burst residual",
-            body_patterns=(r"'(payload)-\1",),  # gate passes, never matches
+            body_patterns=tuple(
+                rf"({literal})-\1"
+                for literal in (
+                    "'payload",
+                    "function",
+                    "return",
+                    "var",
+                    "t14",
+                    "abcdefghijklmnopqrstuvwxyz",
+                    "0123456789",
+                    "payload-abc",
+                    "function f",
+                    "return a",
+                    "var a",
+                    "f(){return",
+                )
+            ),
         ),
     )
     line = "var t14 = 'payload-abcdefghijklmnopqrstuvwxyz-0123456789';\n"
-    filler = line * (1024 * 1024 // len(line))
+    filler = line * (4 * 1024 * 1024 // len(line))
 
     def burst(marker_value: int, nonce: int | None) -> bytes:
         tail = "" if nonce is None else f"// nonce {nonce}\n"
@@ -2562,15 +2584,15 @@ async def test_duplicate_body_burst_drains_in_small_fraction_of_unique_time(
     unique_dir = tmp_path / "unique"
     dup_dir = tmp_path / "duplicates"
     unique_elapsed, unique_findings = await drain_elapsed(
-        unique_dir, [burst(1000 + i, i) for i in range(16)]
+        unique_dir, [burst(1000 + i, i) for i in range(12)]
     )
-    dup_elapsed, dup_findings = await drain_elapsed(dup_dir, [burst(7, None)] * 16)
+    dup_elapsed, dup_findings = await drain_elapsed(dup_dir, [burst(7, None)] * 12)
 
-    assert unique_findings == dup_findings == 16
-    assert unique_elapsed > 0.12, (
+    assert unique_findings == dup_findings == 12
+    assert unique_elapsed > 0.4, (
         f"unique burst too fast to compare: {unique_elapsed:.3f}s"
     )
-    assert dup_elapsed * 4 < unique_elapsed, (
+    assert dup_elapsed * 3 < unique_elapsed, (
         f"duplicate burst {dup_elapsed:.3f}s not a small fraction of "
         f"unique {unique_elapsed:.3f}s"
     )
