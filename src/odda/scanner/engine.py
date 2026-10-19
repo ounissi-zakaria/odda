@@ -147,67 +147,152 @@ def _within_expansion_budget(pattern: re.Pattern[str]) -> bool:
     return _expansion(tree) <= _EXPANSION_MAX
 
 
+# The shape screen's own caps (see ``_affordable``): bounded nesting
+# is capped instead of rejected outright (small fixed counts are
+# cheap), and a character class wider than this span is an atom too
+# wide to unroll under a bound.
+_MAX_NESTED_STATES = 256
+_MAX_RANGE_SPAN = 128
+if sre_constants is not None:
+    _WIDE_CATEGORIES = frozenset(
+        getattr(sre_constants, name)
+        for name in (
+            "CATEGORY_NOT_DIGIT",
+            "CATEGORY_NOT_SPACE",
+            "CATEGORY_NOT_WORD",
+            "CATEGORY_UNI_NOT_DIGIT",
+            "CATEGORY_UNI_NOT_SPACE",
+            "CATEGORY_UNI_NOT_WORD",
+        )
+    )
+else:  # pragma: no cover — screen off; the stdlib path takes over
+    _WIDE_CATEGORIES = frozenset()
+
+
+def _affordable(pattern: re.Pattern[str]) -> bool:
+    r"""Whether one pattern's shape compiles in the engine cheaply.
+
+    The engine's compiler unrolls bounded repeats into one state per
+    step, so a wide atom (``.``, a negated class) or an unbounded
+    sub-repeat under one turns the compile from milliseconds into
+    seconds or worse — vue's ``[^\n]{0,8000}`` never finished in 90 s.
+    Screened-out patterns lose nothing but speed: they fall back to
+    the gated stdlib residual path. This screen (formerly the retire.js
+    slot's own, moved here so pattern fate is classified once) applies
+    to every body pattern the epoch compiles, declared and corpus
+    alike.
+    """
+    if sre_parse is None:  # pragma: no cover — stdlib path takes over
+        return False
+    try:
+        tree = sre_parse(pattern.pattern, pattern.flags)
+    except Exception:
+        return False
+    return _affordable_tree(tree, under_bound=False, states=1)
+
+
+def _affordable_tree(tree, *, under_bound: bool, states: int) -> bool:
+    """Walk one parsed subpattern; ``False`` marks a shape to screen out."""
+    return all(
+        _affordable_node(node, under_bound=under_bound, states=states) for node in tree
+    )
+
+
+def _affordable_node(node, *, under_bound: bool, states: int) -> bool:
+    """Screen one parse-tree node (and, for containers, its subtree)."""
+    op, av = node
+    if op in (
+        sre_constants.LITERAL,
+        sre_constants.AT,
+        sre_constants.GROUPREF,
+    ):
+        return True
+    if op in (sre_constants.NOT_LITERAL, sre_constants.ANY):
+        return not under_bound
+    if op is sre_constants.IN:
+        return not under_bound or not _class_is_wide(av)
+    if op is sre_constants.SUBPATTERN:
+        return _affordable_tree(av[3], under_bound=under_bound, states=states)
+    if op is sre_constants.BRANCH:
+        return all(
+            _affordable_tree(branch, under_bound=under_bound, states=states)
+            for branch in av[1]
+        )
+    if op in (sre_constants.ASSERT, sre_constants.ASSERT_NOT):
+        return _affordable_tree(av[1], under_bound=under_bound, states=states)
+    if op in (sre_constants.MAX_REPEAT, sre_constants.MIN_REPEAT):
+        return _affordable_repeat(av, under_bound=under_bound, states=states)
+    return False
+
+
+def _affordable_repeat(av, *, under_bound: bool, states: int) -> bool:
+    """Screen one repeat.
+
+    Unrolling is what costs, so its body and bound decide (an
+    unbounded repeat loops — but never inside another repeat, where
+    the combination simulates).
+    """
+    _mn, mx, sub = av
+    if mx is sre_constants.MAXREPEAT:
+        return not under_bound and _affordable_tree(
+            sub, under_bound=under_bound, states=states
+        )
+    unrolled = states * max(mx, 1)
+    return _affordable_tree(sub, under_bound=True, states=unrolled) and not (
+        under_bound and unrolled > _MAX_NESTED_STATES
+    )
+
+
+def _class_is_wide(items: Any) -> bool:
+    """Whether a character class covers too much to unroll cheaply."""
+    for op, av in items:
+        if op is sre_constants.NEGATE:
+            return True
+        if op is sre_constants.RANGE and av[1] - av[0] > _MAX_RANGE_SPAN:
+            return True
+        if op is sre_constants.CATEGORY and av in _WIDE_CATEGORIES:
+            return True
+    return False
+
+
 def _compile_body_scan(
     patterns: list[re.Pattern[str]],
+    shape_screened: Sequence[bool],
 ) -> tuple[FastScan | None, list[int | None]]:
     """Compile the epoch's body patterns into one fast-scan database.
 
-    Returns the database (``None`` when nothing rides it) and, per
-    input pattern, its index into the database — or ``None`` for the
-    stdlib residuals: over-budget patterns (``_EXPANSION_MAX``) and
-    patterns that refuse even approximation (zero-width constructs
-    whose ``FastScan.build`` raises). Patterns the engine can only
-    approximate ride too (ticket 13): their spans come back confirmed
-    — approximation prefilter, stdlib confirm on the hit — so they are
-    indistinguishable from exact slots in the layout. The prefilter
-    pass costs one whole-body encode plus its engine scan; it is
-    load-bearing as the confirm gate, and an epoch with no approximated
-    patterns builds no prefilter database at all.
+    Pattern fate is classified once, in ``FastScan.build``: exact,
+    prefiltered (approximation prefilter, stdlib confirm on the hit —
+    spans arrive confirmed, indistinguishable from exact slots in the
+    layout), or refused. This screen only picks the candidates — the
+    expansion budget keeps over-budget patterns off a compile that
+    might not return, and the shape screen (the retire.js slot's own,
+    moved here) additionally guards declared corpus patterns, the
+    dataset shapes measured to compile for seconds to never — and
+    maps each survivor's fate to its index into the database, or
+    ``None`` for the stdlib residuals: screened-out and refused
+    patterns alike. A pattern must never break the epoch — the worst
+    case is the stdlib path.
     """
     db_of: list[int | None] = [None] * len(patterns)
     eligible = [
         (i, pattern)
         for i, pattern in enumerate(patterns)
         if _within_expansion_budget(pattern)
+        and (not shape_screened[i] or _affordable(pattern))
     ]
     if not eligible:
         return None, db_of
     try:
         fast = FastScan.build([pattern for _, pattern in eligible])
-    except Exception:
-        # An eligible pattern refused even approximation (zero-width
-        # constructs raise) or the combined compile failed; partition
-        # by probe so only the offenders fall back. A pattern must
-        # never break the epoch — the worst case is the stdlib path.
-        return _partition_body_scan(eligible, len(patterns))
-    for slot, (i, _pattern) in enumerate(eligible):
-        db_of[i] = slot
-    return fast, db_of
-
-
-def _partition_body_scan(
-    eligible: Sequence[tuple[int, re.Pattern[str]]], total: int
-) -> tuple[FastScan | None, list[int | None]]:
-    """The fallback compile: probe per pattern, build the survivors."""
-    db_of: list[int | None] = [None] * total
-    keep: list[re.Pattern[str]] = []
-    for i, pattern in eligible:
-        try:
-            FastScan.build((pattern,))
-        except Exception:  # noqa: S112 — refusal is the expected signal
-            continue  # refused even alone: stdlib residual
-        db_of[i] = len(keep)
-        keep.append(pattern)
-    if not keep:
+    except ValueError:
+        # Every eligible pattern refused even approximation; the whole
+        # epoch scans its body stage on the stdlib path.
         return None, db_of
-    try:
-        fast = FastScan.build(keep)
-    except Exception:
-        logger.exception(
-            "scanner body database compile failed;"
-            " the epoch scans its body stage on the stdlib path"
-        )
-        return None, [None] * total
+    refused = fast.refused
+    for slot, (i, _pattern) in enumerate(eligible):
+        if slot not in refused:
+            db_of[i] = slot
     return fast, db_of
 
 
@@ -221,14 +306,18 @@ class _RulesetEpoch:
     retroactively. ``layout`` maps each rule's body patterns to their
     database index — exact and approximated slots alike, their spans
     arrive confirmed — or ``None`` for the stdlib residuals
-    (``_compile_body_scan``). ``serial`` is the generation number the
-    body memo keys on (ticket 14): it rises with every mutation, so a
-    rule installed after a body was seen cannot be answered by that
-    body's cached results — the re-arrival misses the memo and scans
-    fresh, exactly as arrival-time install semantics demand.
+    (``_compile_body_scan``); ``corpus_layout`` does the same for each
+    dataset rule's declared body corpus (``Rule.body_corpus``), whose
+    patterns ride the same one database. ``serial`` is the generation
+    number the body memo keys on (ticket 14): it rises with every
+    mutation, so a rule installed after a body was seen cannot be
+    answered by that body's cached results — the re-arrival misses the
+    memo and scans fresh, exactly as arrival-time install semantics
+    demand.
     """
 
     __slots__ = (
+        "corpus_layout",
         "fast",
         "has_scan_overrides",
         "layout",
@@ -249,12 +338,23 @@ class _RulesetEpoch:
         )
         flat: list[re.Pattern[str]] = []
         rows: list[range] = []
+        corpus: list[re.Pattern[str]] = []
+        corpus_rows: list[range] = []
         for rule in self.rules:
             rows.append(range(len(flat), len(flat) + len(rule.body_patterns)))
             flat.extend(rule.body_patterns)
-        self.fast, db_of = _compile_body_scan(flat)
+            corpus_rows.append(
+                range(len(corpus), len(corpus) + len(rule.body_corpus()))
+            )
+            corpus.extend(rule.body_corpus())
+        self.fast, db_of = _compile_body_scan(
+            [*flat, *corpus], [False] * len(flat) + [True] * len(corpus)
+        )
         self.layout = tuple(tuple(db_of[i] for i in row) for row in rows)
-        self.scans_body = bool(flat)
+        self.corpus_layout = tuple(
+            tuple(db_of[len(flat) + i] for i in row) for row in corpus_rows
+        )
+        self.scans_body = bool(flat) or bool(corpus)
         # Worth reading a body for its digest at all: any declarative
         # body pattern, or any dataset rule whose scan() is memoized.
         self.memoizable = self.scans_body or self.has_scan_overrides
@@ -265,16 +365,23 @@ class _BodyStage(NamedTuple):
 
     ``body_evidence`` holds each rule's pre-gate body-stage result —
     evidence in the rule's body_patterns order — aligned with the
-    epoch's rules. Gates (statuses, content types, schemes, browser
-    attribution) are flow context, so they filter per flow after the
-    memo and the cached value serves every flow carrying the same
-    bytes byte-identically (ticket 14). ``error`` re-raises per rule
-    at the point the all-stdlib path raised it, so an unreadable body
-    still contained-skips exactly the rules it always did.
+    epoch's rules. ``corpus_spans`` holds, per rule with a declared
+    body corpus, each corpus pattern's confirmed spans over the body —
+    or ``None`` per pattern that did not ride the engine pass, and
+    ``None`` per rule without a corpus — aligned the same way; the
+    rule's ``scan()`` override reads them back through its
+    ``body_spans`` argument. Gates (statuses, content types, schemes,
+    browser attribution) are flow context, so they filter per flow
+    after the memo and the cached value serves every flow carrying
+    the same bytes byte-identically (ticket 14). ``error`` re-raises
+    per rule at the point the all-stdlib path raised it, so an
+    unreadable body still contained-skips exactly the rules it always
+    did.
     """
 
     error: Exception | None
     body_evidence: tuple[tuple[Evidence, ...], ...]
+    corpus_spans: tuple[tuple[Sequence[tuple[int, int]] | None, ...] | None, ...]
 
 
 class _StageKey(NamedTuple):
@@ -381,10 +488,20 @@ def _evidence_entry_bytes(evidence: Evidence) -> int:
 
 def _stage_size(stage: _BodyStage) -> int:
     """Estimated stored bytes of one stage entry."""
-    return 128 + sum(
-        _evidence_entry_bytes(evidence)
-        for per_rule in stage.body_evidence
-        for evidence in per_rule
+    return (
+        128
+        + sum(
+            _evidence_entry_bytes(evidence)
+            for per_rule in stage.body_evidence
+            for evidence in per_rule
+        )
+        + sum(
+            32 * len(spans)
+            for per_rule in stage.corpus_spans
+            if per_rule is not None
+            for spans in per_rule
+            if spans is not None
+        )
     )
 
 
@@ -610,7 +727,7 @@ class Scanner:
                 # the vendored data's extractors and per-advisory
                 # severities cannot fold into the declarative spec, so
                 # they hand back fully formed findings.
-                findings = self._scan_rule(rule, view, epoch, digest, index)
+                findings = self._scan_rule(rule, view, epoch, digest, index, stage)
                 if findings is not None:
                     for finding in findings:
                         self._emit(finding)
@@ -673,7 +790,7 @@ class Scanner:
         are not memoized — an unreadable body has no digest to key on.
         """
         if not epoch.scans_body:
-            return _BodyStage(None, ())
+            return _BodyStage(None, (), (None,) * len(epoch.rules))
         key = _StageKey(epoch.serial, digest) if digest is not None else None
         if key is not None:
             cached = self._memo.get(key)
@@ -692,12 +809,23 @@ class Scanner:
                     _rule_body_evidence(rule, layout, text, spans)
                     for rule, layout in zip(epoch.rules, epoch.layout, strict=True)
                 ),
+                tuple(
+                    None
+                    if not layout
+                    else tuple(
+                        tuple(spans[db])
+                        if db is not None and spans is not None
+                        else None
+                        for db in layout
+                    )
+                    for layout in epoch.corpus_layout
+                ),
             )
         except Exception as exc:
             # Read or scan failure (and a raising pattern, which the
             # old path contained per rule the same way): fail here
             # once, re-raise per rule — never memoized.
-            return _BodyStage(exc, ())
+            return _BodyStage(exc, (), (None,) * len(epoch.rules))
         if key is not None:
             self._memo.put(key, stage, _stage_size(stage))
         return stage
@@ -709,29 +837,35 @@ class Scanner:
         epoch: _RulesetEpoch,
         digest: bytes | None,
         index: int,
+        stage: _BodyStage,
     ) -> list[Finding] | None:
         """Run one rule's ``scan()`` override, memoized per body (ticket 14).
 
-        The override is an opaque body of work — the retire.js corpus
-        pass above all — so the memo caches its whole result under
-        (epoch, body digest, flow context, rule index) and re-stamps
-        each cached Finding with the current flow's id on replay: a
-        duplicate pays the digest read instead of the dataset scan,
-        and still records its own findings. The flow-context half of
-        the key (``_scan_context``) is everything such an override
-        lawfully reads per flow — its own gates (retire.js's
-        content-type screen) and the record's stable routing fields —
-        so a flow the override gates out never replays a gated-in
-        flow's findings.
+        The override receives its declared corpus patterns' confirmed
+        spans from the shared body stage (``body_spans``); the rest is
+        an opaque body of work — the retire.js extractors above all —
+        so the memo caches its whole result under (epoch, body digest,
+        flow context, rule index) and re-stamps each cached Finding
+        with the current flow's id on replay: a duplicate pays the
+        digest read instead of the dataset scan, and still records its
+        own findings. The flow-context half of the key
+        (``_scan_context``) is everything such an override lawfully
+        reads per flow — its own gates (retire.js's content-type
+        screen) and the record's stable routing fields — so a flow the
+        override gates out never replays a gated-in flow's findings.
         """
+        body_spans = stage.corpus_spans[index]
+        # The spans argument arrives exactly when the rule declared a
+        # corpus — a plain ``scan(view)`` override never sees it.
+        args = (body_spans,) if body_spans is not None else ()
         if digest is None or type(rule).scan is Rule.scan:
-            return rule.scan(view)
+            return rule.scan(view, *args)
         key = _ScanKey(epoch.serial, digest, _scan_context(view), index)
         cached = self._memo.get(key)
         if cached is not _MEMO_MISS:
             flow_id = str(view.record.get("id", "?"))
             return [replace(finding, flow_id=flow_id) for finding in cached]
-        findings = rule.scan(view)
+        findings = rule.scan(view, *args)
         if findings is not None:
             frozen = tuple(findings)
             self._memo.put(key, frozen, _findings_size(frozen))

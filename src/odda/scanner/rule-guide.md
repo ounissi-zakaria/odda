@@ -142,6 +142,23 @@ is exactly this shape: a vendored dataset riding in the slot directory,
 hash/name/content extractors inside `scan`, per-advisory severities
 with the highest matched one winning.
 
+### Declaring a body corpus
+
+A dataset rule whose body check is "match these patterns" declares
+the patterns instead of scanning them itself:
+
+- Override `body_corpus()` to return the compiled patterns, in the
+  order `scan` consumes them.
+- The engine compiles them into the one body-stage database every
+  rule's body patterns share — one GIL-released engine pass per body
+  answers them all — and passes their spans to `scan` as a second
+  argument: `def scan(self, view, body_spans)`. The argument arrives
+  exactly when a corpus was declared; one entry per pattern, aligned
+  with `body_corpus()`: that pattern's match spans over the body
+  (identical to its `finditer`), or `None` when the pattern did not
+  ride the engine pass (over-budget or engine-refused shapes) and
+  must be scanned inside `scan`, behind its literal gates.
+
 ## FlowView — what a scan() override can read
 
 `scan(self, view: FlowView)` receives one flow's captured material.

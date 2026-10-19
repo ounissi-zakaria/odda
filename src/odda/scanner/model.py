@@ -23,6 +23,7 @@ from urllib.parse import parse_qsl, urlsplit
 from odda.scanner.fastscan import read_chunked
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 
@@ -161,8 +162,37 @@ class Rule:
             self, "request_header_patterns", _compile(self.request_header_patterns)
         )
 
-    def scan(self, view: FlowView) -> list[Finding] | None:  # noqa: ARG002
-        """Declarative rules return ``None``; dataset-backed rules override."""
+    def body_corpus(self) -> tuple[re.Pattern[str], ...]:
+        """Body patterns the engine scans on this rule's behalf.
+
+        Dataset-backed rules (``scan`` overrides) declare here the
+        body patterns they would otherwise scan themselves: the engine
+        compiles them into the epoch's one body-stage database and
+        hands each pattern's confirmed spans back through ``scan``'s
+        ``body_spans`` argument. Patterns the engine refuses (over
+        budget, zero-width-capable) arrive as ``None`` entries — scan
+        them inside ``scan``, behind their literal gates.
+        """
+        return ()
+
+    def scan(
+        self,
+        view: FlowView,  # noqa: ARG002
+        body_spans: tuple[Sequence[tuple[int, int]] | None, ...] | None = None,  # noqa: ARG002
+    ) -> list[Finding] | None:
+        """Declarative rules return ``None``; dataset-backed rules override.
+
+        ``body_spans`` aligns with :meth:`body_corpus` — one entry per
+        declared pattern: its confirmed spans over the flow's body
+        (the stdlib find-iterator's own, engine-exact and approximated
+        alike), or ``None`` when that pattern did not ride the engine
+        pass and must be scanned here. The engine passes the argument
+        exactly when the rule declares a corpus — a plain
+        ``scan(view)`` override never sees it. Returning ``None``
+        hands the flow to the
+        declared matchers and gates; returning a list — empty included
+        — is authoritative.
+        """
         return None
 
 
