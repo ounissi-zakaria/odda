@@ -135,7 +135,10 @@ def _compile_body_scan(
     whose ``FastScan.build`` raises). Patterns the engine can only
     approximate ride too (ticket 13): their spans come back confirmed
     — approximation prefilter, stdlib confirm on the hit — so they are
-    indistinguishable from exact slots in the layout.
+    indistinguishable from exact slots in the layout. The prefilter
+    pass costs one whole-body encode plus its engine scan; it is
+    load-bearing as the confirm gate, and an epoch with no approximated
+    patterns builds no prefilter database at all.
     """
     db_of: list[int | None] = [None] * len(patterns)
     eligible = [

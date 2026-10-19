@@ -521,10 +521,12 @@ class FlowView:
         """The stored response body, or ``None`` when none was stored.
 
         Large bodies read and decode in GIL-dropping chunks (see
-        ``_GIL_CHUNK``): one 10 MB ``read_bytes`` + ``decode`` is a
-        pair of uninterruptible C calls that would stall the event
-        loop serving the drain. The incremental decoder is exactly
-        equivalent to the one-shot lenient decode.
+        ``_GIL_CHUNK``). The one-shot lenient decode is a single
+        state-machine pass over the whole body — the most expensive
+        whole-body C call on this path — while the chunked shape pays
+        only its final str-join memcpy (~half the cost, measured) as
+        the single uninterruptible op, then hands the loop the GIL
+        before the next whole-body op can stack behind it.
         """
         if self._body is None:
             body_file = self.record.get("body_file")
@@ -582,4 +584,9 @@ class FlowView:
                 parts.append(decoder.decode(chunk))
                 time.sleep(0)  # offer the loop thread the GIL between slices
         parts.append(decoder.decode(b"", final=True))
-        return "".join(parts)
+        body = "".join(parts)
+        # The join is the one whole-body copy this path cannot avoid;
+        # hand the loop the GIL right after it instead of stacking the
+        # next whole-body op behind it inside one GIL hold.
+        time.sleep(0)
+        return body

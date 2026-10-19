@@ -368,21 +368,30 @@ def _char_ends(data: bytes, byte_ends: Sequence[int]) -> list[int]:
 _REVERSE_CHUNK = 1 << 18
 
 
-def _reversed_utf8(text: str) -> bytes:
-    """UTF-8 bytes of the reversed text, in GIL-yielding chunks.
+def _reversed_utf8(text: str) -> bytes | bytearray:
+    """UTF-8 bytes of the reversed text, in GIL-yielding slices.
 
     Byte-identical to ``text[::-1].encode()``: slices are character-
     wise, so no code point is ever split, and the reversed image of a
     concatenation is the concatenation of the reversed images in
-    reverse order.
+    reverse order. Large texts assemble into one preallocated buffer,
+    slice by slice with the GIL offered between writes — the engine
+    scans any bytes-like buffer, so no final whole-body join copy is
+    ever materialized.
     """
     if len(text) <= _REVERSE_CHUNK:
         return text[::-1].encode()
-    parts = []
-    for start in range(0, len(text), _REVERSE_CHUNK):
-        parts.append(text[start : start + _REVERSE_CHUNK][::-1].encode())
+    parts = [
+        text[start : start + _REVERSE_CHUNK][::-1].encode()
+        for start in range(0, len(text), _REVERSE_CHUNK)
+    ]
+    data = bytearray(sum(len(part) for part in parts))
+    pos = 0
+    for part in reversed(parts):
+        data[pos : pos + len(part)] = part
+        pos += len(part)
         time.sleep(0)  # offer the loop thread the GIL between slices
-    return b"".join(reversed(parts))
+    return data
 
 
 def _confirmed_spans(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
