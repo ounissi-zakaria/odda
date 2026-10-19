@@ -579,6 +579,11 @@ class Scanner:
         # wholesale — cached results can never answer for a ruleset
         # generation that no longer exists.
         self._memo = _BodyMemo(_MEMO_BUDGET_BYTES, _MEMO_MAX_ENTRIES)
+        # Serializes ruleset mutations (register/deregister): the
+        # epoch build they carry can run on a worker thread (the
+        # user-rule manager's off-loop install), and concurrent
+        # registrations must build one at a time, in order.
+        self._build_lock = threading.Lock()
         self._queue: queue.SimpleQueue[tuple[dict[str, Any], _RulesetEpoch]] = (
             queue.SimpleQueue()
         )
@@ -613,22 +618,25 @@ class Scanner:
     def register_rules(self, rules: Sequence[Rule]) -> None:
         """Add rules to the live set (the user-rule install path).
 
-        Callers run on the event-loop thread (MCP tool handlers, the
-        boot scan); the drain scans each flow in a worker thread, one
-        at a time between awaits, and queued entries keep their
-        arrival-time snapshots, so the set is never observed
-        mid-mutation. Applies forward only: flows that arrived before
-        the registration never match the new rules. Registering builds
-        the next ruleset epoch — the new rules' body patterns compile
-        into a fresh database on this thread, off the scan path (the
-        drain keeps scanning queued entries against the epochs they
-        arrived under) — and the body memo clears with it: every memo
-        key carries the epoch serial (ticket 14).
+        Applies forward only: flows that arrived before the
+        registration never match the new rules. Registering builds
+        the next ruleset epoch — the rules' body patterns and declared
+        corpora compile into a fresh database — and the body memo
+        clears with it: every memo key carries the epoch serial
+        (ticket 14). The build can cost seconds (a dataset corpus
+        compiles pattern by pattern), so the user-rule manager runs
+        it off the event loop via a worker thread; ``_build_lock``
+        keeps registrations serialized whichever thread they arrive
+        on — one build at a time, monotonic serials, the epoch
+        pointer swapped whole — so the drain's queued entries always
+        carry a consistent snapshot, and a registration racing the
+        drain never mixes a rules list with a later epoch's database.
         """
-        self._rules.extend(rules)
-        self._epoch_serial += 1
-        self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
-        self._memo.clear()
+        with self._build_lock:
+            self._rules.extend(rules)
+            self._epoch_serial += 1
+            self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
+            self._memo.clear()
 
     def deregister_rules(self, rule_ids: AbstractSet[str]) -> None:
         """Drop every live rule whose id is in ``rule_ids`` (the remove path).
@@ -636,13 +644,15 @@ class Scanner:
         Flows already queued keep their arrival-time snapshot; findings
         already recorded are never retracted — removal stops future
         findings only — and the next ruleset epoch compiles without
-        the removed rules' patterns, clearing the body memo with it
-        (every memo key carries the epoch serial, ticket 14).
+        the removed rules' patterns (under ``_build_lock``, like every
+        registration), clearing the body memo with it (every memo key
+        carries the epoch serial, ticket 14).
         """
-        self._rules = [rule for rule in self._rules if rule.id not in rule_ids]
-        self._epoch_serial += 1
-        self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
-        self._memo.clear()
+        with self._build_lock:
+            self._rules = [rule for rule in self._rules if rule.id not in rule_ids]
+            self._epoch_serial += 1
+            self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
+            self._memo.clear()
 
     async def run(self) -> None:
         """Drain queued flow records against the rules until cancelled.

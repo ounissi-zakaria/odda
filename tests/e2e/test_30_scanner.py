@@ -2268,6 +2268,59 @@ async def test_multi_mb_engine_body_scan_keeps_loop_at_millisecond_cadence(
     assert max(gaps) < ceiling, f"loop stalled {max(gaps):.3f}s during the drain"
 
 
+async def test_mid_session_rule_install_keeps_loop_live(
+    odda_session,
+) -> None:
+    """A mid-session rule_install of the full retire.js slot (the
+    207-pattern dataset corpus) compiles its ruleset epoch off the
+    event loop: while the install is in flight, a heartbeat task on
+    the session's own loop keeps its ~5 ms cadence — the corpus
+    compile measured at ~1.2 s on this box would otherwise stall
+    every concurrent tool call (13x the accepted ticket-12 install
+    budget) — and the install still lands: the slot's rule registers
+    live."""
+    async with odda_session() as h:
+        beats: list[tuple[float, float]] = []
+
+        async def heartbeat() -> None:
+            last = time.monotonic()
+            while True:
+                await asyncio.sleep(0.005)
+                now = time.monotonic()
+                beats.append((now, now - last))
+                last = now
+
+        hb = asyncio.create_task(heartbeat())
+        await asyncio.sleep(0.05)  # warm-up beats
+
+        window_start = time.monotonic()
+        installed = await h.call(
+            "rule_install",
+            {"name": "retirejs", "file": str(_RULES_SRC / "retirejs" / "rule.py")},
+        )
+        window_end = time.monotonic()
+        await asyncio.sleep(0.05)  # post-install beats
+
+        hb.cancel()
+        await asyncio.gather(hb, return_exceptions=True)
+
+        assert installed["rules"] == ["js.outdated-library"]
+        listing = await h.call_json("rule_list", {})
+        assert any(row["id"] == "js.outdated-library" for row in listing)
+
+        gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
+        assert gaps, "heartbeat never beat during the install window"
+        # The install-path ceiling: the epoch build runs in a worker
+        # thread (serial installs, one build at a time), so the loop's
+        # worst gap is the manager's on-loop bookkeeping, not the
+        # compile. What the ceiling must catch is the regression: the
+        # on-loop build froze the loop for the whole ~1.2 s compile.
+        # Under the suite's 3-worker xdist load the same bookkeeping
+        # ops stretch, so the parallel ceiling leaves room for it.
+        ceiling = 0.5 if os.environ.get("PYTEST_XDIST_WORKER") else 0.15
+        assert max(gaps) < ceiling, f"loop stalled {max(gaps):.3f}s during install"
+
+
 # --- ticket 12: the engine drains the body stage ---
 
 

@@ -1118,7 +1118,7 @@ async def rule_install(
         raise ToolParamError(
             f"Rule slot '{name}' already installed. Use force to overwrite."
         )
-    return user_rules.install(name, py, assets_from=file)
+    return await user_rules.install(name, py, assets_from=file)
 
 
 @mcp_server.tool(structured_output=False)
@@ -1132,7 +1132,7 @@ async def rule_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
 @odda_tool
 async def rule_remove(name: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
     """Remove a rule slot: live rules stop, past findings remain."""
-    return ctx.request_context.lifespan_context.user_rules.remove(name)
+    return await ctx.request_context.lifespan_context.user_rules.remove(name)
 
 
 def main() -> None:
