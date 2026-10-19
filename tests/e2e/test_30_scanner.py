@@ -35,6 +35,7 @@ from tests.e2e.conftest import (
     _findings_index,
     _seed_slot,
     _slot_rules,
+    _stored_flow,
     curl,
     dyn_server,
     fixture_site,
@@ -1964,34 +1965,6 @@ class _SlowRule(Rule):
                 evidence=(Evidence(where="response_body", offset=0, detail="slow"),),
             )
         ]
-
-
-def _stored_flow(
-    data_dir: Path,
-    flow_id: str,
-    body: bytes = b"payload",
-    content_type: str = "text/plain",
-) -> dict:
-    """Write one flow's stored files and return its index record."""
-    flow_dir = data_dir / "flows" / flow_id
-    flow_dir.mkdir(parents=True)
-    (flow_dir / "response_body.txt").write_bytes(body)
-    (flow_dir / "response_headers").write_bytes(
-        b"HTTP/1.1 200 OK\r\nContent-Type: " + content_type.encode() + b"\r\n\r\n"
-    )
-    return {
-        "id": flow_id,
-        "method": "GET",
-        "scheme": "http",
-        "host": "fixture.local",
-        "port": 80,
-        "path": f"/{flow_id}.txt",
-        "browser_id": None,
-        "status_code": 200,
-        "total_duration_ms": 1.0,
-        "body_file": f"flows/{flow_id}/response_body.txt",
-        "error": None,
-    }
 
 
 async def test_drain_keeps_loop_live_and_ordered_during_slow_scans(
