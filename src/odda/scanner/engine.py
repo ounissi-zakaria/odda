@@ -58,8 +58,6 @@ if TYPE_CHECKING:
     import re
     from collections.abc import AbstractSet, Sequence
 
-    from odda.scanner.model import Correlator
-
 logger = logging.getLogger(__name__)
 
 # Matched text kept per evidence entry — enough to identify and grep,
@@ -471,12 +469,7 @@ class Scanner:
     reads captured material and writes the findings index.
     """
 
-    def __init__(
-        self,
-        data_dir: Path,
-        rules: Sequence[Rule] = (),
-        correlators: Sequence[Correlator] = (),
-    ) -> None:
+    def __init__(self, data_dir: Path, rules: Sequence[Rule] = ()) -> None:
         """Initialize with the session's data dir and the ruleset.
 
         Args:
@@ -484,7 +477,6 @@ class Scanner:
                 subtree (``scanner/findings.jsonl``) appears lazily
                 under it on the first finding.
             rules: Rules every observed flow is checked against.
-            correlators: Cross-flow analysis seam (none ship).
         """
         self._data_dir = Path(data_dir)
         # Mutable live set: register/deregister (user-rule installs and
@@ -503,7 +495,6 @@ class Scanner:
         # wholesale — cached results can never answer for a ruleset
         # generation that no longer exists.
         self._memo = _BodyMemo(_MEMO_BUDGET_BYTES, _MEMO_MAX_ENTRIES)
-        self._correlators: tuple[Correlator, ...] = tuple(correlators)
         self._queue: queue.SimpleQueue[tuple[dict[str, Any], _RulesetEpoch]] = (
             queue.SimpleQueue()
         )
@@ -641,18 +632,6 @@ class Scanner:
                         refs=rule.refs,
                     )
                 )
-        for correlator in self._correlators:
-            try:
-                findings = correlator.observe(view)
-            except Exception:
-                logger.exception(
-                    "scanner correlator %r failed on flow %s; skipped",
-                    correlator.id,
-                    flow_id,
-                )
-                continue
-            for finding in findings:
-                self._emit(finding)
 
     def _body_digest(self, view: FlowView) -> bytes | None:
         """Digest of the flow's stored body bytes, or ``None``.

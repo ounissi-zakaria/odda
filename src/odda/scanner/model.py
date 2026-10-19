@@ -7,8 +7,7 @@ across odda upgrades (new optional fields, never renames).
 
 The match spec is declarative: regex patterns matched against the
 flow's stored material, with gates that restrict which flows a rule
-sees. A correlator seam exists for future cross-flow analysis; none
-ship.
+sees.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import re
 import time
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qsl, urlsplit
 
 from odda.scanner.fastscan import read_chunked
@@ -175,23 +174,6 @@ def _compile(
         p if isinstance(p, re.Pattern) else re.compile(p, re.MULTILINE)
         for p in patterns
     )
-
-
-class Correlator(Protocol):
-    """Cross-flow analysis seam: observes flows, may emit findings.
-
-    Where a rule sees one flow in isolation, a correlator keeps state
-    across observations and reports patterns over time (findings it
-    returns reference the flow that triggered them). Zero correlators
-    ship; the seam exists so cross-flow checks arrive without another
-    interface change.
-    """
-
-    id: str
-
-    def observe(self, view: FlowView) -> list[Finding]:
-        """Observe one flow view; return findings to record (if any)."""
-        ...
 
 
 class _ParsedRequest(NamedTuple):
