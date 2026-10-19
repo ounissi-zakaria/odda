@@ -5,7 +5,6 @@
 - MCP is the surface: `odda mcp` is the *only* odda process. The MCP server's lifespan owns the proxy, the browser manager, and the flow store; the harness spawns one process per agent session.
 - The remaining CLI surface is helpers: `odda mcp` (the server) and `odda init-chrome-profile` (interactive, human-run — configures the base profile Chrome sessions are seeded from); the version probe is the `--version`/`-V` flag, not a subcommand.
 - Response bodies and `flows.jsonl` are stored in `.odda/` under the MCP process's working directory.
-- While a session lives, every flow it captures is passively scanned as it lands — zero egress (nothing is ever sent), forward-only (flows predating the session are never scanned) — and findings append to `.odda/scanner/findings.jsonl`. No rules ship with odda: the scanner boots with an empty ruleset, and every rule lives in a slot in the global rules dir under the config home (the repo's `rules/` tree holds the converted corpus as installable slot sources).
 
 ## Build / run
 
