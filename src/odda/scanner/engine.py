@@ -128,9 +128,12 @@ def _compile_body_scan(
     Returns the database (``None`` when nothing rides it) and, per
     input pattern, its index into the database — or ``None`` for the
     stdlib residuals: over-budget patterns (``_EXPANSION_MAX``),
-    patterns the engine refused to scan exactly (its approximate
-    prefilters — their spans stay unused until ticket 13's
-    confirm-on-hit), and patterns that refuse even approximation.
+    patterns the engine refused to scan exactly, and patterns that
+    refuse even approximation. Refused patterns stay out of the
+    database entirely: their approximate-prefilter spans are supersets
+    this ticket discards (ticket 13's confirm-on-hit is what turns
+    them back on), and a prefilter pass over every body — with the
+    whole-body encode it costs — would be dead work on the scan path.
     """
     db_of: list[int | None] = [None] * len(patterns)
     eligible = [
@@ -140,21 +143,47 @@ def _compile_body_scan(
     ]
     if not eligible:
         return None, db_of
-    try:
-        fast = FastScan.build([pattern for _, pattern in eligible])
-    except Exception:
+    keep, fast = _exact_only_with_indices(eligible)
+    if fast is None:
         # An eligible pattern refused even approximation (zero-width
         # constructs raise) or the combined compile failed; partition
         # by probe so only the offenders fall back. A pattern must
         # never break the epoch — the worst case is the stdlib path.
         return _partition_body_scan(eligible, len(patterns))
-    refused = fast.prefiltered
-    for slot, (i, _pattern) in enumerate(eligible):
-        if slot not in refused:
-            db_of[i] = slot
+    for slot, (i, _pattern) in enumerate(keep):
+        db_of[i] = slot
     if all(d is None for d in db_of):
         return None, db_of
     return fast, db_of
+
+
+def _exact_only_with_indices(
+    eligible: Sequence[tuple[int, re.Pattern[str]]],
+) -> tuple[list[tuple[int, re.Pattern[str]]], FastScan | None]:
+    """Build a database holding only engine-exact patterns.
+
+    A first build that reports approximate prefilters drops them and
+    rebuilds, so nothing rides the database whose spans would be
+    discarded. Returns the survivors (original indices kept) and the
+    database, or ``([], None)`` when nothing is left or a compile
+    refuses.
+    """
+    keep = list(eligible)
+    try:
+        fast = FastScan.build([pattern for _, pattern in keep])
+    except Exception:
+        return keep, None
+    if fast.prefiltered:
+        keep = [
+            entry for slot, entry in enumerate(keep) if slot not in fast.prefiltered
+        ]
+        if not keep:
+            return keep, None
+        try:
+            fast = FastScan.build([pattern for _, pattern in keep])
+        except Exception:
+            return keep, None
+    return keep, fast
 
 
 def _partition_body_scan(
