@@ -38,3 +38,23 @@ someone meets nuclei templates, and the absent CSP check looks like an
 omission rather than a bar — without this record, both pull toward an
 interpreter and a noise profile the scanner was explicitly shaped to
 avoid.
+
+
+## Amendment (2026-10-19): the pinned surface is binary-free and covers what slots import
+
+The contract module `odda.scanner` pins exactly: `Rule`, `FlowView`,
+`Finding`, `Evidence`, `Severity`, and `passes_literal_gates` (the
+necessary-literal gate every dataset rule runs in front of its stdlib
+residual patterns — the one name real slots imported from an
+unpinned internal module). Model and gates import only a small
+binary-free leaf (`odda.scanner.plumbing` — the guarded sre parse
+pair and the GIL-cadenced chunk iteration), so importing the author
+surface never pulls the Vectorscan extension; `fastscan` keeps the
+engine and its `hyperscan` import, engine-internal only. Dataset
+rules declare their body corpora via `Rule.body_corpus()` and read
+per-pattern results through `Rule.scan`'s `body_spans` argument, and
+the flow context a `scan()` override may lawfully gate on is
+`FlowView.dataset_facet` — the memo keys on exactly it, and reads
+beyond it are never memoized. The correlator seam (never fed, never
+shipped) is gone; re-adding it with a real consumer would be
+additive by this ADR's own rule.

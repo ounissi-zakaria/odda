@@ -58,14 +58,19 @@ from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from odda.scanner import Evidence, Finding, FlowView, Rule, Severity
-
 # The necessary-literal gate is the scanner's own pre-regex
 # optimization (a gate miss skips the linear scan over a multi-MB
-# body), and odda.scanner.gates is its public seam: this adapter
-# keeps it in front of every stdlib residual the engine pass leaves
-# behind (build-refused and over-budget shapes).
-from odda.scanner.gates import passes_literal_gates
+# body) and a pinned contract name: this adapter keeps it in front
+# of every stdlib residual the engine pass leaves behind
+# (build-refused and over-budget shapes).
+from odda.scanner import (
+    Evidence,
+    Finding,
+    FlowView,
+    Rule,
+    Severity,
+    passes_literal_gates,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

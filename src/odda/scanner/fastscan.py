@@ -53,44 +53,22 @@ approximate — above all patterns that can match the empty string, where
 refused at build with a ``ValueError`` naming the pattern; callers run
 those on the stdlib path outright.
 
-Shared scan plumbing
-====================
-
-This module is also the scanner's shared plumbing home, imported by the
-literal gates (``odda.scanner.gates``), the engine, and rule slots: the
-one guarded private-parser pair (:data:`sre_constants`, :func:`sre_parse`)
-every pattern-walking part parses through, and the GIL-cadenced chunk
-iteration (:func:`chunked`, :func:`read_chunked`) the fold, containment,
-decode, reversal, and digest passes run through.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-import time
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, NamedTuple
 
 import hyperscan
+
+from odda.scanner.plumbing import GIL_CHUNK, chunked, sre_constants, sre_parse
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
-    from pathlib import Path
-
-try:  # The scanner's one private-parser import guard (private API, but
-    # the only parser shipped): the literal gates, the engine's
-    # expansion screen, and slot shape screens all parse patterns
-    # through this pair. A missing module just turns every consumer
-    # off — gates pass, patterns stay on the stdlib path.
-    from re import _constants as sre_constants
-    from re._parser import parse as sre_parse
-except ImportError:  # pragma: no cover
-    sre_constants = None  # type: ignore[assignment]
-    sre_parse = None  # type: ignore[assignment]
-
-_T = TypeVar("_T")
+    from collections.abc import Sequence
 
 # Anchor translation for the reversed expression. ``$`` becomes ``^`` (and
 # forces MULTILINE, whose "after any newline" is a superset of the reversed
@@ -390,55 +368,6 @@ def _char_ends(data: bytes, byte_ends: Sequence[int]) -> list[int]:
         byte_at = end
         out.append(chars_at)
     return out
-
-
-# Slice length of the shared GIL cadence (see ``chunked``): one 10 MB
-# text pass is a single uninterruptible C call that stalls the event
-# loop serving the drain for its whole duration; the slices drop the
-# GIL between chunks, so the loop keeps its cadence whatever the body
-# size (ticket 12's numbers contract).
-GIL_CHUNK = 1 << 18
-
-
-def chunked(
-    items: Sequence[_T], chunk: int = GIL_CHUNK, *, step: int | None = None
-) -> Iterator[_T]:
-    """Yield ``items`` in bounded slices, offering the GIL between them.
-
-    The GIL-yield contract every chunked scan pass shares (folds,
-    containment windows, decodes, reversals): each slice keeps the
-    caller's work one short C call, and this generator sleeps zero
-    after every yield, so the event loop serving the drain regains the
-    GIL between slices and keeps its cadence whatever the body size.
-    A caller returning early abandons the generator — no trailing
-    sleep, no cleanup to run.
-
-    Args:
-        items: The sequence to slice (a ``str`` slices into ``str``).
-        chunk: Slice length; the shared GIL cadence by default.
-        step: Distance between slice starts (``chunk`` by default).
-            Below ``chunk`` the slices overlap — window scans pass
-            ``chunk - len(needle) + 1`` so an occurrence straddling a
-            boundary is never missed.
-    """
-    stride = chunk if step is None else step
-    for start in range(0, len(items), stride):
-        yield items[start : start + chunk]
-        time.sleep(0)  # offer the loop thread the GIL between slices
-
-
-def read_chunked(path: Path, chunk: int = GIL_CHUNK) -> Iterator[bytes]:
-    """Read a stored file in bounded chunks, offering the GIL between.
-
-    The same GIL-yield contract as :func:`chunked`, over a file: each
-    read is one bounded C call and the generator sleeps zero after
-    every yield. The handle closes when the generator is exhausted or
-    abandoned (a generator's ``with`` closes on collection).
-    """
-    with path.open("rb") as handle:
-        while data := handle.read(chunk):
-            yield data
-            time.sleep(0)  # offer the loop thread the GIL between reads
 
 
 def _reversed_utf8(text: str) -> bytes | bytearray:

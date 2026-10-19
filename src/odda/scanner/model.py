@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 from urllib.parse import parse_qsl, urlsplit
 
-from odda.scanner.fastscan import read_chunked
+from odda.scanner.plumbing import read_chunked
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence

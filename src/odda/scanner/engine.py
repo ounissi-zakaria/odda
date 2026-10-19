@@ -50,9 +50,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from odda.scanner.fastscan import FastScan, read_chunked, sre_constants, sre_parse
+from odda.scanner.fastscan import FastScan
 from odda.scanner.gates import passes_literal_gates
 from odda.scanner.model import Evidence, Finding, FlowView, Rule
+from odda.scanner.plumbing import read_chunked, sre_constants, sre_parse
 
 if TYPE_CHECKING:
     import re

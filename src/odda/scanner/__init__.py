@@ -9,6 +9,7 @@ lifespan), not part of the author surface.
 
 from __future__ import annotations
 
+from odda.scanner.gates import passes_literal_gates
 from odda.scanner.model import Evidence, Finding, FlowView, Rule, Severity
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "FlowView",
     "Rule",
     "Severity",
+    "passes_literal_gates",
 ]
