@@ -677,15 +677,18 @@ class Scanner:
                 if text is not None and epoch.fast is not None
                 else None
             )
+            stage = _BodyStage(
+                None,
+                tuple(
+                    _rule_body_evidence(rule, layout, text, spans)
+                    for rule, layout in zip(epoch.rules, epoch.layout, strict=True)
+                ),
+            )
         except Exception as exc:
+            # Read or scan failure (and a raising pattern, which the
+            # old path contained per rule the same way): fail here
+            # once, re-raise per rule — never memoized.
             return _BodyStage(exc, ())
-        stage = _BodyStage(
-            None,
-            tuple(
-                _rule_body_evidence(rule, layout, text, spans)
-                for rule, layout in zip(epoch.rules, epoch.layout, strict=True)
-            ),
-        )
         if key is not None:
             self._memo.put(key, stage, _stage_size(stage))
         return stage
