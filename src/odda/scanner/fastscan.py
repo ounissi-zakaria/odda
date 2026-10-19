@@ -53,41 +53,22 @@ approximate — above all patterns that can match the empty string, where
 refused at build with a ``ValueError`` naming the pattern; callers run
 those on the stdlib path outright.
 
-Shared scan plumbing
-====================
-
-This module is also the scanner's shared plumbing home, imported by the
-literal gates (``odda.scanner.gates``), the engine, and rule slots: the
-one guarded private-parser pair (:data:`sre_constants`, :func:`sre_parse`)
-every pattern-walking part parses through, and the GIL-cadenced chunk
-iteration (:func:`chunked`, :func:`read_chunked`) the fold, containment,
-decode, reversal, and digest passes run through.
 """
 
 from __future__ import annotations
 
+import logging
 import re
-import time
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, NamedTuple
 
 import hyperscan
 
+from odda.scanner.plumbing import GIL_CHUNK, chunked, sre_constants, sre_parse
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
-    from pathlib import Path
-
-try:  # The scanner's one private-parser import guard (private API, but
-    # the only parser shipped): the literal gates, the engine's
-    # expansion screen, and slot shape screens all parse patterns
-    # through this pair. A missing module just turns every consumer
-    # off — gates pass, patterns stay on the stdlib path.
-    from re import _constants as sre_constants
-    from re._parser import parse as sre_parse
-except ImportError:  # pragma: no cover
-    sre_constants = None  # type: ignore[assignment]
-    sre_parse = None  # type: ignore[assignment]
-
-_T = TypeVar("_T")
+    from collections.abc import Sequence
 
 # Anchor translation for the reversed expression. ``$`` becomes ``^`` (and
 # forces MULTILINE, whose "after any newline" is a superset of the reversed
@@ -389,55 +370,6 @@ def _char_ends(data: bytes, byte_ends: Sequence[int]) -> list[int]:
     return out
 
 
-# Slice length of the shared GIL cadence (see ``chunked``): one 10 MB
-# text pass is a single uninterruptible C call that stalls the event
-# loop serving the drain for its whole duration; the slices drop the
-# GIL between chunks, so the loop keeps its cadence whatever the body
-# size (ticket 12's numbers contract).
-GIL_CHUNK = 1 << 18
-
-
-def chunked(
-    items: Sequence[_T], chunk: int = GIL_CHUNK, *, step: int | None = None
-) -> Iterator[_T]:
-    """Yield ``items`` in bounded slices, offering the GIL between them.
-
-    The GIL-yield contract every chunked scan pass shares (folds,
-    containment windows, decodes, reversals): each slice keeps the
-    caller's work one short C call, and this generator sleeps zero
-    after every yield, so the event loop serving the drain regains the
-    GIL between slices and keeps its cadence whatever the body size.
-    A caller returning early abandons the generator — no trailing
-    sleep, no cleanup to run.
-
-    Args:
-        items: The sequence to slice (a ``str`` slices into ``str``).
-        chunk: Slice length; the shared GIL cadence by default.
-        step: Distance between slice starts (``chunk`` by default).
-            Below ``chunk`` the slices overlap — window scans pass
-            ``chunk - len(needle) + 1`` so an occurrence straddling a
-            boundary is never missed.
-    """
-    stride = chunk if step is None else step
-    for start in range(0, len(items), stride):
-        yield items[start : start + chunk]
-        time.sleep(0)  # offer the loop thread the GIL between slices
-
-
-def read_chunked(path: Path, chunk: int = GIL_CHUNK) -> Iterator[bytes]:
-    """Read a stored file in bounded chunks, offering the GIL between.
-
-    The same GIL-yield contract as :func:`chunked`, over a file: each
-    read is one bounded C call and the generator sleeps zero after
-    every yield. The handle closes when the generator is exhausted or
-    abandoned (a generator's ``with`` closes on collection).
-    """
-    with path.open("rb") as handle:
-        while data := handle.read(chunk):
-            yield data
-            time.sleep(0)  # offer the loop thread the GIL between reads
-
-
 def _reversed_utf8(text: str) -> bytes | bytearray:
     """UTF-8 bytes of the reversed text, in GIL-yielding slices.
 
@@ -508,6 +440,72 @@ class _Pre:
         self.pattern = pattern
 
 
+class _Fate(NamedTuple):
+    """One pattern's build classification (exactly one arm populated).
+
+    Fields:
+        exact: The engine-exact spec, when the reversed expression
+            compiles (with its source and flags).
+        prefilter: The approximate-prefilter spec, when only the
+            approximation compiles (with its source and flags).
+        refusal: The error naming the pattern when neither stands —
+            the caller refuses it.
+    """
+
+    exact: _Exact | None
+    exact_source: str | None
+    exact_flags: int
+    prefilter: _Pre | None
+    prefilter_source: str | None
+    prefilter_flags: int
+    refusal: ValueError | None
+
+
+def _classify_pattern(index: int, pattern: re.Pattern) -> _Fate:
+    """One pattern's fate: exact, prefiltered, or the refusal error."""
+    try:
+        source, hs_flags, unicode_classes, fold = _reverse_expression(pattern)
+    except _UnsupportedError:
+        source = None
+    if source is not None:
+        try:
+            _compile([source], [hs_flags])
+        except hyperscan.error:
+            source = None
+        else:
+            return _Fate(
+                _Exact(
+                    index,
+                    pattern,
+                    unicode_classes=unicode_classes,
+                    fold_sensitive=fold,
+                ),
+                source,
+                hs_flags,
+                None,
+                None,
+                0,
+                None,
+            )
+    pf_source, pf_flags = _prefilter_expression(pattern)
+    try:
+        _compile([pf_source], [pf_flags])
+    except hyperscan.error as exc:
+        return _Fate(
+            None,
+            None,
+            0,
+            None,
+            None,
+            0,
+            ValueError(
+                f"fast-scan cannot compile or approximate pattern"
+                f" {index}: {pattern.pattern!r} ({exc})"
+            ),
+        )
+    return _Fate(None, None, 0, _Pre(index, pattern), pf_source, pf_flags, None)
+
+
 class FastScan:
     """Multi-pattern find-all: patterns in, per-pattern spans out.
 
@@ -524,6 +522,7 @@ class FastScan:
         "_patterns",
         "_prefilter_db",
         "_prefilters",
+        "_refused",
     )
 
     def __init__(
@@ -533,6 +532,7 @@ class FastScan:
         exact_db: hyperscan.Database | None,
         prefilters: tuple[_Pre, ...],
         prefilter_db: hyperscan.Database | None,
+        refused: frozenset[int] = frozenset(),
     ) -> None:
         """Assemble a scanner from build() results."""
         self._patterns = patterns
@@ -540,15 +540,26 @@ class FastScan:
         self._exact_db = exact_db
         self._prefilters = prefilters
         self._prefilter_db = prefilter_db
+        self._refused = refused
 
     @classmethod
     def build(cls, patterns: Sequence[re.Pattern]) -> FastScan:
-        """Compile patterns into one fast-scan database.
+        """Compile patterns into one fast-scan database, classifying fate.
 
-        Patterns the engine refuses compile as approximate prefilters
-        (reported by :attr:`prefiltered`). Patterns the engine can neither
-        scan exactly nor approximate — zero-width-matching constructs above
-        all — raise ``ValueError`` naming the offending pattern.
+        Every input pattern's fate is classified here, once: exact
+        (the reversed-expression compile stands), prefiltered (the
+        engine can only approximate it — backreferences, lookarounds
+        — and the true pattern confirms on every approximation hit;
+        reported by :attr:`prefiltered`), or refused
+        (:attr:`refused`; zero-width-matching constructs above all,
+        which no approximation can stand in for). Refused patterns
+        never ride a database — their ``find_all`` span list is
+        always empty — so the caller reads the fate and scans them
+        its own way. A build in which every pattern was refused
+        raises ``ValueError`` naming the first; a combined compile
+        that fails after every individual probe passed refuses the
+        whole batch instead of raising — the patterns are
+        individually scannable, only the batch is not.
 
         Args:
             patterns: compiled patterns, in input order.
@@ -558,7 +569,8 @@ class FastScan:
 
         Raises:
             TypeError: an item is not a compiled pattern.
-            ValueError: a pattern can be neither scanned nor approximated.
+            ValueError: every pattern can be neither scanned nor
+                approximated.
         """
         checked = tuple(patterns)
         for pattern in checked:
@@ -573,49 +585,43 @@ class FastScan:
         prefilters: list[_Pre] = []
         prefilter_sources: list[str] = []
         prefilter_flags: list[int] = []
+        refused: list[int] = []
+        refusal: ValueError | None = None
         for index, pattern in enumerate(checked):
-            spec = None
-            try:
-                source, hs_flags, unicode_classes, fold = _reverse_expression(pattern)
-            except _UnsupportedError:
-                source = None
-            if source is not None:
-                try:
-                    _compile([source], [hs_flags])
-                except hyperscan.error:
-                    source = None
-                else:
-                    spec = _Exact(
-                        index,
-                        pattern,
-                        unicode_classes=unicode_classes,
-                        fold_sensitive=fold,
-                    )
-                    exact.append(spec)
-                    exact_sources.append(source)
-                    exact_flags.append(hs_flags)
-            if spec is None:
-                pf_source, pf_flags = _prefilter_expression(pattern)
-                try:
-                    _compile([pf_source], [pf_flags])
-                except hyperscan.error as exc:
-                    raise ValueError(
-                        f"fast-scan cannot compile or approximate pattern"
-                        f" {index}: {pattern.pattern!r} ({exc})"
-                    ) from exc
-                prefilters.append(_Pre(index, pattern))
-                prefilter_sources.append(pf_source)
-                prefilter_flags.append(pf_flags)
-        exact_db = _compile(exact_sources, exact_flags) if exact_sources else None
-        prefilter_db = (
-            _compile(prefilter_sources, prefilter_flags) if prefilter_sources else None
-        )
+            fate = _classify_pattern(index, pattern)
+            if fate.refusal is not None:
+                refusal = fate.refusal
+                refused.append(index)
+            elif fate.exact is not None:
+                exact.append(fate.exact)
+                exact_sources.append(fate.exact_source or "")
+                exact_flags.append(fate.exact_flags)
+            else:
+                prefilters.append(fate.prefilter)
+                prefilter_sources.append(fate.prefilter_source or "")
+                prefilter_flags.append(fate.prefilter_flags)
+        if refusal is not None and not exact and not prefilters:
+            raise refusal
+        try:
+            exact_db = _compile(exact_sources, exact_flags) if exact_sources else None
+            prefilter_db = (
+                _compile(prefilter_sources, prefilter_flags)
+                if prefilter_sources
+                else None
+            )
+        except hyperscan.error:
+            # Individually scannable, jointly not: refuse the batch
+            # rather than raise — the caller's residual path is the
+            # correct answer for every pattern in it.
+            logger.exception("fast-scan combined compile failed; every pattern refused")
+            return cls(checked, (), None, (), None, frozenset(range(len(checked))))
         return cls(
             checked,
             tuple(exact),
             exact_db,
             tuple(prefilters),
             prefilter_db,
+            frozenset(refused),
         )
 
     @property
@@ -627,6 +633,11 @@ class FastScan:
     def prefiltered(self) -> frozenset[int]:
         """Indices of patterns running as approximate prefilters."""
         return frozenset(spec.index for spec in self._prefilters)
+
+    @property
+    def refused(self) -> frozenset[int]:
+        """Indices of patterns the engine refused — never scanned here."""
+        return self._refused
 
     def find_all(self, text: str) -> list[list[tuple[int, int]]]:
         """All matches of all patterns against ``text``.

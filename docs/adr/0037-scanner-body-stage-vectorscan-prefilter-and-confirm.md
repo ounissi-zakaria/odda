@@ -94,3 +94,24 @@ complexity without cause. ADR-0035's rule-author surface is unchanged
 by all of it: an author writes Python regexes; whether a pattern scans
 exactly, approximates and confirms, or stays stdlib is invisible in
 the findings.
+
+
+## Amendment (2026-10-19): one classification, one screen
+
+Pattern fate is now classified exactly once. `FastScan.build`
+reports per-pattern fate — exact, prefiltered, or refused — instead
+of raising all-or-nothing; it still raises when every pattern of a
+build was refused, so an all-refused batch is heard. The engine's
+`_partition_body_scan` probe fallback and the retire.js slot's own
+screening/partition/slot-mapping block (the second and third
+classifications of the same question) are deleted. The slot's shape
+screen moved into the engine and now guards declared corpus
+patterns (`Rule.body_corpus`) — the dataset shapes measured to
+compile for seconds to never — alongside the expansion budget that
+keeps screening every body pattern; the corpus rides the epoch's
+one database and reads its confirmed spans back through
+`Rule.scan`'s `body_spans` argument (a `None` entry is a pattern
+that stayed stdlib, gated). Guarantees unchanged: byte-identical
+findings, one engine pass per body. The measured residual above
+(47 of 207) is now whatever the consolidated screens refuse — a
+path choice only, never a findings change.

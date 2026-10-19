@@ -136,11 +136,38 @@ subclass `Rule` and override `scan`:
   material you need over relying on that.
 - Keep evidence details greppable and bounded (~200 characters — the
   declarative path's cap).
+- The dataset facet (`view.dataset_facet()`) is THE flow context a
+  `scan()` override may gate on: the record's routing fields
+  (`method`, `scheme`, `host`, `port`, `path`, `browser_id`,
+  `status_code`, `error`), the stored response headers (so
+  content-type screens work), and the body file's extension.
+  Repeated bodies are memoized per session keyed on (ruleset, body
+  bytes, facet) — and a scan that reads beyond the facet
+  (request-side material above all) is never memoized: it runs fresh
+  on every flow, so a cached result can never answer for a flow it
+  never saw.
 
 The retired-library rule odda's own corpus uses (`js.outdated-library`)
 is exactly this shape: a vendored dataset riding in the slot directory,
 hash/name/content extractors inside `scan`, per-advisory severities
 with the highest matched one winning.
+
+### Declaring a body corpus
+
+A dataset rule whose body check is "match these patterns" declares
+the patterns instead of scanning them itself:
+
+- Override `body_corpus()` to return the compiled patterns, in the
+  order `scan` consumes them.
+- The engine compiles them into the one body-stage database every
+  rule's body patterns share — one GIL-released engine pass per body
+  answers them all — and passes their spans to `scan` as a second
+  argument: `def scan(self, view, body_spans)`. The argument arrives
+  exactly when a corpus was declared; one entry per pattern, aligned
+  with `body_corpus()`: that pattern's match spans over the body
+  (identical to its `finditer`), or `None` when the pattern did not
+  ride the engine pass (over-budget or engine-refused shapes) and
+  must be scanned inside `scan`, behind its literal gates.
 
 ## FlowView — what a scan() override can read
 
@@ -174,6 +201,12 @@ had (an error flow has no response side) raises `FileNotFoundError`.
   value; None when the flow has no response headers or no such header.
 - `is_browser` — `bool`, whether the flow rode a browser's proxy
   credentials.
+
+- `dataset_facet()` — `tuple`, the flow context a `scan()` override
+  may lawfully gate on (see scan() overrides above); the scan-result
+  memo keys on exactly it, and reads beyond it disable memoization
+  for that scan — fresh scan per flow, correct findings on both
+  sides of any body repeat.
 
 ## Worked example — declarative rule
 

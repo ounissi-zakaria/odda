@@ -7,7 +7,7 @@ digest read instead of the scan, gates stay per-flow context applied
 after the memo, every flow still records its own findings, and every
 ruleset mutation (an install, a remove) starts a fresh epoch that
 no earlier cache entry can answer for. Library-level: a Scanner over
-stored flows (the ``_memo_flow`` shape) drained through the real
+stored flows (the ``_stored_flow`` shape) drained through the real
 ``run`` task, findings read from the index; the one user-visible
 duplicate rides the full session harness.
 """
@@ -17,61 +17,19 @@ import time
 from pathlib import Path
 
 from odda.scanner.engine import _MEMO_BUDGET_BYTES, _MEMO_MAX_ENTRIES, Scanner
-from odda.scanner.model import Rule, Severity
+from odda.scanner.model import Evidence, Finding, FlowView, Rule, Severity
 from tests.e2e.conftest import (
     FIXTURES,
     _findings_index,
     _seed_slot,
     _slot_rules,
+    _stored_flow,
     curl,
     fixture_site,
 )
 
 _T14 = "t14-memo"
 _FX = "stack-trace.html"
-
-
-def _memo_flow(
-    data_dir: Path,
-    flow_id: str,
-    body: bytes,
-    *,
-    content_type: str = "text/html",
-    status_code: int = 200,
-    query: str = "t14param=yes",
-) -> dict:
-    """One stored flow with request-side material, for memoization tests.
-
-    A stored body, stored response headers, and a stored request file
-    (request-stage rules need it), with parameterized status/content
-    type, so flow-context gates can vary while the body stays
-    byte-identical.
-    """
-    flow_dir = data_dir / "flows" / flow_id
-    flow_dir.mkdir(parents=True)
-    (flow_dir / "response_body.txt").write_bytes(body)
-    (flow_dir / "response_headers").write_bytes(
-        f"HTTP/1.1 {status_code} X\r\n"
-        f"Content-Type: {content_type}\r\n"
-        "X-T14-Hit: yes\r\n\r\n".encode()
-    )
-    path = f"/{flow_id}.txt" + (f"?{query}" if query else "")
-    (flow_dir / "request").write_bytes(
-        f"GET {path} HTTP/1.1\r\nHost: fixture.local\r\n\r\n".encode()
-    )
-    return {
-        "id": flow_id,
-        "method": "GET",
-        "scheme": "http",
-        "host": "fixture.local",
-        "port": 80,
-        "path": path,
-        "browser_id": None,
-        "status_code": status_code,
-        "total_duration_ms": 1.0,
-        "body_file": f"flows/{flow_id}/response_body.txt",
-        "error": None,
-    }
 
 
 async def _drain_findings(
@@ -186,7 +144,8 @@ async def test_duplicate_body_burst_drains_in_small_fraction_of_unique_time(
 
     async def drain_elapsed(data_dir: Path, bodies: list[bytes]) -> tuple[float, int]:
         records = [
-            _memo_flow(data_dir, f"{i:05d}", body) for i, body in enumerate(bodies)
+            _stored_flow(data_dir, f"{i:05d}", body, query="t14param=yes")
+            for i, body in enumerate(bodies)
         ]
         scanner = Scanner(data_dir, rules=rules)
         # 300 s, not the 120 s default: twelve full 4 MB unique-body
@@ -232,7 +191,8 @@ async def test_body_memo_stays_bounded_under_pressure(tmp_path) -> None:
     # Phase B: more unique bodies than the entry cap, each tiny.
     tiny = [f"{_T14}-{1000 + i}\n".encode() for i in range(1100)]
     records = [
-        _memo_flow(data_dir, f"{i:05d}", body) for i, body in enumerate([*heavy, *tiny])
+        _stored_flow(data_dir, f"{i:05d}", body, query="t14param=yes")
+        for i, body in enumerate([*heavy, *tiny])
     ]
     scanner = Scanner(data_dir, rules=(rule,))
     index, _ = await _drain_findings(scanner, data_dir, records)
@@ -277,7 +237,10 @@ async def test_duplicate_body_flows_each_record_their_own_findings(
     )
     body = f"leading text\n{_T14}-7 trailing text\n".encode()
     scanner = Scanner(data_dir, rules=rules)
-    records = [_memo_flow(data_dir, flow_id, body) for flow_id in ("00001", "00002")]
+    records = [
+        _stored_flow(data_dir, flow_id, body, query="t14param=yes")
+        for flow_id in ("00001", "00002")
+    ]
     index, _ = await _drain_findings(scanner, data_dir, records)
 
     by_flow_rule = {(rec["flow_id"], rec["rule_id"]): rec for rec in index}
@@ -327,7 +290,14 @@ async def test_memoized_body_results_stay_pre_gate(tmp_path) -> None:
         ("00004", 500, "text/javascript"),  # content-type gate passes
     )
     records = [
-        _memo_flow(data_dir, flow_id, body, status_code=status, content_type=ctype)
+        _stored_flow(
+            data_dir,
+            flow_id,
+            body,
+            status_code=status,
+            content_type=ctype,
+            query="t14param=yes",
+        )
         for flow_id, status, ctype in specs
     ]
     scanner = Scanner(data_dir, rules=rules)
@@ -355,9 +325,27 @@ async def test_dataset_rule_gate_difference_stays_per_flow(tmp_path) -> None:
     body = (FIXTURES / "ticket05-jquery-old.js").read_bytes()
     data_dir = tmp_path / ".odda"
     records = [
-        _memo_flow(data_dir, "00001", body, content_type="text/javascript"),
-        _memo_flow(data_dir, "00002", body, content_type="text/plain"),
-        _memo_flow(data_dir, "00003", body, content_type="text/javascript"),
+        _stored_flow(
+            data_dir,
+            "00001",
+            body,
+            content_type="text/javascript",
+            query="t14param=yes",
+        ),
+        _stored_flow(
+            data_dir,
+            "00002",
+            body,
+            content_type="text/plain",
+            query="t14param=yes",
+        ),
+        _stored_flow(
+            data_dir,
+            "00003",
+            body,
+            content_type="text/javascript",
+            query="t14param=yes",
+        ),
     ]
     scanner = Scanner(data_dir, rules=rules)
     # 00002 stays silent: two findings settle the drain
@@ -371,6 +359,61 @@ async def test_dataset_rule_gate_difference_stays_per_flow(tmp_path) -> None:
     first.pop("flow_id")
     third.pop("flow_id")
     assert first == third
+
+
+async def test_scan_beyond_the_facet_never_replays_stale_findings(
+    tmp_path,
+) -> None:
+    """The dataset facet is the lawful memo surface (ticket 14): a
+    scan() override that reads beyond it — request-side material above
+    all — is never memoized, so two flows with byte-identical bodies
+    but different request headers each get their own scan's findings.
+    Pre-facet, the second flow replayed the first's cached scan
+    silently: same body, same routing, a stale finding for material
+    the memo never saw."""
+    data_dir = tmp_path / ".odda"
+
+    class _RequestHeaderRule(Rule):
+        def scan(self, view: FlowView) -> list[Finding]:
+            body = view.body
+            hit = any(
+                name.lower() == "x-t14-secret" for name, _ in view.request_headers
+            )
+            if body is None or not hit:
+                return []
+            return [
+                Finding(
+                    rule_id=self.id,
+                    flow_id=str(view.record.get("id", "?")),
+                    severity=self.severity,
+                    title=self.title,
+                    evidence=(
+                        Evidence(where="request_headers", offset=0, detail="secret"),
+                    ),
+                )
+            ]
+
+    rule = _RequestHeaderRule(
+        id="t14.beyond-facet",
+        severity=Severity.LOW,
+        title="Beyond the facet",
+    )
+    body = f"{_T14}-7 same bytes both flows\n".encode()
+    records = [
+        _stored_flow(data_dir, flow_id, body, query="t14param=yes")
+        for flow_id in ("00001", "00002")
+    ]
+    # 00001 carries the secret request header; 00002 (default request)
+    # does not — the bodies and every facet field stay identical.
+    (data_dir / "flows" / "00001" / "request").write_bytes(
+        b"GET /00001.txt?t14param=yes HTTP/1.1\r\n"
+        b"Host: fixture.local\r\nX-T14-Secret: yes\r\n\r\n"
+    )
+    scanner = Scanner(data_dir, rules=(rule,))
+    index, _ = await _drain_findings(scanner, data_dir, records, expected=1)
+
+    assert [rec["flow_id"] for rec in index] == ["00001"]
+    assert index[0]["rule_id"] == "t14.beyond-facet"
 
 
 async def test_rule_installed_after_body_seen_matches_its_rearrival(
@@ -392,7 +435,7 @@ async def test_rule_installed_after_body_seen_matches_its_rearrival(
     )
     body = f"{_T14}-7 body seen twice\n".encode()
     scanner = Scanner(data_dir, rules=(early,))
-    scanner.observe(_memo_flow(data_dir, "00001", body))
+    scanner.observe(_stored_flow(data_dir, "00001", body, query="t14param=yes"))
     late = Rule(
         id="t14.installed-late",
         severity=Severity.INFO,
@@ -400,7 +443,7 @@ async def test_rule_installed_after_body_seen_matches_its_rearrival(
         body_patterns=(rf"{_T14}-7",),
     )
     scanner.register_rules((late,))  # next epoch: the memo clears with it
-    scanner.observe(_memo_flow(data_dir, "00002", body))
+    scanner.observe(_stored_flow(data_dir, "00002", body, query="t14param=yes"))
     findings_path = data_dir / "scanner" / "findings.jsonl"
     drain = asyncio.create_task(scanner.run())
     deadline = time.monotonic() + 30

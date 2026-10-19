@@ -7,8 +7,7 @@ across odda upgrades (new optional fields, never renames).
 
 The match spec is declarative: regex patterns matched against the
 flow's stored material, with gates that restrict which flows a rule
-sees. A correlator seam exists for future cross-flow analysis; none
-ship.
+sees.
 """
 
 from __future__ import annotations
@@ -16,15 +15,17 @@ from __future__ import annotations
 import codecs
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 from urllib.parse import parse_qsl, urlsplit
 
-from odda.scanner.fastscan import read_chunked
+from odda.scanner.plumbing import read_chunked
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Iterator, Sequence
 
 
 class Severity(StrEnum):
@@ -162,8 +163,37 @@ class Rule:
             self, "request_header_patterns", _compile(self.request_header_patterns)
         )
 
-    def scan(self, view: FlowView) -> list[Finding] | None:  # noqa: ARG002
-        """Declarative rules return ``None``; dataset-backed rules override."""
+    def body_corpus(self) -> tuple[re.Pattern[str], ...]:
+        """Body patterns the engine scans on this rule's behalf.
+
+        Dataset-backed rules (``scan`` overrides) declare here the
+        body patterns they would otherwise scan themselves: the engine
+        compiles them into the epoch's one body-stage database and
+        hands each pattern's confirmed spans back through ``scan``'s
+        ``body_spans`` argument. Patterns the engine refuses (over
+        budget, zero-width-capable) arrive as ``None`` entries — scan
+        them inside ``scan``, behind their literal gates.
+        """
+        return ()
+
+    def scan(
+        self,
+        view: FlowView,  # noqa: ARG002
+        body_spans: tuple[Sequence[tuple[int, int]] | None, ...] | None = None,  # noqa: ARG002
+    ) -> list[Finding] | None:
+        """Declarative rules return ``None``; dataset-backed rules override.
+
+        ``body_spans`` aligns with :meth:`body_corpus` — one entry per
+        declared pattern: its confirmed spans over the flow's body
+        (the stdlib find-iterator's own, engine-exact and approximated
+        alike), or ``None`` when that pattern did not ride the engine
+        pass and must be scanned here. The engine passes the argument
+        exactly when the rule declares a corpus — a plain
+        ``scan(view)`` override never sees it. Returning ``None``
+        hands the flow to the
+        declared matchers and gates; returning a list — empty included
+        — is authoritative.
+        """
         return None
 
 
@@ -175,23 +205,6 @@ def _compile(
         p if isinstance(p, re.Pattern) else re.compile(p, re.MULTILINE)
         for p in patterns
     )
-
-
-class Correlator(Protocol):
-    """Cross-flow analysis seam: observes flows, may emit findings.
-
-    Where a rule sees one flow in isolation, a correlator keeps state
-    across observations and reports patterns over time (findings it
-    returns reference the flow that triggered them). Zero correlators
-    ship; the seam exists so cross-flow checks arrive without another
-    interface change.
-    """
-
-    id: str
-
-    def observe(self, view: FlowView) -> list[Finding]:
-        """Observe one flow view; return findings to record (if any)."""
-        ...
 
 
 class _ParsedRequest(NamedTuple):
@@ -215,6 +228,49 @@ class _ParsedRequest(NamedTuple):
     headers: tuple[tuple[str, str], ...]
 
 
+# The record fields inside the dataset facet (see
+# ``FlowView.dataset_facet``): the stable routing fields a scan()
+# override may gate on. ``id`` is among them because the memo
+# re-stamps it per flow on replay; ``body_file`` is not — only its
+# extension, the stored body's content addressing, is facet context.
+_DATASET_RECORD_FIELDS = (
+    "id",
+    "method",
+    "scheme",
+    "host",
+    "port",
+    "path",
+    "browser_id",
+    "status_code",
+    "error",
+)
+
+
+class _DatasetRecord(dict):
+    """The index-record mapping a tracked dataset scan reads through.
+
+    A plain ``dict`` of the record, except that ``__getitem__`` and
+    ``get`` record which fields were read while a dataset scan's
+    reads are being collected (``FlowView.dataset_scan_reads``) — a
+    field beyond the facet marks the scan unmemoizable.
+    """
+
+    __slots__ = ("_view",)
+
+    def __init__(self, record: dict[str, Any], view: FlowView) -> None:
+        """Wrap ``record`` for ``view``."""
+        super().__init__(record)
+        self._view = view
+
+    def __getitem__(self, key: Any) -> Any:
+        self._view._note(f"record.{key}")  # noqa: SLF001 — the facet's own log
+        return dict.__getitem__(self, key)
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        self._view._note(f"record.{key}")  # noqa: SLF001 — the facet's own log
+        return dict.get(self, key, default)
+
+
 class FlowView:
     """The captured material of one flow, as rules receive it.
 
@@ -229,7 +285,18 @@ class FlowView:
     Attributes:
         record: The flows.jsonl record fields (id, method, scheme,
             host, port, path, browser_id, status_code, body_file, ...).
+
+    Class attributes:
+        DATASET_SCAN_READS: The FlowView members a ``scan()``
+            override may lawfully read (the dataset facet plus the
+            body itself) — a tracked scan that reads anything else is
+            never memoized.
     """
+
+    DATASET_SCAN_READS: ClassVar[frozenset[str]] = frozenset(
+        {"body", "body_bytes", "content_type", "response_headers", "is_browser"}
+        | {f"record.{field}" for field in _DATASET_RECORD_FIELDS}
+    )
 
     def __init__(self, data_dir: Path, record: dict[str, Any]) -> None:
         """Initialize from the data dir and the flow's index record.
@@ -238,7 +305,9 @@ class FlowView:
             data_dir: The session's ``.odda`` directory.
             record: The flows.jsonl record for this flow.
         """
-        self.record = record
+        self._reads: set[str] | None = None
+        self._record = record
+        self._record_view = _DatasetRecord(record, self)
         self._data_dir = data_dir
         self._flow_dir = data_dir / "flows" / str(record["id"])
         self._request: str | None = None
@@ -249,8 +318,79 @@ class FlowView:
         self._parsed_request: _ParsedRequest | None = None
 
     @property
+    def record(self) -> dict[str, Any]:
+        """The flows.jsonl record fields, read-tracked in a scan."""
+        return self._record_view
+
+    def _note(self, member: str) -> None:
+        """Record one member read, when a dataset scan is tracking."""
+        if self._reads is not None:
+            self._reads.add(member)
+
+    def dataset_facet(self) -> tuple[Any, ...]:
+        """The flow context a ``scan()`` override may lawfully gate on.
+
+        This is THE surface beyond the stored body itself that a
+        dataset scan may read per flow: the record's stable routing
+        fields, the stored body's content addressing (the body file's
+        extension), and the stored response headers — the response
+        content type above all, a dataset rule's own screen. The
+        engine keys the scan-result memo on exactly this tuple (with
+        the ruleset epoch and the body digest), so two flows that
+        disagree on any of it never share a cached scan. A scan that
+        reads beyond the facet — request-side material above all — is
+        never memoized: it runs fresh on every flow, by mechanism,
+        not convention. The scan() sentinel convention rides the same
+        boundary: returning ``None`` hands the flow to the declared
+        matchers; a returned list, empty included, is authoritative.
+        """
+        reads = self._reads
+        self._reads = None  # the facet itself is engine context, not rule reads
+        try:
+            record = self._record_view
+            body_file = str(record.get("body_file") or "")
+            headers_file = self._flow_dir / "response_headers"
+            stored_headers = (
+                self._read(headers_file) if headers_file.is_file() else None
+            )
+            return (
+                record.get("method"),
+                record.get("scheme"),
+                record.get("host"),
+                record.get("port"),
+                record.get("path"),
+                record.get("browser_id"),
+                record.get("status_code"),
+                record.get("error"),
+                Path(body_file).suffix,
+                stored_headers,
+            )
+        finally:
+            self._reads = reads
+
+    @contextmanager
+    def dataset_scan_reads(self) -> Iterator[set[str]]:
+        """Collect the members one ``scan()`` override reads.
+
+        While active, every FlowView member read — each property, each
+        record field — lands in the yielded set. The engine memoizes
+        the scan's result only when the set stays inside
+        :attr:`DATASET_SCAN_READS`; a read beyond the lawful surface
+        means the result is not a pure function of (epoch, body,
+        facet), so it is never stored — fresh scan per flow.
+        """
+        previous = self._reads
+        reads: set[str] = set()
+        self._reads = reads
+        try:
+            yield reads
+        finally:
+            self._reads = previous
+
+    @property
     def request(self) -> str:
         """The flow's stored raw request (request line + headers + body)."""
+        self._note("request")
         if self._request is None:
             self._request = self._read(self._flow_dir / "request")
         return self._request
@@ -258,21 +398,25 @@ class FlowView:
     @property
     def request_method(self) -> str | None:
         """The request line's method token (``GET``), or ``None``."""
+        self._note("request_method")
         return self._parse_request().method
 
     @property
     def request_path(self) -> str | None:
         """The request line's target (path with query), or ``None``."""
+        self._note("request_path")
         return self._parse_request().path
 
     @property
     def request_query(self) -> tuple[tuple[str, str], ...]:
         """Decoded ``(name, value)`` pairs of the request URL's query."""
+        self._note("request_query")
         return self._parse_request().query
 
     @property
     def request_headers(self) -> tuple[tuple[str, str], ...]:
         """``(name, value)`` pairs of the request's header lines, in order."""
+        self._note("request_headers")
         return self._parse_request().headers
 
     def _parse_request(self) -> _ParsedRequest:
@@ -303,6 +447,7 @@ class FlowView:
     @property
     def response_headers(self) -> str:
         """The flow's stored response headers (status line + headers)."""
+        self._note("response_headers")
         if self._response_headers is None:
             self._response_headers = self._read(self._flow_dir / "response_headers")
         return self._response_headers
@@ -319,8 +464,9 @@ class FlowView:
         the single uninterruptible op, then hands the loop the GIL
         before the next whole-body op can stack behind it.
         """
+        self._note("body")
         if self._body is None:
-            body_file = self.record.get("body_file")
+            body_file = self._record.get("body_file")
             if body_file is not None:
                 self._body = self._read_chunked(self._data_dir / body_file)
         return self._body
@@ -332,8 +478,9 @@ class FlowView:
         The bytes-exact view of :attr:`body` for checks that must not
         pass through text decoding — content hashing above all.
         """
+        self._note("body_bytes")
         if self._body_bytes is None:
-            body_file = self.record.get("body_file")
+            body_file = self._record.get("body_file")
             if body_file is not None:
                 self._body_bytes = (self._data_dir / body_file).read_bytes()
         return self._body_bytes
@@ -346,6 +493,7 @@ class FlowView:
         flows) or the header is absent — content-type-gated rules skip
         such flows rather than error.
         """
+        self._note("content_type")
         if self._content_type is None:
             headers = self._flow_dir / "response_headers"
             if headers.is_file():
@@ -358,7 +506,8 @@ class FlowView:
     @property
     def is_browser(self) -> bool:
         """Whether the flow rode a browser's proxy credentials."""
-        return self.record.get("browser_id") is not None
+        self._note("is_browser")
+        return self._record_view.get("browser_id") is not None
 
     @staticmethod
     def _read(path: Path) -> str:

@@ -37,6 +37,7 @@ parameter the same way the data dir reaches the Scanner itself.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import sys
@@ -250,7 +251,11 @@ class UserRuleManager:
     reloads every persisted slot with per-slot failure isolation. All
     methods run on the event-loop thread (MCP tool handlers and the
     lifespan boot block); the scanner's drain never observes a
-    half-registered slot.
+    half-registered slot. Mutations hold the manager's operation lock,
+    and the epoch build they trigger — which can cost seconds when a
+    dataset corpus compiles — runs off the loop in a worker thread,
+    so a mid-session install never stalls the calls the loop is
+    serving; the scanner's own build lock serializes the builds.
     """
 
     def __init__(self, scanner: Scanner, rules_dir: Path) -> None:
@@ -267,12 +272,16 @@ class UserRuleManager:
         self._scanner = scanner
         self._rules_dir = Path(rules_dir)
         self._slots: dict[str, _SlotState] = {}
+        # One manager operation at a time (install/remove/force): the
+        # slot table and the id-collision checks stay race-free while
+        # an operation's epoch build runs off the loop.
+        self._ops = asyncio.Lock()
 
     def name_exists(self, name: str) -> bool:
         """Return True if slot ``name`` is persisted on disk."""
         return name_exists(self._rules_dir, name)
 
-    def install(
+    async def install(
         self, name: str, source: str, *, assets_from: Path | str | None = None
     ) -> dict[str, Any]:
         """Validate, persist, and live-register slot ``name``.
@@ -301,20 +310,26 @@ class UserRuleManager:
                 shows the expected file shape — or a rule id collides
                 with another slot's (the message names the collision).
         """
-        path = _rule_path(self._rules_dir, name)
-        try:
-            rules = load_slot_source(name, source, str(path))
-        except ValueError as exc:
-            msg = f"{exc}\nA rule file must look like:\n{RULE_FILE_SKELETON}"
-            raise ValueError(msg) from None
-        self._reject_id_collisions(name, rules)
-        self._deregister(name)
-        install_source(self._rules_dir, name, source)
-        assets = (
-            install_assets(self._rules_dir, name, assets_from) if assets_from else []
-        )
-        self._scanner.register_rules(rules)
-        self._slots[name] = _SlotState(rules=tuple(rules))
+        async with self._ops:
+            path = _rule_path(self._rules_dir, name)
+            try:
+                rules = load_slot_source(name, source, str(path))
+            except ValueError as exc:
+                msg = f"{exc}\nA rule file must look like:\n{RULE_FILE_SKELETON}"
+                raise ValueError(msg) from None
+            self._reject_id_collisions(name, rules)
+            await self._deregister(name)
+            install_source(self._rules_dir, name, source)
+            assets = (
+                install_assets(self._rules_dir, name, assets_from)
+                if assets_from
+                else []
+            )
+            # The epoch build (dataset corpora compile pattern by
+            # pattern) runs off the loop; the scanner's build lock
+            # keeps concurrent registrations serialized.
+            await asyncio.to_thread(self._scanner.register_rules, rules)
+            self._slots[name] = _SlotState(rules=tuple(rules))
         return {
             "name": name,
             "size": path.stat().st_size,
@@ -322,7 +337,7 @@ class UserRuleManager:
             "assets": assets,
         }
 
-    def remove(self, name: str) -> dict[str, Any]:
+    async def remove(self, name: str) -> dict[str, Any]:
         """Deregister slot ``name``'s rules live and delete the slot.
 
         Past findings are never touched — the index is append-only;
@@ -332,9 +347,10 @@ class UserRuleManager:
         Raises:
             ValueError: If the slot is not on disk.
         """
-        removed = self._deregister(name)
-        remove_source(self._rules_dir, name)
-        return {"name": name, "removed": True, "rules": removed}
+        async with self._ops:
+            removed = await self._deregister(name)
+            remove_source(self._rules_dir, name)
+            return {"name": name, "removed": True, "rules": removed}
 
     def list_rules(self) -> list[dict[str, Any]]:
         """List every rule the session knows.
@@ -397,13 +413,13 @@ class UserRuleManager:
         if batch:
             self._scanner.register_rules(batch)
 
-    def _deregister(self, name: str) -> list[str]:
+    async def _deregister(self, name: str) -> list[str]:
         """Drop slot ``name``'s live registration; return its rule ids."""
         state = self._slots.pop(name, None)
         if state is None or not state.rules:
             return []
         ids = [rule.id for rule in state.rules]
-        self._scanner.deregister_rules(frozenset(ids))
+        await asyncio.to_thread(self._scanner.deregister_rules, frozenset(ids))
         return ids
 
     def _reject_id_collisions(self, name: str, rules: Sequence[Rule]) -> None:

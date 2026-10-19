@@ -30,7 +30,7 @@ import re
 from functools import cache
 from typing import Any
 
-from odda.scanner.fastscan import GIL_CHUNK, chunked, sre_constants, sre_parse
+from odda.scanner.plumbing import GIL_CHUNK, chunked, sre_constants, sre_parse
 
 _GATE_MIN_LITERAL = 3
 

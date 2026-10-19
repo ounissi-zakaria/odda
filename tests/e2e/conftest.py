@@ -657,6 +657,53 @@ def _findings_index(data_dir: Path) -> list[dict]:
     return [json.loads(line) for line in f.read_text().splitlines()]
 
 
+def _stored_flow(
+    data_dir: Path,
+    flow_id: str,
+    body: bytes = b"payload",
+    *,
+    content_type: str = "text/plain",
+    status_code: int = 200,
+    query: str | None = None,
+) -> dict:
+    """One stored flow through the real on-disk layout, as the store
+    writes it: the flow directory (``flows/<id>``) with the stored
+    response body, stored response headers, and — when ``query`` is
+    given — the stored request file (request-stage rules need it).
+    Parameterized status/content type, so flow-context gates can vary
+    while the body stays byte-identical; the record handed to
+    ``Scanner.observe`` comes back.
+    """
+    flow_dir = data_dir / "flows" / flow_id
+    flow_dir.mkdir(parents=True)
+    (flow_dir / "response_body.txt").write_bytes(body)
+    header_block = (
+        f"HTTP/1.1 {status_code} X\r\n"
+        f"Content-Type: {content_type}\r\n"
+        + ("X-T14-Hit: yes\r\n" if query is not None else "")
+        + "\r\n"
+    )
+    (flow_dir / "response_headers").write_bytes(header_block.encode())
+    path = f"/{flow_id}.txt" + (f"?{query}" if query else "")
+    if query is not None:
+        (flow_dir / "request").write_bytes(
+            f"GET {path} HTTP/1.1\r\nHost: fixture.local\r\n\r\n".encode()
+        )
+    return {
+        "id": flow_id,
+        "method": "GET",
+        "scheme": "http",
+        "host": "fixture.local",
+        "port": 80,
+        "path": path,
+        "browser_id": None,
+        "status_code": status_code,
+        "total_duration_ms": 1.0,
+        "body_file": f"flows/{flow_id}/response_body.txt",
+        "error": None,
+    }
+
+
 __all__ = [
     "FIXTURES",
     "Harness",
