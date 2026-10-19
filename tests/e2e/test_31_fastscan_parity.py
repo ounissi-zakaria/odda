@@ -361,7 +361,7 @@ def test_multichunk_reversal_spans_match_stdlib_finditer() -> None:
     multibyte bodies alike."""
     from odda.scanner import fastscan
 
-    chunk = fastscan._REVERSE_CHUNK  # noqa: SLF001 — chunk size is the case under test
+    chunk = fastscan.GIL_CHUNK  # the shared chunk the reversal slices ride
     compiled = [re.compile(src, flags) for src, flags in _EXACT_CORPUS]
     fs = FastScan.build(compiled)
     # Sparse filler (dots, single multibyte chars): the confirm path

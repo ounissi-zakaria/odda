@@ -48,8 +48,12 @@ from typing import TYPE_CHECKING
 import pytest
 from mcp import Client
 
+from odda.scanner.userrules import load_slot_source
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from odda.scanner.model import Rule
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "e2e" / "fixtures"
@@ -615,6 +619,40 @@ def odda_subprocess_session(tmp_path: Path, config_home: Path) -> Iterator[objec
             yield Harness(client, cwd / ".odda", config_home)
 
     return _session
+
+
+# --- scanner suite helpers (test_30 / test_32) ---
+#
+# The repo's rules/ corpus (ADR-0036: no rules ship with odda) loaded
+# or seeded through the real paths, plus the findings-index reader the
+# harness cannot serve (its assertions run with no live session).
+_RULES_SRC = REPO_ROOT / "rules"
+
+
+def _slot_rules(family: str) -> list[Rule]:
+    """Load one repo rules/<family> slot through the slot loader."""
+    path = _RULES_SRC / family / "rule.py"
+    return load_slot_source(family, path.read_text(encoding="utf-8"), str(path))
+
+
+async def _seed_slot(h: Harness, family: str) -> dict:
+    """Install the repo's rules/<family> slot through the real tool path."""
+    return await h.call(
+        "rule_install",
+        {"name": family, "file": str(_RULES_SRC / family / "rule.py")},
+    )
+
+
+def _findings_index(data_dir: Path) -> list[dict]:
+    """Every findings.jsonl record on the data dir ([] when absent).
+
+    Harness-free on purpose: the assertions between sessions (one
+    closed, the next not yet booted) have no live session to ask.
+    """
+    f = data_dir / "scanner" / "findings.jsonl"
+    if not f.is_file():
+        return []
+    return [json.loads(line) for line in f.read_text().splitlines()]
 
 
 __all__ = [
