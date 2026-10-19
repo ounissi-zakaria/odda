@@ -334,6 +334,38 @@ def test_empty_pattern_set_scans_nothing() -> None:
     assert fs.find_all("anything") == []
 
 
+def test_multichunk_reversal_spans_match_stdlib_finditer() -> None:
+    """Bodies larger than the reversal chunk slice the reverse-encode
+    with GIL drops between slices; spans must stay identical to the
+    stdlib find-iterator across the chunk boundaries — matches placed
+    at, straddling, and around the boundary distance, on ASCII and
+    multibyte bodies alike."""
+    from odda.scanner import fastscan
+
+    chunk = fastscan._REVERSE_CHUNK  # noqa: SLF001 — chunk size is the case under test
+    compiled = [re.compile(src, flags) for src, flags in _EXACT_CORPUS]
+    fs = FastScan.build(compiled)
+    # Sparse filler (dots, single multibyte chars): the confirm path
+    # walks every candidate start, so dense word-character filler
+    # makes word-class patterns quadratic in body size — the corpus
+    # exists to check boundary arithmetic, not confirm throughput.
+    for body in (
+        "." * (chunk - 1) + "ab" + "." * (chunk + 2),
+        "." * (chunk - 1) + "a" + "..." + "ab",
+        ("ab" + "." * (chunk - 2)) * 3,
+        "é." * (chunk // 2) + "ab" + "é中" * 8,
+        "." * (2 * chunk + 7),
+        "ab" + ("日." * (chunk // 2)) + "ab",
+    ):
+        spans = fs.find_all(body)
+        for i, pattern in enumerate(compiled):
+            want = [m.span() for m in pattern.finditer(body)]
+            assert spans[i] == want, (
+                f"pattern {pattern.pattern!r} diverged on len={len(body)}:"
+                f" engine={spans[i][:4]}... stdlib={want[:4]}..."
+            )
+
+
 def test_multi_pattern_scan_keeps_patterns_independent() -> None:
     """One find_all over a body several patterns match returns each
     pattern's own spans, in input order."""

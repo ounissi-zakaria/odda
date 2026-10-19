@@ -15,6 +15,7 @@ import ast
 import asyncio
 import itertools
 import json
+import os
 import random
 import re
 import sys
@@ -283,6 +284,12 @@ def test_scanner_package_has_no_egress_imports() -> None:
         # sys: registering the slot exec module in sys.modules for the
         # exec's duration (see types above) — no network surface.
         "sys",
+        # codecs: the chunked lenient body decode (ticket 12) — an
+        # incremental UTF-8 decoder, no network surface.
+        "codecs",
+        # time: time.sleep(0) GIL drops between the chunked text ops
+        # (ticket 12) — no clock or network surface.
+        "time",
         # types: ModuleType for the slot exec namespace — a bare dict
         # breaks slots defining dataclasses (field resolution walks
         # sys.modules); no network surface.
@@ -1953,7 +1960,11 @@ def test_literal_gate_never_suppresses_a_match() -> None:
     dataset pattern of the converted slot corpus, on seeded random
     texts spliced with the patterns' own literal fragments, a pattern
     that matches always passes its gate (a gate miss can only ever
-    skip a pattern that would not have matched). Also pins gate
+    skip a pattern that would not have matched). Case-insensitive
+    patterns gate on casefolded literals, so the corpus includes
+    mixed-case matches for them, and the fold sweep below pins the
+    per-character soundness edge (every char an ASCII letter can
+    (?i)-match folds to exactly that letter's fold). Also pins gate
     coverage, so a regex parser or dataset drift cannot silently
     degrade every body scan back to ungated linear passes."""
     patterns: list[re.Pattern[str]] = []
@@ -1969,7 +1980,9 @@ def test_literal_gate_never_suppresses_a_match() -> None:
     )
 
     rng = random.Random(20261007)
-    alphabet = list("ab(){}[]<>=:./*_- \n\"'0159azAZAPIkeyhttpsrc")
+    alphabet = list(
+        "ab(){}[]<>=:./*_- \n\"'0159azAZAPIkeyhttpsrcİıſKẞß"  # noqa: RUF001
+    )
     texts = [
         'x mustache.version = "2.5.0"',
         "/*! jQuery v3.1.1 */",
@@ -1980,6 +1993,13 @@ def test_literal_gate_never_suppresses_a_match() -> None:
         "https://cdn.polyfill.io/v3/polyfill.min.js",
         "<Error><Code>NoSuchBucket</Code></Error>",
         "// PDFObject v1.2.3",
+        # mixed-case bodies for the fold-gated (?i) patterns: the
+        # Telerik/S3/supply-chain shapes must still pass their folded
+        # gates when they match
+        "telerik.web.ui.webresource.axd?version=2017.2.503",
+        "TeLeRiK.WEB.UI.WebResource.axd ... VeRsIoN=2013.2.717",
+        '<ScRiPt defer src="https://cdn.polyfill.io/v3/x.js"></script>',
+        "<CoDe>  NoSuchBucket </CoDe> .. <BucketName>dangling",
     ]
     for _ in range(2500):
         text = "".join(rng.choice(alphabet) for _ in range(rng.randint(5, 90)))
@@ -2000,6 +2020,24 @@ def test_literal_gate_never_suppresses_a_match() -> None:
                 )
 
 
+def test_ci_gate_fold_sweep_pins_the_soundness_edge() -> None:
+    """Case-insensitive gates fold both sides; the soundness edge is
+    per-character: Python matches (?i) via simple case folding while
+    the gate folds fully, so every character an ASCII letter can
+    (?i)-match must casefold to exactly that letter's fold — anything
+    else and a folded literal could miss a real match."""
+    from odda.scanner.model import _gate_fold
+
+    for code in list(range(0x600)) + list(range(0x1E00, 0x2200)):
+        char = chr(code)
+        folded = _gate_fold(char)
+        if folded == char and char.lower() == char and char.upper() == char:
+            continue
+        for letter in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            if re.fullmatch(f"(?i){letter}", char):
+                assert letter.casefold() == folded, (hex(code), letter)
+
+
 async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
     """A 10 MB JavaScript body through the full converted slot corpus —
     the retire.js filecontent scans above all — no longer stalls the
@@ -2008,8 +2046,13 @@ async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
     body regex, a heartbeat on the drain's own loop keeps its ~5 ms
     cadence (pre-fix the loop froze for the whole 2.7 s scan;
     thread-offload alone still hitched ~0.3 s per un-gated regex).
-    Queue order survives: the small flow behind the big one still
-    lands its finding, and the big benign body lands none."""
+    Ticket 12's engine drains the declarative body stage (the
+    millisecond-cadence probe is the engine-path test below); this
+    probe stays on the residual Python path the spec keeps at a 0.6 s
+    ceiling — the retire.js slot's dataset scan() override above all,
+    until its filecontent patterns reroute through the engine. Queue
+    order survives: the small flow behind the big one still lands its
+    finding, and the big benign body lands none."""
     data_dir = tmp_path / ".odda"
     chunk = "var a=1;function f(){return a+1;}\n"
     big = _stored_flow(
@@ -2062,12 +2105,214 @@ async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
 
     gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
     assert gaps, "heartbeat never beat during the scan window"
-    # Sequential runs see a ~70 ms worst gap (the residual tail below);
-    # under the suite's own 3-worker xdist load the same regex ops
-    # stretch ~5x, so the ceiling must leave room for it. What the
-    # ceiling must catch is the bug: pre-fix, the loop froze for the
-    # whole 2.7 s scan.
+    # The residual Python-path ceiling the spec keeps (ticket 12's
+    # numbers contract): the retire.js slot's dataset scan() override
+    # still runs its gated stdlib loop over the body, so sequential
+    # runs see a ~70 ms worst gap; under the suite's own 3-worker
+    # xdist load the same regex ops stretch ~5x, so the ceiling must
+    # leave room for it. What the ceiling must catch is the bug:
+    # pre-fix, the loop froze for the whole 2.7 s scan.
     assert max(gaps) < 0.6, f"loop stalled {max(gaps):.3f}s during the drain"
+
+
+async def test_multi_mb_engine_body_scan_keeps_loop_at_millisecond_cadence(
+    tmp_path,
+) -> None:
+    """The engine path's numbers contract (ticket 12): a 10 MB
+    JavaScript body scanned by the declarative corpus — every rule
+    whose body patterns compile into the epoch's one database, plus
+    their gated stdlib residuals — keeps the event loop at
+    millisecond cadence: the body pass itself is one GIL-released
+    engine call, and the Python-path tail (body decode, literal-gate
+    scans, folds) runs as sub-10 ms segments. The dataset-backed
+    retire.js slot (a scan() override riding the stdlib path until
+    ticket 17 reroutes it) is deliberately absent; the full-corpus
+    probe above carries the residual ceiling. Queue order survives:
+    the small flow behind the big one still lands its finding, and
+    the big benign body lands none."""
+    data_dir = tmp_path / ".odda"
+    chunk = "var a=1;function f(){return a+1;}\n"
+    big = _stored_flow(
+        data_dir,
+        "bigjs01",
+        (chunk * (10 * 1024 * 1024 // len(chunk))).encode(),
+        content_type="application/javascript",
+    )
+    small = _stored_flow(
+        data_dir,
+        "trace02",
+        b'Traceback (most recent call last):\n  File "app.py", line 1\nboom\n',
+    )
+
+    declarative = [r for r in _all_slot_rules() if type(r).scan is Rule.scan]
+    assert len(declarative) < len(_all_slot_rules()), "dataset override must exist"
+    scanner = Scanner(data_dir, rules=declarative)
+    drain = asyncio.create_task(scanner.run())
+
+    beats: list[tuple[float, float]] = []
+
+    async def heartbeat() -> None:
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.002)
+            now = time.monotonic()
+            beats.append((now, now - last))
+            last = now
+
+    hb = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0.05)
+
+    window_start = time.monotonic()
+    scanner.observe(big)
+    scanner.observe(small)
+    findings_path = data_dir / "scanner" / "findings.jsonl"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if findings_path.is_file() and findings_path.read_text().splitlines():
+            break
+        await asyncio.sleep(0.002)
+    window_end = time.monotonic()
+    await asyncio.sleep(0.05)
+
+    hb.cancel()
+    drain.cancel()
+    await asyncio.gather(hb, drain, return_exceptions=True)
+
+    index = _findings_index(data_dir)
+    assert [rec["rule_id"] for rec in index] == ["disclosure.stack-trace"]
+    assert index[0]["flow_id"] == "trace02"
+
+    gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
+    assert gaps, "heartbeat never beat during the scan window"
+    # The numbers contract: max event-loop gap <= 10 ms during a 10 MB
+    # scan in a normal run, <= 0.1 s under the suite's own 3-worker
+    # parallel load (the same decode/gate/regex ops stretch ~5x when
+    # the box is saturated). What the ceiling must catch is the
+    # regression: per-pattern stdlib body scans hitch ~70 ms each, and
+    # the pre-offload drain froze the loop for the whole multi-second
+    # scan.
+    ceiling = 0.1 if os.environ.get("PYTEST_XDIST_WORKER") else 0.01
+    assert max(gaps) < ceiling, f"loop stalled {max(gaps):.3f}s during the drain"
+
+
+# --- ticket 12: the engine drains the body stage ---
+
+
+_T12_MARKER = "ticket12-engine-canary"
+
+
+async def test_engine_body_stage_records_match_stdlib_finditer(
+    tmp_path,
+) -> None:
+    """With the engine draining the body stage, Finding records stay
+    byte-identical: the records the scanner writes are exactly what
+    plain stdlib finditer over the same rule patterns produces — rule
+    ids, severities, titles, evidence where/offset/detail, refs. One
+    flow hits engine-exact rules (multi-match aggregation in the
+    stack-trace rule), an engine-refused pattern (the Prometheus
+    exposition's backreference, stdlib residual), and an expansion-
+    guard residual (the S3 bounded-lazy takeover shape)."""
+    rules = _all_slot_rules()
+    body = (
+        "Traceback (most recent call last):\n"
+        '  File "/app/a.py", line 1, in <module>\n'
+        "Traceback (most recent call last):\n"
+        "#0 /var/www/html/index.php(23): handler()\n"
+        'api_key = "sk_live_abcdefghijklmnop"\n'
+        "Sorry, this shop is currently unavailable\n"
+        "# HELP prometheus_build_info 1\n"
+        "# TYPE prometheus_build_info gauge\n"
+        "<Code>NoSuchBucket</Code> filler text <BucketName>dangling-bucket\n"
+    )
+    data_dir = tmp_path / ".odda"
+    scanner = Scanner(data_dir, rules=rules)
+    scanner.observe(
+        _stored_flow(data_dir, "00001", body.encode(), content_type="text/html")
+    )
+    drain = asyncio.create_task(scanner.run())
+    findings_path = data_dir / "scanner" / "findings.jsonl"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if findings_path.is_file() and len(findings_path.read_text().splitlines()) >= 5:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)  # any late extra finding fails the set assert
+    drain.cancel()
+    await asyncio.gather(drain, return_exceptions=True)
+
+    # The independent truth: plain stdlib finditer over the same rule
+    # patterns, aggregated per rule exactly as the scanner aggregates.
+    expected: dict[str, dict] = {}
+    for rule in rules:
+        evidence = [
+            {"where": "response_body", "offset": m.start(), "detail": m.group(0)[:200]}
+            for pattern in rule.body_patterns
+            for m in pattern.finditer(body)
+        ]
+        if evidence:
+            expected[rule.id] = {
+                "rule_id": rule.id,
+                "flow_id": "00001",
+                "severity": rule.severity.value,
+                "title": rule.title,
+                "evidence": evidence,
+                "refs": list(rule.refs),
+            }
+    assert set(expected) == {
+        "disclosure.stack-trace",
+        "disclosure.frontend-secret",
+        "takeover.s3-nosuchbucket",
+        "takeover.shopify",
+        "exposure.prometheus-metrics",
+    }
+
+    index = _findings_index(data_dir)
+    assert {rec["rule_id"] for rec in index} == set(expected)
+    for rec in index:
+        assert rec == expected[rec["rule_id"]], rec["rule_id"]
+
+
+async def test_arrival_epoch_never_matches_retroactively(tmp_path) -> None:
+    """The queue entry carries the whole ruleset epoch, so mid-session
+    installs and removes swap the live database without ever reaching
+    a flow that arrived earlier: observed while the drain was not yet
+    running, a pre-install flow drains entirely under later epochs and
+    still never matches the canary; the between-install flow matches
+    through the newly compiled database; the post-remove flow is
+    silent again."""
+    data_dir = tmp_path / ".odda"
+    body = f"pre {_T12_MARKER}-7 mid post\n"
+    canary = Rule(
+        id="user.ticket12-canary",
+        severity=Severity.LOW,
+        title="Ticket 12 canary marker disclosed",
+        body_patterns=(rf"{_T12_MARKER}-[0-9]+",),
+    )
+    scanner = Scanner(data_dir)  # boots empty: the arrival-time base epoch
+    pre = _stored_flow(data_dir, "00001", body.encode())
+    scanner.observe(pre)
+    scanner.register_rules((canary,))  # install: next epoch, new database
+    live = _stored_flow(data_dir, "00002", body.encode())
+    scanner.observe(live)
+    scanner.deregister_rules({"user.ticket12-canary"})  # remove: next epoch
+    post = _stored_flow(data_dir, "00003", body.encode())
+    scanner.observe(post)
+    drain = asyncio.create_task(scanner.run())
+    findings_path = data_dir / "scanner" / "findings.jsonl"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if findings_path.is_file() and findings_path.read_text().splitlines():
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.2)  # let the later flows drain too
+    drain.cancel()
+    await asyncio.gather(drain, return_exceptions=True)
+
+    index = _findings_index(data_dir)
+    assert [(rec["rule_id"], rec["flow_id"]) for rec in index] == [
+        ("user.ticket12-canary", "00002")
+    ]
+    assert index[0]["evidence"][0]["detail"] == f"{_T12_MARKER}-7"
 
 
 # --- ticket 15: global rules dir + config-home resolver ---

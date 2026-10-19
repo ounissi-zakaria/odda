@@ -14,6 +14,16 @@ Containment is the other contract: every failure — enqueue, one rule,
 one finding write — is logged and skipped. A broken rule never blocks
 the flow's other rules, and nothing the scanner does can touch the
 flow write path that triggered it.
+
+The response-body stage drains through the compiled engine (ticket
+12): every declarative body pattern of the live ruleset builds into
+one fast-scan database per ruleset epoch, and each stored body is
+scanned once, in a GIL-released pass, whatever the rule count. Gates
+(schemes, statuses, content types, browser attribution) filter after
+the pass, per rule, before evidence assembly. Patterns the engine
+refuses or cannot compile within budget stay on the stdlib path;
+request-query, request-header, and response-header stages never left
+it (tiny texts, necessary-literal gated).
 """
 
 from __future__ import annotations
@@ -23,9 +33,18 @@ import json
 import logging
 import queue
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
+from odda.scanner.fastscan import FastScan
 from odda.scanner.model import Evidence, Finding, FlowView, _passes_literal_gates
+
+try:  # same private parser the literal gates lean on; a missing
+    # module just keeps every pattern off the engine (all-stdlib).
+    from re import _constants as _re_constants  # pragma: no cover
+    from re._parser import parse as _re_parse  # pragma: no cover
+except ImportError:  # pragma: no cover
+    _re_constants = None  # type: ignore[assignment]
+    _re_parse = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     import re
@@ -47,6 +66,169 @@ _RESPONSE_HEADERS = "response_headers"
 _REQUEST_QUERY = "request_query"
 # Evidence "where" for matches on the stored request headers.
 _REQUEST_HEADERS = "request_headers"
+
+# Compile-expansion budget for the engine path (ticket 12). Vectorscan
+# compiles a bounded repeat by expanding it, with no cost bound the
+# engine exposes: the corpus's ``{0,600}?``-class patterns (Telerik
+# takeover shapes) compile for minutes — measured, the call never
+# returns. The estimate below walks the stdlib parse tree (repeats
+# multiply, concatenation adds, literals are free) and keeps
+# over-budget patterns on the stdlib path, where the necessary-literal
+# gates hold the line. The estimate only ever picks a path — findings
+# are byte-identical either way.
+_EXPANSION_MAX = 64
+
+
+def _node_expansion(op: Any, av: Any) -> int:
+    """Expansion estimate of one parse node (see ``_EXPANSION_MAX``)."""
+    if op in (_re_constants.MAX_REPEAT, _re_constants.MIN_REPEAT):
+        mn, mx = av[0], av[1]
+        # An unbounded tail is a kleene star: only the required count
+        # expands. A bounded one expands to its max.
+        count = mx if mx is not _re_constants.MAXREPEAT else mn
+        return max(1, count) * max(1, _expansion(av[-1]))
+    if op is _re_constants.SUBPATTERN:
+        return _expansion(av[-1])
+    if op is _re_constants.BRANCH:
+        return max((_expansion(d) for d in av[1]), default=0)
+    if op in (_re_constants.ASSERT, _re_constants.ASSERT_NOT):
+        return _expansion(av[1])
+    if op is _re_constants.GROUPREF_EXISTS:
+        return max(_expansion(av[1]), _expansion(av[2] or ()))
+    # Literals, classes, anchors, and backrefs add no expansion.
+    return 0
+
+
+def _expansion(node: Any) -> int:
+    """Expansion estimate of one parsed concatenation."""
+    return sum(_node_expansion(op, av) for op, av in node)
+
+
+def _within_expansion_budget(pattern: re.Pattern[str]) -> bool:
+    """Whether a pattern's bounded-repeat expansion fits the budget.
+
+    Parse failures stay off the engine too — a pattern the guard
+    cannot reason about must never reach a compile that might not
+    return.
+    """
+    if _re_parse is None:  # pragma: no cover — stdlib parser gone
+        return False
+    try:
+        tree = _re_parse(pattern.pattern, pattern.flags)
+    except Exception:
+        return False
+    return _expansion(tree) <= _EXPANSION_MAX
+
+
+def _compile_body_scan(
+    patterns: list[re.Pattern[str]],
+) -> tuple[FastScan | None, list[int | None]]:
+    """Compile the epoch's body patterns into one fast-scan database.
+
+    Returns the database (``None`` when nothing rides it) and, per
+    input pattern, its index into the database — or ``None`` for the
+    stdlib residuals: over-budget patterns (``_EXPANSION_MAX``),
+    patterns the engine refused to scan exactly (its approximate
+    prefilters — their spans stay unused until ticket 13's
+    confirm-on-hit), and patterns that refuse even approximation.
+    """
+    db_of: list[int | None] = [None] * len(patterns)
+    eligible = [
+        (i, pattern)
+        for i, pattern in enumerate(patterns)
+        if _within_expansion_budget(pattern)
+    ]
+    if not eligible:
+        return None, db_of
+    try:
+        fast = FastScan.build([pattern for _, pattern in eligible])
+    except Exception:
+        # An eligible pattern refused even approximation (zero-width
+        # constructs raise) or the combined compile failed; partition
+        # by probe so only the offenders fall back. A pattern must
+        # never break the epoch — the worst case is the stdlib path.
+        return _partition_body_scan(eligible, len(patterns))
+    refused = fast.prefiltered
+    for slot, (i, _pattern) in enumerate(eligible):
+        if slot not in refused:
+            db_of[i] = slot
+    if all(d is None for d in db_of):
+        return None, db_of
+    return fast, db_of
+
+
+def _partition_body_scan(
+    eligible: Sequence[tuple[int, re.Pattern[str]]], total: int
+) -> tuple[FastScan | None, list[int | None]]:
+    """The fallback compile: probe per pattern, build the survivors."""
+    db_of: list[int | None] = [None] * total
+    keep: list[re.Pattern[str]] = []
+    for i, pattern in eligible:
+        try:
+            probe = FastScan.build((pattern,))
+        except Exception:  # noqa: S112 — refusal is the expected signal
+            continue  # refused even alone: stdlib residual
+        if probe.prefiltered:
+            continue
+        db_of[i] = len(keep)
+        keep.append(pattern)
+    if not keep:
+        return None, db_of
+    try:
+        fast = FastScan.build(keep)
+    except Exception:
+        logger.exception(
+            "scanner body database compile failed;"
+            " the epoch scans its body stage on the stdlib path"
+        )
+        return None, [None] * total
+    for slot in fast.prefiltered:  # pragma: no cover — admitted alone
+        db_of = [None if d == slot else d for d in db_of]
+    if all(d is None for d in db_of):
+        return None, db_of
+    return fast, db_of
+
+
+class _RulesetEpoch:
+    """One immutable generation of the live ruleset — the scan unit.
+
+    ``observe`` snapshots the whole object at a flow's arrival, so a
+    flow is scanned by exactly the rules (and the compiled body
+    database) of the epoch it arrived under: a mid-session install,
+    remove, or force-swap builds the next epoch and never applies
+    retroactively. ``layout`` maps each rule's body patterns to their
+    database index — or ``None`` for the stdlib residuals
+    (``_compile_body_scan``).
+    """
+
+    __slots__ = ("fast", "layout", "rules", "scans_body")
+
+    def __init__(self, rules: Sequence[Rule]) -> None:
+        """Freeze the rules tuple and compile its body database."""
+        self.rules = tuple(rules)
+        flat: list[re.Pattern[str]] = []
+        rows: list[range] = []
+        for rule in self.rules:
+            rows.append(range(len(flat), len(flat) + len(rule.body_patterns)))
+            flat.extend(rule.body_patterns)
+        self.fast, db_of = _compile_body_scan(flat)
+        self.layout = tuple(tuple(db_of[i] for i in row) for row in rows)
+        self.scans_body = bool(flat)
+
+
+class _BodyStage(NamedTuple):
+    """One flow's body-stage results, shared by every rule.
+
+    ``text``/``spans`` are the single engine pass (``spans`` is
+    ``None`` when the epoch scans stdlib-only); ``error`` re-raises
+    per rule at the point the all-stdlib path raised it, so an
+    unreadable body still contained-skips exactly the rules it always
+    did.
+    """
+
+    text: str | None
+    error: Exception | None
+    spans: list[list[tuple[int, int]]] | None
 
 
 class Scanner:
@@ -80,8 +262,13 @@ class Scanner:
         # only ever iterates an arrival-time snapshot (see observe), so
         # the list is never read mid-mutation.
         self._rules: list[Rule] = list(rules)
+        # The live epoch: the rules tuple plus the compiled body
+        # database those rules scan through. register/deregister
+        # (boot, install, remove, force-swap) builds the next one on
+        # this thread; observe snapshots the object itself.
+        self._epoch = _RulesetEpoch(self._rules)
         self._correlators: tuple[Correlator, ...] = tuple(correlators)
-        self._queue: queue.SimpleQueue[tuple[dict[str, Any], tuple[Rule, ...]]] = (
+        self._queue: queue.SimpleQueue[tuple[dict[str, Any], _RulesetEpoch]] = (
             queue.SimpleQueue()
         )
         self._wakeup = asyncio.Event()
@@ -101,7 +288,11 @@ class Scanner:
         record is simply lost to scanning.
         """
         try:
-            self._queue.put((record, tuple(self._rules)))
+            # The epoch object is the snapshot: the rules tuple and
+            # the body database they compile into, swapped wholesale
+            # by register/deregister, so an entry can never mix a
+            # rules list with a later epoch's database.
+            self._queue.put((record, self._epoch))
             loop = self._loop
             if loop is not None:
                 loop.call_soon_threadsafe(self._wakeup.set)
@@ -116,18 +307,25 @@ class Scanner:
         at a time between awaits, and queued entries keep their
         arrival-time snapshots, so the set is never observed
         mid-mutation. Applies forward only: flows that arrived before
-        the registration never match the new rules.
+        the registration never match the new rules. Registering builds
+        the next ruleset epoch — the new rules' body patterns compile
+        into a fresh database on this thread, off the scan path (the
+        drain keeps scanning queued entries against the epochs they
+        arrived under).
         """
         self._rules.extend(rules)
+        self._epoch = _RulesetEpoch(self._rules)
 
     def deregister_rules(self, rule_ids: AbstractSet[str]) -> None:
         """Drop every live rule whose id is in ``rule_ids`` (the remove path).
 
         Flows already queued keep their arrival-time snapshot; findings
         already recorded are never retracted — removal stops future
-        findings only.
+        findings only — and the next ruleset epoch compiles without
+        the removed rules' patterns.
         """
         self._rules = [rule for rule in self._rules if rule.id not in rule_ids]
+        self._epoch = _RulesetEpoch(self._rules)
 
     async def run(self) -> None:
         """Drain queued flow records against the rules until cancelled.
@@ -151,7 +349,7 @@ class Scanner:
             self._wakeup.clear()
             while True:
                 try:
-                    record, rules = self._queue.get_nowait()
+                    record, epoch = self._queue.get_nowait()
                 except queue.Empty:
                     break
                 # Off the loop thread: scan cost is linear in body size
@@ -159,13 +357,16 @@ class Scanner:
                 # the loop here serves every concurrent MCP tool call.
                 # Still strictly one flow at a time, in queue order —
                 # each scan is awaited before the next dequeue.
-                await asyncio.to_thread(self._scan, record, rules)
+                await asyncio.to_thread(self._scan, record, epoch)
 
-    def _scan(self, record: dict[str, Any], rules: tuple[Rule, ...]) -> None:
-        """Scan one flow record against its arrival-time rule snapshot."""
+    def _scan(self, record: dict[str, Any], epoch: _RulesetEpoch) -> None:
+        """Scan one flow record against its arrival-time ruleset epoch."""
         flow_id = str(record.get("id", "?"))
         view = FlowView(self._data_dir, record)
-        for rule in rules:
+        # The one body pass every rule shares: GIL-released, superset
+        # for the whole epoch, before any per-rule gate or assembly.
+        stage = self._body_stage(view, epoch)
+        for rule, layout in zip(epoch.rules, epoch.layout, strict=True):
             try:
                 # Dataset-backed rules (ADR-0035) override Rule.scan:
                 # the vendored data's extractors and per-advisory
@@ -176,7 +377,7 @@ class Scanner:
                     for finding in findings:
                         self._emit(finding)
                     continue
-                evidence = self._match(rule, view)
+                evidence = self._match(rule, view, layout, stage)
             except Exception:
                 logger.exception(
                     "scanner rule %r failed on flow %s; skipped", rule.id, flow_id
@@ -206,7 +407,35 @@ class Scanner:
             for finding in findings:
                 self._emit(finding)
 
-    def _match(self, rule: Rule, view: FlowView) -> list[Evidence]:
+    def _body_stage(self, view: FlowView, epoch: _RulesetEpoch) -> _BodyStage:
+        """Run the epoch's single engine pass over the stored body.
+
+        Reads the body once and scans it once — ``find_all`` releases
+        the GIL for the engine pass — whatever the rule count. A body
+        that cannot be read (or scanned) fails here once and is
+        re-raised per rule at the point the all-stdlib path raised
+        it, so containment skips exactly the rules it always did.
+        """
+        if not epoch.scans_body:
+            return _BodyStage(None, None, None)
+        try:
+            text = view.body
+            spans = (
+                epoch.fast.find_all(text)
+                if text is not None and epoch.fast is not None
+                else None
+            )
+        except Exception as exc:
+            return _BodyStage(None, exc, None)
+        return _BodyStage(text, None, spans)
+
+    def _match(
+        self,
+        rule: Rule,
+        view: FlowView,
+        layout: tuple[int | None, ...],
+        stage: _BodyStage,
+    ) -> list[Evidence]:
         """Apply a rule's gates, then its match spec, to one flow view."""
         browser = view.is_browser
         query_patterns, request_header_patterns = _request_patterns(
@@ -223,7 +452,7 @@ class Scanner:
             return []
         if not _passes_gates(rule, view.record, view):
             return []
-        evidence = _response_evidence(rule, view)
+        evidence = _response_evidence(rule, view, layout, stage)
         return [
             *evidence,
             *_request_evidence(query_patterns, request_header_patterns, view),
@@ -290,6 +519,23 @@ def _pattern_evidence(
     return evidence
 
 
+def _span_evidence(spans: Sequence[tuple[int, int]], text: str) -> list[Evidence]:
+    """Engine spans as evidence entries — the find-iterator's records.
+
+    The spans are the stdlib find-iterator's by construction (the
+    seam's parity contract), so the slice is ``match.group(0)`` and
+    the start is ``match.start()``.
+    """
+    return [
+        Evidence(
+            where=_RESPONSE_BODY,
+            offset=start,
+            detail=text[start:end][:_EVIDENCE_DETAIL_MAX],
+        )
+        for start, end in spans
+    ]
+
+
 def _stored_response_headers(view: FlowView) -> str | None:
     """The stored response headers, or ``None`` when the flow has none.
 
@@ -339,13 +585,32 @@ def _request_patterns(
     return rule.request_query_patterns, rule.request_header_patterns
 
 
-def _response_evidence(rule: Rule, view: FlowView) -> list[Evidence]:
-    """Body and response-header matches; absent material is a skip."""
+def _response_evidence(
+    rule: Rule,
+    view: FlowView,
+    layout: tuple[int | None, ...],
+    stage: _BodyStage,
+) -> list[Evidence]:
+    """Body and response-header matches; absent material is a skip.
+
+    The body half reads the one engine pass — spans in, evidence out
+    — for compiled patterns and the gated stdlib path for the
+    residuals, interleaved in the rule's body_patterns order so
+    records stay byte-identical to the all-stdlib scan.
+    """
     evidence: list[Evidence] = []
     if rule.body_patterns:
-        body = view.body
-        if body is not None:
-            evidence += _pattern_evidence(rule.body_patterns, body, _RESPONSE_BODY)
+        if stage.error is not None:
+            # Unreadable body: fail this rule where the old path did.
+            raise stage.error
+        if stage.text is not None:
+            for pattern, db_index in zip(rule.body_patterns, layout, strict=True):
+                if db_index is None or stage.spans is None:
+                    evidence += _pattern_evidence(
+                        (pattern,), stage.text, _RESPONSE_BODY
+                    )
+                else:
+                    evidence += _span_evidence(stage.spans[db_index], stage.text)
     if rule.header_patterns:
         headers = _stored_response_headers(view)
         if headers is not None:

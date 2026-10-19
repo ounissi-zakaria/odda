@@ -54,6 +54,7 @@ stdlib path outright.
 from __future__ import annotations
 
 import re
+import time
 from re import _constants as _sre
 from re._parser import parse as _sre_parse
 from typing import TYPE_CHECKING
@@ -357,6 +358,30 @@ def _char_ends(data: bytes, byte_ends: Sequence[int]) -> list[int]:
     return out
 
 
+# Reversal slice for the exact-path encode: one ``text[::-1]`` of a
+# 10 MB body is a single >10 ms C call holding the GIL, which stalls
+# the event loop serving the drain; the slices drop the GIL between
+# chunks so the loop keeps its cadence.
+_REVERSE_CHUNK = 1 << 18
+
+
+def _reversed_utf8(text: str) -> bytes:
+    """UTF-8 bytes of the reversed text, in GIL-yielding chunks.
+
+    Byte-identical to ``text[::-1].encode()``: slices are character-
+    wise, so no code point is ever split, and the reversed image of a
+    concatenation is the concatenation of the reversed images in
+    reverse order.
+    """
+    if len(text) <= _REVERSE_CHUNK:
+        return text[::-1].encode()
+    parts = []
+    for start in range(0, len(text), _REVERSE_CHUNK):
+        parts.append(text[start : start + _REVERSE_CHUNK][::-1].encode())
+        time.sleep(0)  # offer the loop thread the GIL between slices
+    return b"".join(reversed(parts))
+
+
 class _Exact:
     """One engine-exact pattern: reversed expression plus divergence tags."""
 
@@ -564,7 +589,7 @@ class FastScan:
         results: list[list[tuple[int, int]]],
     ) -> None:
         length = len(text)
-        data = text[::-1].encode()
+        data = _reversed_utf8(text)
         ends: list[list[int]] = [[] for _ in self._exact]
         self._exact_db.scan(
             data,
