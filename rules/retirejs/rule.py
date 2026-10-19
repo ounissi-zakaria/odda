@@ -59,24 +59,14 @@ from pathlib import Path
 from typing import Any
 
 from odda.scanner import Evidence, Finding, FlowView, Rule, Severity
-from odda.scanner.fastscan import FastScan
+from odda.scanner.fastscan import FastScan, sre_constants, sre_parse
 
-# The necessary-literal gate is the scanner engine's own pre-regex
+# The necessary-literal gate is the scanner's own pre-regex
 # optimization (a gate miss skips the linear scan over a multi-MB
-# body). It is not part of the pinned author surface, but slots run
-# in-process against the same machinery the engine uses — this
-# adapter keeps it in front of every stdlib residual the fast-scan
-# pass leaves behind (build-refused and over-budget shapes).
-from odda.scanner.model import _passes_literal_gates
-
-try:  # private API, but the only parser shipped; a missing module
-    # just routes every filecontent pattern to the stdlib path (the
-    # engine compile screen below needs the parse tree).
-    from re import _constants as _re_constants
-    from re._parser import parse as _re_parse
-except ImportError:  # pragma: no cover
-    _re_constants = None  # type: ignore[assignment]
-    _re_parse = None  # type: ignore[assignment]
+# body), and odda.scanner.gates is its public seam: this adapter
+# keeps it in front of every stdlib residual the fast-scan pass
+# leaves behind (build-refused and over-budget shapes).
+from odda.scanner.gates import passes_literal_gates
 
 logger = logging.getLogger(__name__)
 
@@ -106,20 +96,14 @@ _JS_CONTENT_TYPES: tuple[str, ...] = (
 )
 
 # The dataset's four advisory severities map onto the scanner's scale
-# name-for-name (nothing in the dataset maps to info); order powers the
-# aggregate "highest matched advisory wins" severity.
+# name-for-name (nothing in the dataset maps to info); Severity.rank
+# (the scale's own triage order) powers the aggregate "highest
+# matched advisory wins" severity.
 _SEVERITY_MAP: dict[str, Severity] = {
     "low": Severity.LOW,
     "medium": Severity.MEDIUM,
     "high": Severity.HIGH,
     "critical": Severity.CRITICAL,
-}
-_SEVERITY_ORDER: dict[Severity, int] = {
-    Severity.INFO: 0,
-    Severity.LOW: 1,
-    Severity.MEDIUM: 2,
-    Severity.HIGH: 3,
-    Severity.CRITICAL: 4,
 }
 
 # The engine's compiler unrolls bounded repeats — one state per step —
@@ -131,9 +115,9 @@ _SEVERITY_ORDER: dict[Severity, int] = {
 # capped instead of rejected outright (small fixed counts are cheap).
 _MAX_NESTED_STATES = 256
 _MAX_RANGE_SPAN = 128
-if _re_constants is not None:
+if sre_constants is not None:
     _WIDE_CATEGORIES = frozenset(
-        getattr(_re_constants, name)
+        getattr(sre_constants, name)
         for name in (
             "CATEGORY_NOT_DIGIT",
             "CATEGORY_NOT_SPACE",
@@ -251,7 +235,7 @@ class OutdatedLibraryRule(Rule):
                     )
                 )
                 refs.extend(r for r in advisory.refs if r not in refs)
-                if _SEVERITY_ORDER[advisory.severity] > _SEVERITY_ORDER[worst]:
+                if advisory.severity.rank > worst.rank:
                     worst = advisory.severity
         if not evidence:
             return []
@@ -325,7 +309,7 @@ def _filecontent_match(
     exactly as every pattern did before the seam.
     """
     if route.slot < 0:
-        if not _passes_literal_gates(route.pattern, body):
+        if not passes_literal_gates(route.pattern, body):
             return None
         return route.pattern.search(body)
     spans = results[route.slot]
@@ -474,10 +458,10 @@ def _affordable(pattern: re.Pattern[str]) -> bool:
     Screened-out patterns lose nothing but speed: they fall back to
     the gated stdlib scan this adapter has always had.
     """
-    if _re_parse is None:  # pragma: no cover — stdlib path takes over
+    if sre_parse is None:  # pragma: no cover — stdlib path takes over
         return False
     try:
-        tree = _re_parse(pattern.pattern, pattern.flags)
+        tree = sre_parse(pattern.pattern, pattern.flags)
     except Exception:
         return False
     return _affordable_tree(tree, under_bound=False, states=1)
@@ -494,25 +478,25 @@ def _affordable_node(node, *, under_bound: bool, states: int) -> bool:
     """Screen one parse-tree node (and, for containers, its subtree)."""
     op, av = node
     if op in (
-        _re_constants.LITERAL,
-        _re_constants.AT,
-        _re_constants.GROUPREF,
+        sre_constants.LITERAL,
+        sre_constants.AT,
+        sre_constants.GROUPREF,
     ):
         return True
-    if op in (_re_constants.NOT_LITERAL, _re_constants.ANY):
+    if op in (sre_constants.NOT_LITERAL, sre_constants.ANY):
         return not under_bound
-    if op is _re_constants.IN:
+    if op is sre_constants.IN:
         return not under_bound or not _class_is_wide(av)
-    if op is _re_constants.SUBPATTERN:
+    if op is sre_constants.SUBPATTERN:
         return _affordable_tree(av[3], under_bound=under_bound, states=states)
-    if op is _re_constants.BRANCH:
+    if op is sre_constants.BRANCH:
         return all(
             _affordable_tree(branch, under_bound=under_bound, states=states)
             for branch in av[1]
         )
-    if op in (_re_constants.ASSERT, _re_constants.ASSERT_NOT):
+    if op in (sre_constants.ASSERT, sre_constants.ASSERT_NOT):
         return _affordable_tree(av[1], under_bound=under_bound, states=states)
-    if op in (_re_constants.MAX_REPEAT, _re_constants.MIN_REPEAT):
+    if op in (sre_constants.MAX_REPEAT, sre_constants.MIN_REPEAT):
         return _affordable_repeat(av, under_bound=under_bound, states=states)
     return False
 
@@ -525,7 +509,7 @@ def _affordable_repeat(av, *, under_bound: bool, states: int) -> bool:
     the combination simulates).
     """
     _mn, mx, sub = av
-    if mx is _re_constants.MAXREPEAT:
+    if mx is sre_constants.MAXREPEAT:
         return not under_bound and _affordable_tree(
             sub, under_bound=under_bound, states=states
         )
@@ -538,11 +522,11 @@ def _affordable_repeat(av, *, under_bound: bool, states: int) -> bool:
 def _class_is_wide(items: Any) -> bool:
     """Whether a character class covers too much to unroll cheaply."""
     for op, av in items:
-        if op is _re_constants.NEGATE:
+        if op is sre_constants.NEGATE:
             return True
-        if op is _re_constants.RANGE and av[1] - av[0] > _MAX_RANGE_SPAN:
+        if op is sre_constants.RANGE and av[1] - av[0] > _MAX_RANGE_SPAN:
             return True
-        if op is _re_constants.CATEGORY and av in _WIDE_CATEGORIES:
+        if op is sre_constants.CATEGORY and av in _WIDE_CATEGORIES:
             return True
     return False
 
