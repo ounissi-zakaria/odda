@@ -21,6 +21,18 @@ version placeholder; this adapter expands it exactly as upstream's
 replaceVersion does (digits, then dots, lowercase letters, underscores,
 hyphens — as a named capture group).
 
+``filecontent`` patterns do not scan one-by-one: every library's
+patterns are compiled into one fast-scan database (the scanner's
+multi-pattern seam — one GIL-released engine pass per body answers
+them all), built on first use and rebuilt naturally on reinstall
+because a reinstall re-executes this slot module. Patterns whose shape
+the engine's compiler cannot afford — bounded repeats unroll in it, so
+wide atoms or unbounded sub-repeats under them compile for seconds to
+minutes — stay on the gated stdlib path, as do patterns the seam
+refuses outright (zero-width constructs) and approximated prefilters
+(backreferences), which the true pattern confirms on every
+approximation hit.
+
 A version matches an advisory exactly as upstream retire.js decides it:
 vulnerable iff strictly below ``below`` (when present) and at-or-above
 ``atOrAbove`` (when present) — a hand-rolled, stdlib-only compare where
@@ -47,13 +59,24 @@ from pathlib import Path
 from typing import Any
 
 from odda.scanner import Evidence, Finding, FlowView, Rule, Severity
+from odda.scanner.fastscan import FastScan
 
 # The necessary-literal gate is the scanner engine's own pre-regex
 # optimization (a gate miss skips the linear scan over a multi-MB
 # body). It is not part of the pinned author surface, but slots run
-# in-process against the same machinery the engine uses — importing
-# it keeps this adapter's dataset scan as cheap as the engine's.
+# in-process against the same machinery the engine uses — this
+# adapter keeps it in front of every stdlib residual the fast-scan
+# pass leaves behind (build-refused and approximated patterns).
 from odda.scanner.model import _passes_literal_gates
+
+try:  # private API, but the only parser shipped; a missing module
+    # just routes every filecontent pattern to the stdlib path (the
+    # engine compile screen below needs the parse tree).
+    from re import _constants as _re_constants
+    from re._parser import parse as _re_parse
+except ImportError:  # pragma: no cover
+    _re_constants = None  # type: ignore[assignment]
+    _re_parse = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +122,30 @@ _SEVERITY_ORDER: dict[Severity, int] = {
     Severity.CRITICAL: 4,
 }
 
+# The engine's compiler unrolls bounded repeats — one state per step —
+# and blows up combinatorially when the unrolled content is wide (a
+# negated class, `.`) or itself repeats without a bound. Measured on
+# the vendored dataset: jquery `.{50,300}` compiles in 2.3 s, tinyMCE
+# `.{0,1200}` in 79 s, vue `[^\n]{0,8000}` past 90 s, while every
+# screened-in pattern compiles in under 25 ms. Bounded nesting is
+# capped instead of rejected outright (small fixed counts are cheap).
+_MAX_NESTED_STATES = 256
+_MAX_RANGE_SPAN = 128
+if _re_constants is not None:
+    _WIDE_CATEGORIES = frozenset(
+        getattr(_re_constants, name)
+        for name in (
+            "CATEGORY_NOT_DIGIT",
+            "CATEGORY_NOT_SPACE",
+            "CATEGORY_NOT_WORD",
+            "CATEGORY_UNI_NOT_DIGIT",
+            "CATEGORY_UNI_NOT_SPACE",
+            "CATEGORY_UNI_NOT_WORD",
+        )
+    )
+else:  # pragma: no cover — screen off; the stdlib path takes over
+    _WIDE_CATEGORIES = frozenset()
+
 
 @dataclass(frozen=True, slots=True)
 class _Advisory:
@@ -120,6 +167,36 @@ class _Library:
     filecontent: tuple[re.Pattern[str], ...]
     hashes: dict[str, str]
     advisories: tuple[_Advisory, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Route:
+    """How one filecontent pattern reads off the shared fast-scan pass.
+
+    ``slot`` indexes the corpus pass's per-pattern result list; ``-1``
+    marks a pattern that never entered the database (shape the engine
+    compiler cannot afford, or a build refusal) and scans stdlib,
+    gated. ``approximated`` marks a slot the engine could only
+    prefilter: its spans are approximation hits, so the true pattern
+    confirms before any match counts.
+    """
+
+    pattern: re.Pattern[str]
+    slot: int
+    approximated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Corpus:
+    """Every library's filecontent patterns behind one fast-scan pass.
+
+    ``entries`` pairs each library (dataset order — the priority the
+    adapter has always walked) with its patterns' routes, in the
+    per-library order the adapter has always tried them.
+    """
+
+    scan: FastScan
+    entries: tuple[tuple[_Library, tuple[_Route, ...]], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,12 +223,20 @@ class OutdatedLibraryRule(Rule):
         # into vendored hashes), not a security primitive.
         digest = hashlib.sha1(body_bytes).hexdigest()  # noqa: S324
 
+        # One GIL-released engine pass over every library's filecontent
+        # patterns answers them all (the hundreds of sequential stdlib
+        # scans this replaces were ~92% of scan cost); hash and
+        # filename extractors stay as they were (a dict lookup and a
+        # search over the flow's short path).
+        corpus = _filecontent_corpus()
+        results = corpus.scan.find_all(body)
+
         evidence: list[Evidence] = []
         refs: list[str] = []
         worst = Severity.INFO
         path = str(view.record.get("path") or "")
-        for library in _libraries():
-            detected = _detect(library, path, body, digest)
+        for library, routes in corpus.entries:
+            detected = _detect(library, routes, path, body, digest, results)
             if detected is None:
                 continue
             version, extractor, offset = detected
@@ -194,14 +279,20 @@ RULES = [RULE]
 
 
 def _detect(
-    library: _Library, path: str, body: str, digest: str
+    library: _Library,
+    routes: tuple[_Route, ...],
+    path: str,
+    body: str,
+    digest: str,
+    results: list[list[tuple[int, int]]],
 ) -> tuple[str, str, int] | None:
     """Detect a library version from a flow's stored body and path.
 
     Returns ``(version, extractor, offset)`` — the offset of the
     matching text in the matched material — or ``None`` when no
     extractor speaks. The exact hash wins over the file name, and the
-    file name over a content match.
+    file name over a content match; ``results`` is the shared
+    fast-scan pass over ``body`` that the filecontent routes read.
     """
     version = library.hashes.get(digest)
     if version is not None:
@@ -212,19 +303,40 @@ def _detect(
             version = match.group(_VERSION_GROUP)
             if version:
                 return version, "filename", match.start()
-    for pattern in library.filecontent:
-        # Necessary-literal gate first: a miss skips the linear scan —
-        # the dominant multi-MB-body cost. The hash and filename
-        # extractors above stay as they are (dict lookup and a search
-        # over the flow's short path).
-        if not _passes_literal_gates(pattern, body):
-            continue
-        match = pattern.search(body)
+    for route in routes:
+        match = _filecontent_match(route, results, body)
         if match is not None:
             version = match.group(_VERSION_GROUP)
             if version:
                 return version, "filecontent", match.start()
     return None
+
+
+def _filecontent_match(
+    route: _Route, results: list[list[tuple[int, int]]], body: str
+) -> re.Match[str] | None:
+    """The leftmost match of one routed filecontent pattern, or ``None``.
+
+    Seam-exact patterns anchor at the pass's first span start — the
+    same leftmost-first match ``search`` returns, without rescanning
+    the body. Approximated prefilters only promise that SOME span
+    appears when the body matches, so the true pattern confirms (gate
+    first: a gate miss proves the hit was an over-report). Patterns
+    that never entered the database scan stdlib, gated, exactly as
+    every pattern did before the seam.
+    """
+    if route.slot < 0:
+        if not _passes_literal_gates(route.pattern, body):
+            return None
+        return route.pattern.search(body)
+    spans = results[route.slot]
+    if not spans:
+        return None
+    if route.approximated:
+        if not _passes_literal_gates(route.pattern, body):
+            return None
+        return route.pattern.search(body)
+    return route.pattern.match(body, spans[0][0])
 
 
 def _detail(name: str, version: str, extractor: str, advisory: _Advisory) -> str:
@@ -286,6 +398,161 @@ def _libraries() -> tuple[_Library, ...]:
     dataset = Path(__file__).resolve().parent / _DATASET_FILENAME
     document = json.loads(dataset.read_text(encoding="utf-8"))
     return tuple(_compile_library(name, entry) for name, entry in document.items())
+
+
+@cache
+def _filecontent_corpus() -> _Corpus:
+    """Compile every library's filecontent patterns into one fast scan.
+
+    Built on first use — the drain's worker thread, where the dataset
+    parse it extends already happens — so installing or booting the
+    slot stays cheap; a reinstall re-executes this slot module, which
+    restarts the caches and rebuilds against the new dataset. The
+    build screens every pattern's shape first (see ``_affordable``):
+    the screened-out patterns keep their gated stdlib scans.
+    """
+    libraries = _libraries()
+    flattened = [pattern for library in libraries for pattern in library.filecontent]
+    screenable = [
+        (index, pattern)
+        for index, pattern in enumerate(flattened)
+        if _affordable(pattern)
+    ]
+    scan, accepted = _build_filecontent_scan(screenable)
+    slot_of = {original: slot for slot, original in enumerate(accepted)}
+    approximated = {accepted[slot] for slot in scan.prefiltered}
+    entries: list[tuple[_Library, tuple[_Route, ...]]] = []
+    position = 0
+    for library in libraries:
+        routes = []
+        for pattern in library.filecontent:
+            routes.append(
+                _Route(pattern, slot_of.get(position, -1), position in approximated)
+            )
+            position += 1
+        entries.append((library, tuple(routes)))
+    return _Corpus(scan=scan, entries=tuple(entries))
+
+
+def _build_filecontent_scan(
+    screenable: list[tuple[int, re.Pattern[str]]],
+) -> tuple[FastScan, tuple[int, ...]]:
+    """Build the shared database over the screened patterns.
+
+    Returns the scan plus the original indices it accepted, in build
+    order (result slot ``k`` answers ``screenable[k][1]``). A pattern
+    the seam refuses outright — zero-width constructs, which no
+    approximation can stand in for — refuses the whole batch build,
+    so the fallback triages per pattern and the refusals keep their
+    gated stdlib scans instead.
+    """
+    patterns = tuple(pattern for _, pattern in screenable)
+    try:
+        return FastScan.build(patterns), tuple(original for original, _ in screenable)
+    except ValueError as exc:
+        logger.warning(
+            "retire.js fast-scan build refused a pattern (%s); triaging per pattern",
+            exc,
+        )
+    keep = {original for original, pattern in screenable if _buildable(pattern)}
+    return (
+        FastScan.build(
+            tuple(pattern for original, pattern in screenable if original in keep)
+        ),
+        tuple(original for original, _ in screenable if original in keep),
+    )
+
+
+def _buildable(pattern: re.Pattern[str]) -> bool:
+    """Whether the seam can compile or approximate one pattern alone."""
+    try:
+        FastScan.build((pattern,))
+    except ValueError:
+        return False
+    return True
+
+
+def _affordable(pattern: re.Pattern[str]) -> bool:
+    r"""Whether one pattern's shape compiles in the engine cheaply.
+
+    The engine's compiler unrolls bounded repeats into one state per
+    step, so a wide atom (``.``, a negated class) or an unbounded
+    sub-repeat under one turns the compile from milliseconds into
+    seconds or worse — vue's ``[^\n]{0,8000}`` never finished in 90 s.
+    Screened-out patterns lose nothing but speed: they fall back to
+    the gated stdlib scan this adapter has always had.
+    """
+    if _re_parse is None:  # pragma: no cover — stdlib path takes over
+        return False
+    try:
+        tree = _re_parse(pattern.pattern, pattern.flags)
+    except Exception:
+        return False
+    return _affordable_tree(tree, under_bound=False, states=1)
+
+
+def _affordable_tree(tree, *, under_bound: bool, states: int) -> bool:
+    """Walk one parsed subpattern; ``False`` marks a shape to screen out."""
+    return all(
+        _affordable_node(node, under_bound=under_bound, states=states) for node in tree
+    )
+
+
+def _affordable_node(node, *, under_bound: bool, states: int) -> bool:
+    """Screen one parse-tree node (and, for containers, its subtree)."""
+    op, av = node
+    if op in (
+        _re_constants.LITERAL,
+        _re_constants.AT,
+        _re_constants.GROUPREF,
+    ):
+        return True
+    if op in (_re_constants.NOT_LITERAL, _re_constants.ANY):
+        return not under_bound
+    if op is _re_constants.IN:
+        return not under_bound or not _class_is_wide(av)
+    if op is _re_constants.SUBPATTERN:
+        return _affordable_tree(av[3], under_bound=under_bound, states=states)
+    if op is _re_constants.BRANCH:
+        return all(
+            _affordable_tree(branch, under_bound=under_bound, states=states)
+            for branch in av[1]
+        )
+    if op in (_re_constants.ASSERT, _re_constants.ASSERT_NOT):
+        return _affordable_tree(av[1], under_bound=under_bound, states=states)
+    if op in (_re_constants.MAX_REPEAT, _re_constants.MIN_REPEAT):
+        return _affordable_repeat(av, under_bound=under_bound, states=states)
+    return False
+
+
+def _affordable_repeat(av, *, under_bound: bool, states: int) -> bool:
+    """Screen one repeat.
+
+    Unrolling is what costs, so its body and bound decide (an
+    unbounded repeat loops — but never inside another repeat, where
+    the combination simulates).
+    """
+    _mn, mx, sub = av
+    if mx is _re_constants.MAXREPEAT:
+        return not under_bound and _affordable_tree(
+            sub, under_bound=under_bound, states=states
+        )
+    unrolled = states * max(mx, 1)
+    return _affordable_tree(sub, under_bound=True, states=unrolled) and not (
+        under_bound and unrolled > _MAX_NESTED_STATES
+    )
+
+
+def _class_is_wide(items: Any) -> bool:
+    """Whether a character class covers too much to unroll cheaply."""
+    for op, av in items:
+        if op is _re_constants.NEGATE:
+            return True
+        if op is _re_constants.RANGE and av[1] - av[0] > _MAX_RANGE_SPAN:
+            return True
+        if op is _re_constants.CATEGORY and av in _WIDE_CATEGORIES:
+            return True
+    return False
 
 
 def _compile_library(name: str, entry: dict[str, Any]) -> _Library:
