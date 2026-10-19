@@ -2,12 +2,12 @@
 
 The scanner package's multi-pattern find-all seam (``odda.scanner.fastscan``)
 takes compiled patterns in and returns per-pattern match spans out — character
-offsets, leftmost-first non-overlapping, identical to ``re.Pattern.finditer``
+offsets, leftmost-first, non-overlapping, identical to ``re.Pattern.finditer``
 over the exact decoded text the Scanner scans. Patterns the engine refuses
 (backreferences, lookarounds, word boundaries) compile as approximate
-prefilters that report themselves as such; every body truly matching the
-refused pattern also hits its approximation. No Scanner behavior changes yet
-— this corpus is the seam's proof.
+prefilters that report themselves as such; their spans come back confirmed —
+the true stdlib pattern runs only on bodies whose approximation hit (ticket
+13), so parity holds for them too and a real match is never suppressed.
 """
 
 import random
@@ -247,9 +247,9 @@ def test_multiline_anchors_round_trip() -> None:
 
 # Patterns the engine refuses (backreference, lookarounds, word boundary,
 # possessive/atomic repeats, engine pattern-size limits): each must compile
-# as an approximate prefilter, report itself as prefiltered, and hit on
-# every body the true stdlib pattern matches (superset — over-reporting is
-# allowed, under-reporting never).
+# as an approximate prefilter and report itself as prefiltered — the
+# approximation may over-report but never under-report, so the true
+# pattern's confirmation (ticket 13) can never lose a real match.
 _REFUSED_CORPUS: tuple[tuple[str, int, str], ...] = (
     # (source, flags, body that truly matches)
     (
@@ -279,19 +279,41 @@ _REFUSED_CORPUS: tuple[tuple[str, int, str], ...] = (
         0,
         "Telerik.Web.UI.WebResource.axdblahblahVersion=2013.1",
     ),
+    # An agent-authored quote-pair secret shape (ticket 13's third
+    # refusal family): the same quote must open and close the value —
+    # a backreference the engine cannot scan exactly.
+    (
+        r"\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*"
+        r"([\"'])[A-Za-z0-9+/=_.\-]{8,64}\1",
+        0,
+        'config = dict(api_key = "sk_live_abcdefghijklmnop")',
+    ),
+    # Lookahead-only script-import shape: the src attribute must be
+    # ahead, not consumed — refused, approximated, confirmed.
+    (
+        r"(?is)<script(?=[^>]{0,200}\ssrc\s*=\s*[\"'])[^>]{0,400}>",
+        0,
+        '<script defer src="https://good.example/x.js"></script>',
+    ),
+    (r"token(?![A-Za-z0-9_])", 0, "auth: token"),
 )
 
 
-def test_refused_patterns_run_as_approximate_prefilters() -> None:
-    """Engine-refused patterns classify as prefilters and their
-    approximations report supersets: every body truly matching the refused
-    pattern also hits its approximation."""
+def test_prefiltered_patterns_confirm_to_stdlib_finditer_spans() -> None:
+    """Engine-refused patterns classify as prefilters and their spans
+    come back confirmed (ticket 13): on every corpus body — the true
+    hit, its surroundings, and seeded randoms spliced with the
+    refusal families' own fragments — find_all reports exactly the
+    stdlib find-iterator's spans per refused pattern. The approximation
+    may over-report, and the confirmation collapses the over-reports;
+    what it can never do is lose a match the true pattern finds."""
     patterns = [re.compile(src, flags) for src, flags, _ in _REFUSED_CORPUS]
     fs = FastScan.build(patterns)
     assert fs.prefiltered == frozenset(range(len(patterns)))
     rng = random.Random(20261106)
-    for src, flags, hit_body in _REFUSED_CORPUS:
-        pat = re.compile(src, flags)
+    for i, (src, _flags, hit_body) in enumerate(_REFUSED_CORPUS):
+        pat = patterns[i]
+        assert pat.search(hit_body), f"corpus bug: {src!r} must match its body"
         bodies = [
             hit_body,
             hit_body + " padding",
@@ -301,20 +323,17 @@ def test_refused_patterns_run_as_approximate_prefilters() -> None:
         ]
         for _ in range(60):
             pool = "abc \n<script>\npolyfill.io\nAKIA\n0123 xsecret Help TYPE\n"
+            pool += "\"'= api_key sk_live token:\nVersion=\r\n"
             bodies.append(
                 "".join(rng.choice(pool) for _ in range(rng.randrange(0, 80)))
             )
-        i = patterns.index(pat)
-        assert pat.search(hit_body), f"corpus bug: {src!r} must match its body"
-        any_hits = False
         for body in bodies:
             spans = fs.find_all(body)[i]
-            if pat.search(body):
-                assert spans, f"prefilter for {src!r} under-reported on {body!r}"
-                any_hits = any_hits or bool(spans)
-            for start, end in spans:
-                assert 0 <= start < end <= len(body)
-        assert any_hits, f"prefilter for {src!r} never fired (vacuous)"
+            want = [match.span() for match in pat.finditer(body)]
+            assert spans == want, (
+                f"confirmed prefilter for {src!r} diverged on {body!r}:"
+                f" engine={spans[:4]}... stdlib={want[:4]}..."
+            )
 
 
 def test_unapproximable_patterns_are_refused_at_build() -> None:
@@ -368,12 +387,15 @@ def test_multichunk_reversal_spans_match_stdlib_finditer() -> None:
 
 def test_multi_pattern_scan_keeps_patterns_independent() -> None:
     """One find_all over a body several patterns match returns each
-    pattern's own spans, in input order."""
+    pattern's own spans, in input order — including the prefiltered
+    word-boundary pattern, whose confirmed spans ride the same result
+    list as the exact patterns'."""
     fs = FastScan.build(
         [re.compile(p) for p in (r"one", r"\btwo\b", r"three|threex", r"none")]
     )
     body = "one two threex one two"
     spans = fs.find_all(body)
     assert spans[0] == [(0, 3), (15, 18)]
+    assert spans[1] == [(4, 7), (19, 22)]
     assert spans[2] == [(8, 13)]
     assert spans[3] == []

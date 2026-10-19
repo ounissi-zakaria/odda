@@ -15,15 +15,18 @@ one finding write — is logged and skipped. A broken rule never blocks
 the flow's other rules, and nothing the scanner does can touch the
 flow write path that triggered it.
 
-The response-body stage drains through the compiled engine (ticket
-12): every declarative body pattern of the live ruleset builds into
-one fast-scan database per ruleset epoch, and each stored body is
+The response-body stage drains through the compiled engine (tickets
+12 and 13): every declarative body pattern of the live ruleset builds
+into one fast-scan database per ruleset epoch, and each stored body is
 scanned once, in a GIL-released pass, whatever the rule count. Gates
 (schemes, statuses, content types, browser attribution) filter after
-the pass, per rule, before evidence assembly. Patterns the engine
-refuses or cannot compile within budget stay on the stdlib path;
-request-query, request-header, and response-header stages never left
-it (tiny texts, necessary-literal gated).
+the pass, per rule, before evidence assembly. Patterns the engine can
+only approximate — backreferences, lookarounds — ride the same
+database as prefilters and confirm on their approximation hits
+(ADR-0037); the stdlib residuals are the over-budget shapes and the
+build-refused zero-width patterns. Request-query, request-header, and
+response-header stages never left the stdlib path (tiny texts,
+necessary-literal gated).
 """
 
 from __future__ import annotations
@@ -127,10 +130,12 @@ def _compile_body_scan(
 
     Returns the database (``None`` when nothing rides it) and, per
     input pattern, its index into the database — or ``None`` for the
-    stdlib residuals: over-budget patterns (``_EXPANSION_MAX``),
-    patterns the engine refused to scan exactly (its approximate
-    prefilters — their spans stay unused until ticket 13's
-    confirm-on-hit), and patterns that refuse even approximation.
+    stdlib residuals: over-budget patterns (``_EXPANSION_MAX``) and
+    patterns that refuse even approximation (zero-width constructs
+    whose ``FastScan.build`` raises). Patterns the engine can only
+    approximate ride too (ticket 13): their spans come back confirmed
+    — approximation prefilter, stdlib confirm on the hit — so they are
+    indistinguishable from exact slots in the layout.
     """
     db_of: list[int | None] = [None] * len(patterns)
     eligible = [
@@ -148,12 +153,8 @@ def _compile_body_scan(
         # by probe so only the offenders fall back. A pattern must
         # never break the epoch — the worst case is the stdlib path.
         return _partition_body_scan(eligible, len(patterns))
-    refused = fast.prefiltered
     for slot, (i, _pattern) in enumerate(eligible):
-        if slot not in refused:
-            db_of[i] = slot
-    if all(d is None for d in db_of):
-        return None, db_of
+        db_of[i] = slot
     return fast, db_of
 
 
@@ -165,11 +166,9 @@ def _partition_body_scan(
     keep: list[re.Pattern[str]] = []
     for i, pattern in eligible:
         try:
-            probe = FastScan.build((pattern,))
+            FastScan.build((pattern,))
         except Exception:  # noqa: S112 — refusal is the expected signal
             continue  # refused even alone: stdlib residual
-        if probe.prefiltered:
-            continue
         db_of[i] = len(keep)
         keep.append(pattern)
     if not keep:
@@ -182,10 +181,6 @@ def _partition_body_scan(
             " the epoch scans its body stage on the stdlib path"
         )
         return None, [None] * total
-    for slot in fast.prefiltered:  # pragma: no cover — admitted alone
-        db_of = [None if d == slot else d for d in db_of]
-    if all(d is None for d in db_of):
-        return None, db_of
     return fast, db_of
 
 
@@ -197,7 +192,8 @@ class _RulesetEpoch:
     database) of the epoch it arrived under: a mid-session install,
     remove, or force-swap builds the next epoch and never applies
     retroactively. ``layout`` maps each rule's body patterns to their
-    database index — or ``None`` for the stdlib residuals
+    database index — exact and approximated slots alike, their spans
+    arrive confirmed — or ``None`` for the stdlib residuals
     (``_compile_body_scan``).
     """
 

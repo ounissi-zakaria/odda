@@ -2325,9 +2325,10 @@ async def test_engine_body_stage_records_match_stdlib_finditer(
     plain stdlib finditer over the same rule patterns produces — rule
     ids, severities, titles, evidence where/offset/detail, refs. One
     flow hits engine-exact rules (multi-match aggregation in the
-    stack-trace rule), an engine-refused pattern (the Prometheus
-    exposition's backreference, stdlib residual), and an expansion-
-    guard residual (the S3 bounded-lazy takeover shape)."""
+    stack-trace rule), an engine-approximated pattern (the Prometheus
+    exposition's backreference, prefilter plus stdlib confirm on the
+    hit), and an expansion-guard residual (the S3 bounded-lazy
+    takeover shape)."""
     rules = _all_slot_rules()
     body = (
         "Traceback (most recent call last):\n"
@@ -2429,6 +2430,220 @@ async def test_arrival_epoch_never_matches_retroactively(tmp_path) -> None:
         ("user.ticket12-canary", "00002")
     ]
     assert index[0]["evidence"][0]["detail"] == f"{_T12_MARKER}-7"
+
+
+# --- ticket 13: prefilter and confirm for incompatible patterns ---
+
+
+_T13_HIT_BODY = (
+    "# HELP go_goroutines Number of goroutines\n"
+    "# TYPE go_goroutines gauge\n"
+    'config = dict(api_key = "sk_live_abcdefghijklmnop")\n'
+    '<script defer src="https://cdn.bootcdn.net.example.com/x.js"></script>\n'
+    '<script defer src="https://cdn.bootcss.com/x.js"></script>\n'
+)
+
+# The corpus's three refusal families in one rule, restated within the
+# engine's compile-expansion budget (ADR-0037: over-budget shapes stay
+# stdlib residuals however they scan): the Prometheus backreference
+# (rules/fingerprints), the compromised-CDN lookarounds
+# (rules/supplychain, bridging repeat shortened), and the quote-pair
+# secret an agent authors the same way.
+_T13_REFUSED = Rule(
+    id="user.ticket13-refused",
+    severity=Severity.LOW,
+    title="Ticket 13 refusal families",
+    body_patterns=(
+        r"(?m)^# HELP ((?:prometheus|go|process)_[a-zA-Z0-9_:]+)[^\r\n]*\r?\n"
+        r"# TYPE \1 (?:counter|gauge|histogram|summary)\b",
+        r"\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*"
+        r"([\"'])[A-Za-z0-9+/=_.\-]{4,32}\1",
+        r"""(?i)<script\b[^>]{0,40}\ssrc\s*=\s*["'][^"']*(?<![\w-])"""
+        r"""(?:polyfill\.io|bootcdn\.net|bootcss\.com)(?![\w.-])[^"']*["']""",
+    ),
+)
+
+
+async def test_confirmation_runs_only_on_approximation_hit_bodies(
+    tmp_path, monkeypatch
+) -> None:
+    """Ticket 13's proof, by counting stdlib body scans through the
+    library seam: three engine-refused body patterns ride the epoch's
+    one-pass database as approximate prefilters. A body no
+    approximation hits drains with zero stdlib body-pattern scans — no
+    confirmation, no residual — while a body whose approximations hit
+    triggers exactly one confirmation per pattern, the over-reporting
+    CDN host confirms away, and the finding that lands is byte-identical
+    to plain stdlib finditer over the same patterns."""
+    from odda.scanner import engine, fastscan
+
+    confirms: list[tuple[str, str]] = []
+    residuals: list[str] = []
+    real_confirm = fastscan._confirmed_spans  # noqa: SLF001 — the spy seam
+    real_evidence = engine._pattern_evidence  # noqa: SLF001 — the spy seam
+
+    def counting_confirm(pattern: re.Pattern, text: str) -> list:
+        confirms.append((pattern.pattern, text))
+        return real_confirm(pattern, text)
+
+    def counting_evidence(patterns: tuple, text: str, where: str) -> list:
+        if where == "response_body":
+            residuals.append(patterns[0].pattern)
+        return real_evidence(patterns, text, where)
+
+    monkeypatch.setattr(fastscan, "_confirmed_spans", counting_confirm)
+    monkeypatch.setattr(engine, "_pattern_evidence", counting_evidence)
+
+    data_dir = tmp_path / ".odda"
+    scanner = Scanner(data_dir, rules=(_T13_REFUSED,))
+    miss = _stored_flow(
+        data_dir, "miss01", b"plain ascii payload with nothing exotic in it\n"
+    )
+    hit = _stored_flow(data_dir, "hit02", _T13_HIT_BODY.encode())
+    scanner.observe(miss)
+    scanner.observe(hit)
+    drain = asyncio.create_task(scanner.run())
+    findings_path = data_dir / "scanner" / "findings.jsonl"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if findings_path.is_file() and findings_path.read_text().splitlines():
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.15)  # any late extra finding fails the set assert
+    drain.cancel()
+    await asyncio.gather(drain, return_exceptions=True)
+
+    # The independent truth: plain stdlib finditer over the same rule
+    # patterns, aggregated exactly as the scanner aggregates.
+    expected_evidence = [
+        {
+            "where": "response_body",
+            "offset": match.start(),
+            "detail": match.group(0)[:200],
+        }
+        for pattern in _T13_REFUSED.body_patterns
+        for match in pattern.finditer(_T13_HIT_BODY)
+    ]
+    index = _findings_index(data_dir)
+    assert len(index) == 1
+    assert index[0] == {
+        "rule_id": "user.ticket13-refused",
+        "flow_id": "hit02",
+        "severity": "low",
+        "title": "Ticket 13 refusal families",
+        "evidence": expected_evidence,
+        "refs": [],
+    }
+
+    # The miss body — no approximation hit, ASCII — never reached a
+    # stdlib pattern; the hit body confirmed each pattern exactly once.
+    assert all("nothing exotic" not in text for _src, text in confirms)
+    assert len(confirms) == 3, [src for src, _ in confirms]
+    assert {src for src, _ in confirms} == {
+        pattern.pattern for pattern in _T13_REFUSED.body_patterns
+    }
+    assert residuals == []
+
+
+async def test_confirmation_over_multi_mb_body_keeps_residual_ceiling(
+    tmp_path,
+) -> None:
+    """The residual-path numbers contract during a confirmation
+    (ticket 13): a stdlib confirm sweep over a 10 MB body runs on the
+    drain's worker thread (ticket 10's offload), so the loop keeps its
+    cadence — the heartbeat's worst gap stays under the spec's 0.6 s
+    residual ceiling (a finditer confirm walks the body in match-step
+    sized segments; the hazard the ceiling guards is a whole-body
+    freeze). The body carries approximation hits that confirm away —
+    HELP/TYPE pairs with mismatched names, a lookaround-violating CDN
+    host — plus one true match per pattern; the findings are exactly
+    the true matches', and queue order survives."""
+    data_dir = tmp_path / ".odda"
+    noise = "var a=1;function f(){return a+1;}\n"
+    # A real metrics exposition's density: a few thousand HELP/TYPE
+    # families and a handful of script tags over 10 MB, not an
+    # approximation hit every line (an adversarial density floods the
+    # engine pass's match callbacks — a seam property, not a confirm
+    # property; the confirm under test is the finditer sweep itself).
+    unit = (
+        noise * 96
+        + "# HELP go_noise metric documentation line\n"
+        + "# TYPE other_family counter\n"
+    )
+    blocks = []
+    count = 10 * 1024 * 1024 // len(unit)
+    for i in range(count):
+        blocks.append(unit)
+        if i % 32 == 31:
+            blocks.append(
+                '<script defer src="https://cdn.bootcdn.net.example.com/x.js">'
+                "</script>\n"
+            )
+    big_body = (
+        "".join(blocks)
+        + "# HELP process_open_fds FD usage\n"
+        + "# TYPE process_open_fds gauge\n"
+        + '<script defer src="https://cdn.bootcss.com/x.js"></script>\n'
+    )
+    small_body = (
+        "# HELP prometheus_tsdb_head_series Total head series\n"
+        "# TYPE prometheus_tsdb_head_series gauge\n"
+    )
+    big = _stored_flow(
+        data_dir, "bigjs01", big_body.encode(), content_type="text/plain"
+    )
+    small = _stored_flow(
+        data_dir, "prom02", small_body.encode(), content_type="text/plain"
+    )
+    scanner = Scanner(
+        data_dir, rules=(*_slot_rules("supplychain"), *_slot_rules("fingerprints"))
+    )
+    drain = asyncio.create_task(scanner.run())
+
+    beats: list[tuple[float, float]] = []
+
+    async def heartbeat() -> None:
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.005)
+            now = time.monotonic()
+            beats.append((now, now - last))
+            last = now
+
+    hb = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0.05)
+
+    window_start = time.monotonic()
+    scanner.observe(big)
+    scanner.observe(small)
+    findings_path = data_dir / "scanner" / "findings.jsonl"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if findings_path.is_file() and len(findings_path.read_text().splitlines()) >= 3:
+            break
+        await asyncio.sleep(0.005)
+    window_end = time.monotonic()
+    await asyncio.sleep(0.05)
+
+    hb.cancel()
+    drain.cancel()
+    await asyncio.gather(hb, drain, return_exceptions=True)
+
+    index = _findings_index(data_dir)
+    assert [(rec["rule_id"], rec["flow_id"]) for rec in index] == [
+        ("js.malicious-cdn-import", "bigjs01"),
+        ("exposure.prometheus-metrics", "bigjs01"),
+        ("exposure.prometheus-metrics", "prom02"),
+    ]
+    assert index[0]["evidence"][0]["detail"].startswith("<script")
+    assert index[1]["evidence"][0]["detail"].startswith("# HELP process_open_fds")
+    assert index[2]["evidence"][0]["detail"].startswith("# HELP prometheus_tsdb")
+
+    gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
+    assert gaps, "heartbeat never beat during the scan window"
+    # The residual ceiling the spec keeps (ticket 13): confirmations
+    # hold the GIL one finditer step at a time, never the whole sweep.
+    assert max(gaps) < 0.6, f"loop stalled {max(gaps):.3f}s during the drain"
 
 
 # --- ticket 15: global rules dir + config-home resolver ---
