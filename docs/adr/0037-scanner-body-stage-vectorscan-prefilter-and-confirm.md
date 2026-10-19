@@ -59,6 +59,19 @@ dataset (wide categories under large bounds, deeply nested bounded
 repeats). Both only ever pick a path — findings are byte-identical on
 either side of the screen.
 
+The screens leave a measured, deliberate residual on the stdlib path:
+of the vendored dataset's 207 filecontent patterns, 47 stay off the
+one-pass database — overwhelmingly bounded-repeat shapes whose
+unrolling compiles run the 2.3 s–79 s–never spectrum above, which no
+boot or install can pay. This is the one accepted exception to "one
+pass per body", bounded twice over: the shape screens only ever pick
+a path (screened-out patterns lose speed, never findings), and each
+residual scan runs behind its necessary-literal gate, so an unmatched
+body — the overwhelming case — pays one fastsearch containment check
+per pattern and no regex pass. Revisit if a dataset pattern family
+ever dominates scan time in a real session; until then the residual
+is the cheaper side of the trade.
+
 Catastrophic backtracking inside a confirmation is accepted for now:
 there is no timeout and no match budget around the stdlib confirm. The
 rejected alternative was a process pool — a worker with its own GIL,
