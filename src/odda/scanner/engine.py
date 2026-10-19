@@ -50,16 +50,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from odda.scanner.fastscan import FastScan
-from odda.scanner.model import Evidence, Finding, FlowView, Rule, _passes_literal_gates
-
-try:  # same private parser the literal gates lean on; a missing
-    # module just keeps every pattern off the engine (all-stdlib).
-    from re import _constants as _re_constants  # pragma: no cover
-    from re._parser import parse as _re_parse  # pragma: no cover
-except ImportError:  # pragma: no cover
-    _re_constants = None  # type: ignore[assignment]
-    _re_parse = None  # type: ignore[assignment]
+from odda.scanner.fastscan import FastScan, read_chunked, sre_constants, sre_parse
+from odda.scanner.gates import passes_literal_gates
+from odda.scanner.model import Evidence, Finding, FlowView, Rule
 
 if TYPE_CHECKING:
     import re
@@ -117,19 +110,19 @@ _MEMO_MISS = object()
 
 def _node_expansion(op: Any, av: Any) -> int:
     """Expansion estimate of one parse node (see ``_EXPANSION_MAX``)."""
-    if op in (_re_constants.MAX_REPEAT, _re_constants.MIN_REPEAT):
+    if op in (sre_constants.MAX_REPEAT, sre_constants.MIN_REPEAT):
         mn, mx = av[0], av[1]
         # An unbounded tail is a kleene star: only the required count
         # expands. A bounded one expands to its max.
-        count = mx if mx is not _re_constants.MAXREPEAT else mn
+        count = mx if mx is not sre_constants.MAXREPEAT else mn
         return max(1, count) * max(1, _expansion(av[-1]))
-    if op is _re_constants.SUBPATTERN:
+    if op is sre_constants.SUBPATTERN:
         return _expansion(av[-1])
-    if op is _re_constants.BRANCH:
+    if op is sre_constants.BRANCH:
         return max((_expansion(d) for d in av[1]), default=0)
-    if op in (_re_constants.ASSERT, _re_constants.ASSERT_NOT):
+    if op in (sre_constants.ASSERT, sre_constants.ASSERT_NOT):
         return _expansion(av[1])
-    if op is _re_constants.GROUPREF_EXISTS:
+    if op is sre_constants.GROUPREF_EXISTS:
         return max(_expansion(av[1]), _expansion(av[2] or ()))
     # Literals, classes, anchors, and backrefs add no expansion.
     return 0
@@ -147,10 +140,10 @@ def _within_expansion_budget(pattern: re.Pattern[str]) -> bool:
     cannot reason about must never reach a compile that might not
     return.
     """
-    if _re_parse is None:  # pragma: no cover — stdlib parser gone
+    if sre_parse is None:  # pragma: no cover — stdlib parser gone
         return False
     try:
-        tree = _re_parse(pattern.pattern, pattern.flags)
+        tree = sre_parse(pattern.pattern, pattern.flags)
     except Exception:
         return False
     return _expansion(tree) <= _EXPANSION_MAX
@@ -286,6 +279,40 @@ class _BodyStage(NamedTuple):
     body_evidence: tuple[tuple[Evidence, ...], ...]
 
 
+class _StageKey(NamedTuple):
+    """Memo key of one epoch's body-stage results (ticket 14).
+
+    Fields:
+        epoch: The ruleset epoch serial — every mutation clears the
+            memo wholesale, so a cached stage can never answer for a
+            ruleset generation that no longer exists.
+        digest: SHA-256 of the stored body bytes — the body half of
+            the key (results are pure in exactly these two).
+    """
+
+    epoch: int
+    digest: bytes
+
+
+class _ScanKey(NamedTuple):
+    """Memo key of one dataset-scan memo entry (ticket 14).
+
+    Fields:
+        epoch: The ruleset epoch serial (see ``_StageKey``).
+        digest: SHA-256 of the stored body bytes.
+        context: The flow-context slice (``_scan_context``) — every
+            record field and stored header a ``scan()`` override
+            lawfully reads, so gated-in and gated-out flows of one
+            body never share a cached scan.
+        rule: The rule's index into the epoch's rules tuple.
+    """
+
+    epoch: int
+    digest: bytes
+    context: tuple[Any, ...]
+    rule: int
+
+
 class _BodyMemo:
     """Session-scoped memo of body-stage results (ticket 14).
 
@@ -305,11 +332,13 @@ class _BodyMemo:
         """Bound the memo by stored bytes and entry count."""
         self._budget = budget
         self._cap = cap
-        self._entries: OrderedDict[Any, tuple[Any, int]] = OrderedDict()
+        self._entries: OrderedDict[_StageKey | _ScanKey, tuple[Any, int]] = (
+            OrderedDict()
+        )
         self._stored_bytes = 0
         self._lock = threading.Lock()
 
-    def get(self, key: Any) -> Any:
+    def get(self, key: _StageKey | _ScanKey) -> Any:
         """The cached value, promoted to MRU — or ``_MEMO_MISS``."""
         with self._lock:
             entry = self._entries.get(key)
@@ -318,7 +347,7 @@ class _BodyMemo:
             self._entries.move_to_end(key)
             return entry[0]
 
-    def put(self, key: Any, value: Any, size: int) -> None:
+    def put(self, key: _StageKey | _ScanKey, value: Any, size: int) -> None:
         """Store ``value`` (``size`` estimated bytes) under ``key``."""
         if size > self._budget:
             return
@@ -641,9 +670,8 @@ class Scanner:
             return None
         hasher = hashlib.sha256()
         try:
-            with (self._data_dir / body_file).open("rb") as handle:
-                while chunk := handle.read(_HASH_CHUNK):
-                    hasher.update(chunk)
+            for chunk in read_chunked(self._data_dir / body_file, _HASH_CHUNK):
+                hasher.update(chunk)
         except Exception:
             # Unreadable or malformed record: no digest, uncached path
             # — the body read itself then fails where it always did,
@@ -667,7 +695,7 @@ class Scanner:
         """
         if not epoch.scans_body:
             return _BodyStage(None, ())
-        key = ("stage", epoch.serial, digest) if digest is not None else None
+        key = _StageKey(epoch.serial, digest) if digest is not None else None
         if key is not None:
             cached = self._memo.get(key)
             if cached is not _MEMO_MISS:
@@ -719,7 +747,7 @@ class Scanner:
         """
         if digest is None or type(rule).scan is Rule.scan:
             return rule.scan(view)
-        key = ("scan", epoch.serial, digest, _scan_context(view), index)
+        key = _ScanKey(epoch.serial, digest, _scan_context(view), index)
         cached = self._memo.get(key)
         if cached is not _MEMO_MISS:
             flow_id = str(view.record.get("id", "?"))
@@ -813,7 +841,7 @@ def _pattern_evidence(
     """
     evidence: list[Evidence] = []
     for pattern in patterns:
-        if not _passes_literal_gates(pattern, text):
+        if not passes_literal_gates(pattern, text):
             continue
         evidence.extend(
             Evidence(

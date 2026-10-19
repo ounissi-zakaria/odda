@@ -18,30 +18,36 @@ import re
 import time
 from dataclasses import dataclass
 from enum import StrEnum
-from functools import cache
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 from urllib.parse import parse_qsl, urlsplit
+
+from odda.scanner.fastscan import read_chunked
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-try:  # private API, but the only parser shipped; a missing module
-    # just turns every gate off (patterns scan ungated, as before).
-    from re import _constants as _re_constants
-    from re._parser import parse as _re_parse
-except ImportError:  # pragma: no cover
-    _re_constants = None  # type: ignore[assignment]
-    _re_parse = None  # type: ignore[assignment]
-
 
 class Severity(StrEnum):
-    """Five-level triage scale; findings carry the value string."""
+    """Five-level triage scale; findings carry the value string.
+
+    Definition order is the triage order; :attr:`rank` exposes it for
+    aggregates (a dataset rule's highest matched severity wins).
+    """
 
     INFO = "info"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+    @property
+    def rank(self) -> int:
+        """Triage rank, 0 (info) through 4 (critical); higher outranks."""
+        return _SEVERITY_RANK[self]
+
+
+# Derived from the definition order above — the scale's single source.
+_SEVERITY_RANK = {severity: rank for rank, severity in enumerate(Severity)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,221 +175,6 @@ def _compile(
         p if isinstance(p, re.Pattern) else re.compile(p, re.MULTILINE)
         for p in patterns
     )
-
-
-# --- necessary-literal gates (ticket 08) ---
-#
-# A body-regex scan is one C call that holds the GIL for its whole
-# duration, so with scans off the event-loop thread (engine.run) a
-# multi-MB body still turns each unmatched pattern into a
-# tens-to-hundreds-of-ms loop stall. The gate below restores
-# interactivity: per pattern, a tuple of literal sets such that any
-# match must put at least one literal of each set into the scanned
-# text — spine literals as singleton sets, one any-of set per
-# alternation. A failing ``in`` check (fastsearch speed) replaces a
-# linear regex scan for free.
-#
-# Soundness is conservative by construction: case-insensitive
-# patterns (global or scoped), character classes, zero-width and
-# optional constructs contribute nothing, so a pattern without a
-# usable literal simply has no gate and scans ungated. The fuzz test
-# in tests/e2e/test_30_scanner.py pins the property that matters: a
-# real match is never gated out.
-
-_GATE_MIN_LITERAL = 3
-
-
-# Slice length for the GIL-cadenced text ops below: one 10 MB pass is
-# a single uninterruptible C call that stalls the event loop serving
-# the drain for its whole duration; the slices drop the GIL between
-# chunks, so the loop keeps its cadence whatever the body size
-# (ticket 12's numbers contract).
-_GIL_CHUNK = 1 << 18
-
-
-def _fold_chunk(text: str) -> str:
-    """One fold slice.
-
-    Case folding is per character, so slicing is exact: folding a
-    concatenation concatenates the folds.
-    """
-    return text.casefold().replace("\u0307", "").replace("\u0131", "i")
-
-
-def _gate_fold(text: str) -> str:
-    """The fold the case-insensitive gates check against, chunked.
-
-    Large texts fold in GIL-yielding chunks (see ``_GIL_CHUNK``).
-    Full case folding normalized to Python's per-character (?i)
-    classes: folding expands U+0130 to ``i`` + U+0307 (dot stripped)
-    and leaves U+0131 distinct, while Python's (?i) matches both
-    against ``i`` — normalizing each to ``i`` keeps a folded literal a
-    substring of the folded text for every real match (the sweep in
-    tests/e2e/test_30_scanner.py pins the per-character edge).
-    """
-    if len(text) <= _GIL_CHUNK:
-        return _fold_chunk(text)
-    parts = []
-    for start in range(0, len(text), _GIL_CHUNK):
-        parts.append(_fold_chunk(text[start : start + _GIL_CHUNK]))
-        time.sleep(0)  # offer the loop thread the GIL between slices
-    return "".join(parts)
-
-
-def _ci_gates_pass(gates: tuple[frozenset[str], ...], text: str) -> bool:
-    """Case-insensitive gate check without folding the whole text.
-
-    Folds chunk by chunk (exact: folding is per character) and checks
-    the still-unmet sets against ``carry + folded chunk``, so no whole-
-    body folded copy is ever built — the one remaining 10 MB-scale C
-    call the join would cost is exactly the loop stall the chunking
-    exists to avoid. The carry keeps the last ``span`` folded
-    characters, so a literal straddling a chunk boundary is never
-    missed.
-    """
-    span = max((len(lit) for s in gates for lit in s), default=0)
-    if span >= _GIL_CHUNK:  # pathological literal: windows cannot cover it
-        folded = _gate_fold(text)
-        return all(any(lit in folded for lit in s) for s in gates)
-    pending = list(gates)
-    carry = ""
-    for start in range(0, len(text), _GIL_CHUNK):
-        folded = carry + _fold_chunk(text[start : start + _GIL_CHUNK])
-        pending = [s for s in pending if not any(lit in folded for lit in s)]
-        if not pending:
-            return True
-        carry = folded[-span:] if span else ""
-        time.sleep(0)  # offer the loop thread the GIL between slices
-    return not pending
-
-
-def _gate_contains(literal: str, text: str) -> bool:
-    """Chunked substring containment (the gate scans' one linear op).
-
-    Windows overlap by the literal's length, so an occurrence spanning
-    a boundary is never missed; each slice is one short C call with a
-    GIL drop after it, instead of one call over the whole body.
-    """
-    if len(text) <= _GIL_CHUNK or len(literal) >= _GIL_CHUNK:
-        return literal in text
-    step = _GIL_CHUNK - len(literal) + 1
-    for start in range(0, len(text), step):
-        if literal in text[start : start + _GIL_CHUNK]:
-            return True
-        time.sleep(0)  # offer the loop thread the GIL between slices
-    return False
-
-
-@cache
-def _literal_gates(source: str, flags: int) -> tuple[frozenset[str], ...] | None:
-    """Necessary-literal sets for one pattern, or ``None`` (no gate).
-
-    Args:
-        source: The pattern's source string.
-        flags: The pattern's compiled flags (globally case-insensitive
-            patterns gate on casefolded literals).
-
-    Returns:
-        A tuple of literal sets — every match of the pattern puts at
-        least one literal of each set into the scanned text (both
-        sides casefolded, for globally case-insensitive patterns) —
-        or ``None`` when no sound gate is extractable.
-    """
-    if _re_parse is None:
-        return None
-    try:
-        tree = _re_parse(source, flags)
-    except Exception:
-        return None
-    sets = _concat_gates(tree)
-    if flags & re.IGNORECASE:
-        # Full case folding is sound for Python's per-character
-        # simple-folded (?i) matching: whatever the pattern matches,
-        # the folded literal rides in the folded text. Sets holding a
-        # non-ASCII literal drop out whole — an any-of set minus a
-        # member could gate out the branch that matched — which only
-        # weakens the gate. Scoped (?i:...) groups still never
-        # contribute literals (see _dispatch_gates).
-        sets = [
-            frozenset(_gate_fold(lit) for lit in s)
-            for s in sets
-            if all(lit.isascii() for lit in s)
-        ]
-    return tuple(sets) or None
-
-
-def _branch_gate(disjuncts: Any) -> frozenset[str] | None:
-    """One any-of set for an alternation.
-
-    A match takes some branch, and that branch's literals then appear
-    in the scanned text, so the sound any-of set is the union of every
-    disjunct's literal sets. Two shapes forfeit the gate instead of
-    weakening it unsoundly: a disjunct with no extractable literal
-    (``go`` next to ``prometheus`` — the match may have taken exactly
-    that branch), and a set reduced to one member (``{200, 201}`` kept
-    as ``{200}`` — the match may have shown the dropped member).
-    """
-    alts: set[str] = set()
-    for disjunct in disjuncts:
-        sets = _concat_gates(disjunct)
-        if not sets:
-            return None
-        for gate_set in sets:
-            alts.update(gate_set)
-    return frozenset(alts) or None
-
-
-def _dispatch_gates(op: Any, av: Any, out: list[frozenset[str]]) -> None:
-    """Add the gate sets of one non-literal parse node to ``out``."""
-    if op is _re_constants.SUBPATTERN:
-        # av = (group, add_flags, del_flags, sub). Scoped inline flags
-        # ((?i:...)) make the group's literals case insensitive — not
-        # sound as case-sensitive gates, so a flagged group stays out.
-        if not av[1] & re.IGNORECASE:
-            out.extend(_concat_gates(av[-1]))
-    elif op in (_re_constants.MAX_REPEAT, _re_constants.MIN_REPEAT):
-        if av[0] >= 1:  # required at least once: in every match
-            out.extend(_concat_gates(av[-1]))
-    elif op is _re_constants.BRANCH:
-        branch = _branch_gate(av[1])
-        if branch is not None:
-            out.append(branch)
-    # classes, anchors, lookarounds, backreferences, and conditionals
-    # contribute nothing; skipping them is always sound.
-
-
-def _concat_gates(node: Any) -> list[frozenset[str]]:
-    """Literal gate sets of one parsed concatenation (see _literal_gates)."""
-    out: list[frozenset[str]] = []
-    run = ""
-    for op, av in node:
-        if op is _re_constants.LITERAL:
-            run += chr(av)
-            continue
-        if len(run) >= _GATE_MIN_LITERAL:
-            out.append(frozenset((run,)))
-        run = ""
-        _dispatch_gates(op, av, out)
-    if len(run) >= _GATE_MIN_LITERAL:
-        out.append(frozenset((run,)))
-    return out
-
-
-def _passes_literal_gates(pattern: re.Pattern[str], text: str) -> bool:
-    """Whether ``pattern`` should run on ``text``: no gate, or all pass.
-
-    A globally case-insensitive pattern checks its folded literals
-    against the casefolded text (one fold per call — the scanned
-    texts are tiny or already off the event loop's thread).
-    """
-    gates = _literal_gates(pattern.pattern, pattern.flags)
-    if gates is None:
-        return True
-    if pattern.flags & re.IGNORECASE:
-        if len(text) > _GIL_CHUNK:
-            return _ci_gates_pass(gates, text)
-        text = _gate_fold(text)
-    return all(any(_gate_contains(lit, text) for lit in s) for s in gates)
 
 
 class Correlator(Protocol):
@@ -520,8 +311,8 @@ class FlowView:
     def body(self) -> str | None:
         """The stored response body, or ``None`` when none was stored.
 
-        Large bodies read and decode in GIL-dropping chunks (see
-        ``_GIL_CHUNK``). The one-shot lenient decode is a single
+        Large bodies read and decode in GIL-dropping chunks (the
+        shared ``read_chunked`` cadence). The one-shot lenient decode is a single
         state-machine pass over the whole body — the most expensive
         whole-body C call on this path — while the chunked shape pays
         only its final str-join memcpy (~half the cost, measured) as
@@ -578,11 +369,7 @@ class FlowView:
     def _read_chunked(path: Path) -> str:
         """Read and leniently decode a stored body in GIL-dropping chunks."""
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        parts: list[str] = []
-        with path.open("rb") as handle:
-            while chunk := handle.read(_GIL_CHUNK):
-                parts.append(decoder.decode(chunk))
-                time.sleep(0)  # offer the loop thread the GIL between slices
+        parts = [decoder.decode(chunk) for chunk in read_chunked(path)]
         parts.append(decoder.decode(b"", final=True))
         body = "".join(parts)
         # The join is the one whole-body copy this path cannot avoid;
