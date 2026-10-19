@@ -936,6 +936,122 @@ async def test_current_and_above_threshold_versions_yield_no_finding(
             assert not stale, f"no outdated-library finding for {marker}: {stale}"
 
 
+async def test_filecontent_scans_through_the_seam_in_one_pass(
+    odda_session, monkeypatch
+) -> None:
+    """The retire.js filecontent extractor scans through the fast-scan
+    seam (ticket 17): one engine pass per JS body carries every
+    library's filecontent patterns — a counting spy on the seam sees
+    exactly one find-all over the outdated-jquery body, and the finding
+    that lands is the same one the per-pattern stdlib scans produced
+    (severity, evidence count, extractor, refs)."""
+    from odda.scanner import fastscan
+
+    calls: list[str] = []
+    unspoiled = fastscan.FastScan.find_all
+
+    def counting(self: fastscan.FastScan, text: str) -> list:
+        calls.append(text)
+        return unspoiled(self, text)
+
+    monkeypatch.setattr(fastscan.FastScan, "find_all", counting)
+
+    _fx = "ticket05-jquery-old.js"
+    async with odda_session() as h, fixture_site([_fx]) as fx:
+        await _seed_slot(h, "retirejs")
+        proxy = await h.call("proxy_url", {})
+        r = await curl(
+            f"{fx.base}/{_fx}?marker=scan-t17-seam",
+            proxy,
+            extra=["-o", "/dev/null", "-w", "%{http_code}"],
+        )
+        assert r.stdout == "200"
+
+        flow = await h.wait_flow("scan-t17-seam")
+        finding = await h.wait_finding(flow["id"])
+
+        assert finding["rule_id"] == "js.outdated-library"
+        assert finding["severity"] == "medium"
+        assert len(finding["evidence"]) == 7
+        assert all(
+            "jquery 1.6.1 (via filecontent)" in e["detail"] for e in finding["evidence"]
+        )
+        passes = [text for text in calls if "jQuery v1.6.1" in text]
+        assert len(passes) == 1, (
+            f"expected exactly one seam pass over the jquery body, got {len(passes)}"
+        )
+
+
+def test_refused_and_prefiltered_filecontent_patterns_still_detect(
+    tmp_path,
+) -> None:
+    """Patterns the seam refuses or only approximates keep detecting
+    (ticket 17): against a crafted dataset riding next to a copy of the
+    slot file, a zero-width pattern (refused at build — the batch
+    triage routes it stdlib, gated) and a backreference pattern
+    (approximated prefilter — stdlib confirm on the hit) both land the
+    same finding shape a clean engine-exact pattern does: detected
+    version, filecontent extractor, body offset, advisory severity."""
+    _entry = {
+        "extractors": {"filecontent": ["PATTERN"]},
+        "vulnerabilities": [
+            {
+                "severity": "high",
+                "below": "99",
+                "identifiers": {"summary": "t17 crafted advisory"},
+                "info": [],
+            }
+        ],
+    }
+    dataset = {
+        # engine-exact: rides the shared pass
+        "plain": {**_entry, "extractors": {"filecontent": ["plain-v§§version§§"]}},
+        # can match empty: the seam refuses it at build (stdlib, gated)
+        "loose": {**_entry, "extractors": {"filecontent": ["§§version§§?"]}},
+        # backreference: the engine approximates it (prefilter + confirm)
+        "echo": {
+            **_entry,
+            "extractors": {"filecontent": ["rev=§§version§§ echo:\\1"]},
+        },
+    }
+    slot = tmp_path / "t17-craft"
+    slot.mkdir()
+    (slot / "rule.py").write_text(
+        (_RULES_SRC / "retirejs" / "rule.py").read_text(encoding="utf-8")
+    )
+    (slot / "jsrepository.json").write_text(json.dumps(dataset))
+
+    module = ModuleType("t17.slot.crafted")
+    module.__file__ = str(slot / "rule.py")
+    sys.modules[module.__name__] = module
+    try:
+        exec(  # noqa: S102
+            compile((slot / "rule.py").read_text(encoding="utf-8"), str(slot), "exec"),
+            module.__dict__,
+        )
+    finally:
+        del sys.modules[module.__name__]
+    rule = module.__dict__["RULES"][0]
+
+    data_dir = tmp_path / ".odda"
+    for marker, body, library, version, offset in (
+        ("plain", b"banner plain-v1.2.3 tail", "plain", "1.2.3", 7),
+        ("loose", b"7.0.0beta rest", "loose", "7.0.0beta", 0),
+        ("echo", b"pre rev=2.1 echo:2.1 post", "echo", "2.1", 4),
+    ):
+        record = _stored_flow(
+            data_dir, f"t17{marker}", body, content_type="application/javascript"
+        )
+        findings = rule.scan(FlowView(data_dir, record))
+        assert len(findings) == 1, marker
+        finding = findings[0]
+        assert finding.rule_id == "js.outdated-library"
+        assert finding.severity is Severity.HIGH
+        assert finding.evidence[0].where == "response_body"
+        assert finding.evidence[0].offset == offset, marker
+        assert f"{library} {version} (via filecontent)" in finding.evidence[0].detail
+
+
 # --- ticket 06: user rules + rule tool trio ---
 
 _T06_CANARY = "odda-ticket06-canary"
