@@ -405,10 +405,9 @@ class _ScanKey(NamedTuple):
     Fields:
         epoch: The ruleset epoch serial (see ``_StageKey``).
         digest: SHA-256 of the stored body bytes.
-        context: The flow-context slice (``_scan_context``) — every
-            record field and stored header a ``scan()`` override
-            lawfully reads, so gated-in and gated-out flows of one
-            body never share a cached scan.
+        context: The flow-context slice (``FlowView.dataset_facet``)
+            — the lawful scan() surface, so gated-in and gated-out
+            flows of one body never share a cached scan.
         rule: The rule's index into the epoch's rules tuple.
     """
 
@@ -541,39 +540,6 @@ def _rule_body_evidence(
         else:
             evidence += _span_evidence(spans[db_index], text)
     return tuple(evidence)
-
-
-def _scan_context(view: FlowView) -> tuple[Any, ...]:
-    """The flow-context slice of the dataset-scan memo key (ticket 14).
-
-    A ``scan()`` override is an opaque body of work, so its memo entry
-    keys on the whole FlowView surface such an override lawfully reads
-    per flow: the record's stable routing fields (method, scheme,
-    host, port, path, browser attribution, status, error) and the
-    stored response headers — the response content type above all,
-    retire.js's own screen. The stored body is the digest half of the
-    key; the flow id is re-stamped per flow (``Scanner._scan_rule``);
-    request-side material belongs to the request-stage patterns, not
-    to scan() overrides. Same body, different context: a different
-    key and a fresh scan, so gated-in and gated-out flows of one body
-    never share a cached scan result.
-    """
-    record = view.record
-    # body_file embeds the flow id; only its extension — the stored
-    # body's content addressing — is rule-visible context.
-    body_file = str(record.get("body_file") or "")
-    return (
-        record.get("method"),
-        record.get("scheme"),
-        record.get("host"),
-        record.get("port"),
-        record.get("path"),
-        record.get("browser_id"),
-        record.get("status_code"),
-        record.get("error"),
-        Path(body_file).suffix,
-        _stored_response_headers(view),
-    )
 
 
 class Scanner:
@@ -849,10 +815,12 @@ class Scanner:
         with the current flow's id on replay: a duplicate pays the
         digest read instead of the dataset scan, and still records its
         own findings. The flow-context half of the key
-        (``_scan_context``) is everything such an override lawfully
-        reads per flow — its own gates (retire.js's content-type
-        screen) and the record's stable routing fields — so a flow the
-        override gates out never replays a gated-in flow's findings.
+        (``FlowView.dataset_facet``) is everything such an override
+        lawfully reads per flow — its own gates (retire.js's
+        content-type screen) and the record's stable routing fields —
+        and a scan whose tracked reads leave the facet is never
+        memoized, so neither differing context nor an overreaching
+        scan can replay another flow's findings.
         """
         body_spans = stage.corpus_spans[index]
         # The spans argument arrives exactly when the rule declared a
@@ -860,13 +828,17 @@ class Scanner:
         args = (body_spans,) if body_spans is not None else ()
         if digest is None or type(rule).scan is Rule.scan:
             return rule.scan(view, *args)
-        key = _ScanKey(epoch.serial, digest, _scan_context(view), index)
+        # The facet (FlowView.dataset_facet) is the lawful surface; the
+        # scan's reads are tracked against it, and a scan that reads
+        # beyond it is never memoized — fresh scan per flow.
+        key = _ScanKey(epoch.serial, digest, view.dataset_facet(), index)
         cached = self._memo.get(key)
         if cached is not _MEMO_MISS:
             flow_id = str(view.record.get("id", "?"))
             return [replace(finding, flow_id=flow_id) for finding in cached]
-        findings = rule.scan(view, *args)
-        if findings is not None:
+        with view.dataset_scan_reads() as reads:
+            findings = rule.scan(view, *args)
+        if findings is not None and reads <= FlowView.DATASET_SCAN_READS:
             frozen = tuple(findings)
             self._memo.put(key, frozen, _findings_size(frozen))
         return findings

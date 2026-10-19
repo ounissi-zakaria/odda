@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from odda.scanner.engine import _MEMO_BUDGET_BYTES, _MEMO_MAX_ENTRIES, Scanner
-from odda.scanner.model import Rule, Severity
+from odda.scanner.model import Evidence, Finding, FlowView, Rule, Severity
 from tests.e2e.conftest import (
     FIXTURES,
     _findings_index,
@@ -371,6 +371,58 @@ async def test_dataset_rule_gate_difference_stays_per_flow(tmp_path) -> None:
     first.pop("flow_id")
     third.pop("flow_id")
     assert first == third
+
+
+async def test_scan_beyond_the_facet_never_replays_stale_findings(
+    tmp_path,
+) -> None:
+    """The dataset facet is the lawful memo surface (ticket 14): a
+    scan() override that reads beyond it — request-side material above
+    all — is never memoized, so two flows with byte-identical bodies
+    but different request headers each get their own scan's findings.
+    Pre-facet, the second flow replayed the first's cached scan
+    silently: same body, same routing, a stale finding for material
+    the memo never saw."""
+    data_dir = tmp_path / ".odda"
+
+    class _RequestHeaderRule(Rule):
+        def scan(self, view: FlowView) -> list[Finding]:
+            body = view.body
+            hit = any(
+                name.lower() == "x-t14-secret" for name, _ in view.request_headers
+            )
+            if body is None or not hit:
+                return []
+            return [
+                Finding(
+                    rule_id=self.id,
+                    flow_id=str(view.record.get("id", "?")),
+                    severity=self.severity,
+                    title=self.title,
+                    evidence=(
+                        Evidence(where="request_headers", offset=0, detail="secret"),
+                    ),
+                )
+            ]
+
+    rule = _RequestHeaderRule(
+        id="t14.beyond-facet",
+        severity=Severity.LOW,
+        title="Beyond the facet",
+    )
+    body = f"{_T14}-7 same bytes both flows\n".encode()
+    records = [_memo_flow(data_dir, flow_id, body) for flow_id in ("00001", "00002")]
+    # 00001 carries the secret request header; 00002 (default request)
+    # does not — the bodies and every facet field stay identical.
+    (data_dir / "flows" / "00001" / "request").write_bytes(
+        b"GET /00001.txt?t14param=yes HTTP/1.1\r\n"
+        b"Host: fixture.local\r\nX-T14-Secret: yes\r\n\r\n"
+    )
+    scanner = Scanner(data_dir, rules=(rule,))
+    index, _ = await _drain_findings(scanner, data_dir, records, expected=1)
+
+    assert [rec["flow_id"] for rec in index] == ["00001"]
+    assert index[0]["rule_id"] == "t14.beyond-facet"
 
 
 async def test_rule_installed_after_body_seen_matches_its_rearrival(
