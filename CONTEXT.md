@@ -156,6 +156,10 @@ _Avoid_: rule file, custom rule, rule package
 The directory Rule slots persist in: `rules/` under the odda config home (`~/.config/odda` by default; the `ODDA_CONFIG_HOME` environment variable redirects it, and the Base profile lives under the same root). Machine-global — one ruleset shared across every project and MCP session on the machine — which is why it never holds the per-project Data dir's flows or findings.
 _Avoid_: rules folder, user rules dir, rule store
 
+**Ruleset epoch**:
+One immutable generation of the Scanner's live ruleset: the rules tuple plus the compiled response-body database those rules scan through (one multi-pattern engine pass per body, built at boot and rebuilt on every slot install, remove, or force-swap). Each Flow carries the epoch it arrived under, so mid-session ruleset changes never apply retroactively; patterns the engine refuses or cannot compile within budget stay on the stdlib path for their epoch.
+_Avoid_: ruleset version, rule generation, database generation, engine epoch
+
 ## Testing
 
 **Test module**:

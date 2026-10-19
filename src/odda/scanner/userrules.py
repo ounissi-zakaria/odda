@@ -370,8 +370,11 @@ class UserRuleManager:
         flow is scanned against the full ruleset. A slot that fails to
         load (or collides on id) is logged and skipped with its error
         remembered for ``rule_list``; the rest still come up. No-op
-        when the rules dir doesn't exist yet (lazy config home).
+        when the rules dir doesn't exist yet (lazy config home). Slots
+        register as one batch — one ruleset epoch, one compiled body
+        database — rather than one rebuild per slot.
         """
+        batch: list[Rule] = []
         for slot in list_slots(self._rules_dir):
             name = slot["name"]
             rule_file = _rule_path(self._rules_dir, name)
@@ -388,9 +391,11 @@ class UserRuleManager:
                     "Skipping rule slot '%s' on boot (load failed: %s)", name, exc
                 )
                 continue
-            self._scanner.register_rules(rules)
+            batch.extend(rules)
             self._slots[name] = _SlotState(rules=tuple(rules))
             logger.info("Restored rule slot '%s' (%d rule(s))", name, len(rules))
+        if batch:
+            self._scanner.register_rules(batch)
 
     def _deregister(self, name: str) -> list[str]:
         """Drop slot ``name``'s live registration; return its rule ids."""
