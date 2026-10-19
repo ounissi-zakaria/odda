@@ -160,6 +160,10 @@ _Avoid_: rules folder, user rules dir, rule store
 One immutable generation of the Scanner's live ruleset: the rules tuple plus the compiled response-body database those rules scan through (one multi-pattern engine pass per body, built at boot and rebuilt on every slot install, remove, or force-swap). Each Flow carries the epoch it arrived under, so mid-session ruleset changes never apply retroactively; patterns the engine refuses or cannot compile within budget stay on the stdlib path for their epoch.
 _Avoid_: ruleset version, rule generation, database generation, engine epoch
 
+**Body memoization**:
+The session-scoped cache of a Ruleset epoch's response-body scan results: keyed by (epoch, digest of the stored body bytes), holding every Rule's pre-gate body-stage evidence — dataset-backed `scan()` results included — under a byte-budget LRU with a hard entry cap. Gates stay per Flow (they filter after the cache), evidence assembly beyond the body and Finding emission stay per Flow, and every ruleset mutation clears the cache with its epoch — so memoization changes nothing observable except drain time, and a Rule installed after a body was seen still matches that body's later re-arrival.
+_Avoid_: body cache, deduplication, result cache
+
 ## Testing
 
 **Test module**:

@@ -27,19 +27,31 @@ database as prefilters and confirm on their approximation hits
 build-refused zero-width patterns. Request-query, request-header, and
 response-header stages never left the stdlib path (tiny texts,
 necessary-literal gated).
+
+Repeated bodies are memoized (ticket 14): the epoch's body-stage
+results — every rule's pre-gate body evidence, dataset-backed
+``scan()`` results included — are a pure function of (ruleset epoch,
+stored body bytes), cached per session under a byte-budget LRU with a
+hard entry cap. Gates are flow context and filter per flow after the
+memo; evidence assembly beyond the body and Finding emission stay per
+flow, so memoization is invisible to everything except drain time.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import queue
+import threading
+from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from odda.scanner.fastscan import FastScan
-from odda.scanner.model import Evidence, Finding, FlowView, _passes_literal_gates
+from odda.scanner.model import Evidence, Finding, FlowView, Rule, _passes_literal_gates
 
 try:  # same private parser the literal gates lean on; a missing
     # module just keeps every pattern off the engine (all-stdlib).
@@ -53,7 +65,7 @@ if TYPE_CHECKING:
     import re
     from collections.abc import AbstractSet, Sequence
 
-    from odda.scanner.model import Correlator, Rule
+    from odda.scanner.model import Correlator
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +92,27 @@ _REQUEST_HEADERS = "request_headers"
 # gates hold the line. The estimate only ever picks a path — findings
 # are byte-identical either way.
 _EXPANSION_MAX = 64
+
+# Body memoization (ticket 14): repeated identical bodies stop
+# rescanning within a session. The epoch's body-stage results are a
+# pure function of (ruleset epoch, stored body bytes), cached under a
+# byte-budget LRU with a hard entry cap. Both ceilings are on the
+# *stored results* — a match-heavy body stores thousands of evidence
+# entries, and a burst of unique bodies must never grow the scanner
+# without bound.
+_MEMO_BUDGET_BYTES = 8 * 1024 * 1024
+_MEMO_MAX_ENTRIES = 1024
+
+# Digest of a stored body: SHA-256 over the file's bytes, read in
+# GIL-dropping chunks (hashlib releases the GIL per large update; one
+# read_bytes of a multi-MB body would be an uninterruptible C call).
+# SHA-256, not a blake2: this is a content key, not a security
+# primitive, and SHA-256 rides the hardware extensions (~4x the
+# software blake2b here) — the digest is the duplicate's whole cost.
+_HASH_CHUNK = 1 << 20
+
+# Memo lookup miss sentinel — never a legitimate cached value.
+_MEMO_MISS = object()
 
 
 def _node_expansion(op: Any, av: Any) -> int:
@@ -197,14 +230,32 @@ class _RulesetEpoch:
     retroactively. ``layout`` maps each rule's body patterns to their
     database index — exact and approximated slots alike, their spans
     arrive confirmed — or ``None`` for the stdlib residuals
-    (``_compile_body_scan``).
+    (``_compile_body_scan``). ``serial`` is the generation number the
+    body memo keys on (ticket 14): it rises with every mutation, so a
+    rule installed after a body was seen cannot be answered by that
+    body's cached results — the re-arrival misses the memo and scans
+    fresh, exactly as arrival-time install semantics demand.
     """
 
-    __slots__ = ("fast", "layout", "rules", "scans_body")
+    __slots__ = (
+        "fast",
+        "has_scan_overrides",
+        "layout",
+        "memoizable",
+        "rules",
+        "scans_body",
+        "serial",
+    )
 
-    def __init__(self, rules: Sequence[Rule]) -> None:
+    def __init__(self, rules: Sequence[Rule], serial: int = 0) -> None:
         """Freeze the rules tuple and compile its body database."""
         self.rules = tuple(rules)
+        self.serial = serial
+        # Dataset rules (scan overrides) run their own body work; the
+        # memo covers them too, so they count toward digest worth.
+        self.has_scan_overrides = any(
+            type(rule).scan is not Rule.scan for rule in self.rules
+        )
         flat: list[re.Pattern[str]] = []
         rows: list[range] = []
         for rule in self.rules:
@@ -213,21 +264,172 @@ class _RulesetEpoch:
         self.fast, db_of = _compile_body_scan(flat)
         self.layout = tuple(tuple(db_of[i] for i in row) for row in rows)
         self.scans_body = bool(flat)
+        # Worth reading a body for its digest at all: any declarative
+        # body pattern, or any dataset rule whose scan() is memoized.
+        self.memoizable = self.scans_body or self.has_scan_overrides
 
 
 class _BodyStage(NamedTuple):
-    """One flow's body-stage results, shared by every rule.
+    """One epoch's body-stage results for one body, shared by every rule.
 
-    ``text``/``spans`` are the single engine pass (``spans`` is
-    ``None`` when the epoch scans stdlib-only); ``error`` re-raises
-    per rule at the point the all-stdlib path raised it, so an
-    unreadable body still contained-skips exactly the rules it always
-    did.
+    ``body_evidence`` holds each rule's pre-gate body-stage result —
+    evidence in the rule's body_patterns order — aligned with the
+    epoch's rules. Gates (statuses, content types, schemes, browser
+    attribution) are flow context, so they filter per flow after the
+    memo and the cached value serves every flow carrying the same
+    bytes byte-identically (ticket 14). ``error`` re-raises per rule
+    at the point the all-stdlib path raised it, so an unreadable body
+    still contained-skips exactly the rules it always did.
     """
 
-    text: str | None
     error: Exception | None
-    spans: list[list[tuple[int, int]]] | None
+    body_evidence: tuple[tuple[Evidence, ...], ...]
+
+
+class _BodyMemo:
+    """Session-scoped memo of body-stage results (ticket 14).
+
+    One byte-budget LRU with a hard entry cap: ``put`` inserts at the
+    MRU end and evicts from the LRU end until both ceilings hold; a
+    single result larger than the whole budget is never stored (it
+    could not fit and would evict everything else trying). Reads and
+    writes come from the drain worker (one flow at a time through
+    ``Scanner._scan``) while ``clear`` comes from the event-loop
+    thread's register/deregister — a tiny lock holds that overlap;
+    every other operation runs uncontended.
+    """
+
+    __slots__ = ("_budget", "_cap", "_entries", "_lock", "_stored_bytes")
+
+    def __init__(self, budget: int, cap: int) -> None:
+        """Bound the memo by stored bytes and entry count."""
+        self._budget = budget
+        self._cap = cap
+        self._entries: OrderedDict[Any, tuple[Any, int]] = OrderedDict()
+        self._stored_bytes = 0
+        self._lock = threading.Lock()
+
+    def get(self, key: Any) -> Any:
+        """The cached value, promoted to MRU — or ``_MEMO_MISS``."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return _MEMO_MISS
+            self._entries.move_to_end(key)
+            return entry[0]
+
+    def put(self, key: Any, value: Any, size: int) -> None:
+        """Store ``value`` (``size`` estimated bytes) under ``key``."""
+        if size > self._budget:
+            return
+        with self._lock:
+            old = self._entries.pop(key, None)
+            if old is not None:
+                self._stored_bytes -= old[1]
+            self._entries[key] = (value, size)
+            self._stored_bytes += size
+            while len(self._entries) > self._cap or self._stored_bytes > self._budget:
+                _, (_, evicted) = self._entries.popitem(last=False)
+                self._stored_bytes -= evicted
+
+    def clear(self) -> None:
+        """Drop every entry — a ruleset mutation invalidates all keys."""
+        with self._lock:
+            self._entries.clear()
+            self._stored_bytes = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def bytes(self) -> int:
+        """Estimated bytes of stored results — the budget's ledger."""
+        return self._stored_bytes
+
+
+def _evidence_entry_bytes(evidence: Evidence) -> int:
+    """Estimated stored bytes of one evidence entry."""
+    return 64 + len(evidence.where) + len(evidence.detail)
+
+
+def _stage_size(stage: _BodyStage) -> int:
+    """Estimated stored bytes of one stage entry."""
+    return 128 + sum(
+        _evidence_entry_bytes(evidence)
+        for per_rule in stage.body_evidence
+        for evidence in per_rule
+    )
+
+
+def _findings_size(findings: tuple[Finding, ...]) -> int:
+    """Estimated stored bytes of one dataset-scan memo entry."""
+    return 96 * len(findings) + sum(
+        64
+        + len(finding.rule_id)
+        + len(finding.flow_id)
+        + len(finding.title)
+        + sum(len(ref) for ref in finding.refs)
+        + sum(_evidence_entry_bytes(e) for e in finding.evidence)
+        for finding in findings
+    )
+
+
+def _rule_body_evidence(
+    rule: Rule,
+    layout: tuple[int | None, ...],
+    text: str | None,
+    spans: list[list[tuple[int, int]]] | None,
+) -> tuple[Evidence, ...]:
+    """One rule's pre-gate body-stage result: engine spans in, evidence out.
+
+    Compiled patterns read the shared pass's spans; the residuals
+    (engine-refused or over-expansion-budget patterns) run the gated
+    stdlib path — interleaved in the rule's body_patterns order so
+    records stay byte-identical to the all-stdlib scan. Pure in
+    (epoch, body bytes): this is what the memo stores (ticket 14).
+    """
+    if not rule.body_patterns or text is None:
+        return ()
+    evidence: list[Evidence] = []
+    for pattern, db_index in zip(rule.body_patterns, layout, strict=True):
+        if db_index is None or spans is None:
+            evidence += _pattern_evidence((pattern,), text, _RESPONSE_BODY)
+        else:
+            evidence += _span_evidence(spans[db_index], text)
+    return tuple(evidence)
+
+
+def _scan_context(view: FlowView) -> tuple[Any, ...]:
+    """The flow-context slice of the dataset-scan memo key (ticket 14).
+
+    A ``scan()`` override is an opaque body of work, so its memo entry
+    keys on the whole FlowView surface such an override lawfully reads
+    per flow: the record's stable routing fields (method, scheme,
+    host, port, path, browser attribution, status, error) and the
+    stored response headers — the response content type above all,
+    retire.js's own screen. The stored body is the digest half of the
+    key; the flow id is re-stamped per flow (``Scanner._scan_rule``);
+    request-side material belongs to the request-stage patterns, not
+    to scan() overrides. Same body, different context: a different
+    key and a fresh scan, so gated-in and gated-out flows of one body
+    never share a cached scan result.
+    """
+    record = view.record
+    # body_file embeds the flow id; only its extension — the stored
+    # body's content addressing — is rule-visible context.
+    body_file = str(record.get("body_file") or "")
+    return (
+        record.get("method"),
+        record.get("scheme"),
+        record.get("host"),
+        record.get("port"),
+        record.get("path"),
+        record.get("browser_id"),
+        record.get("status_code"),
+        record.get("error"),
+        Path(body_file).suffix,
+        _stored_response_headers(view),
+    )
 
 
 class Scanner:
@@ -265,7 +467,13 @@ class Scanner:
         # database those rules scan through. register/deregister
         # (boot, install, remove, force-swap) builds the next one on
         # this thread; observe snapshots the object itself.
-        self._epoch = _RulesetEpoch(self._rules)
+        self._epoch_serial = 0
+        self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
+        # Session-scoped memo of body-stage results (ticket 14): keys
+        # carry the epoch serial, so every ruleset mutation clears it
+        # wholesale — cached results can never answer for a ruleset
+        # generation that no longer exists.
+        self._memo = _BodyMemo(_MEMO_BUDGET_BYTES, _MEMO_MAX_ENTRIES)
         self._correlators: tuple[Correlator, ...] = tuple(correlators)
         self._queue: queue.SimpleQueue[tuple[dict[str, Any], _RulesetEpoch]] = (
             queue.SimpleQueue()
@@ -310,10 +518,13 @@ class Scanner:
         the next ruleset epoch — the new rules' body patterns compile
         into a fresh database on this thread, off the scan path (the
         drain keeps scanning queued entries against the epochs they
-        arrived under).
+        arrived under) — and the body memo clears with it: every memo
+        key carries the epoch serial (ticket 14).
         """
         self._rules.extend(rules)
-        self._epoch = _RulesetEpoch(self._rules)
+        self._epoch_serial += 1
+        self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
+        self._memo.clear()
 
     def deregister_rules(self, rule_ids: AbstractSet[str]) -> None:
         """Drop every live rule whose id is in ``rule_ids`` (the remove path).
@@ -321,10 +532,13 @@ class Scanner:
         Flows already queued keep their arrival-time snapshot; findings
         already recorded are never retracted — removal stops future
         findings only — and the next ruleset epoch compiles without
-        the removed rules' patterns.
+        the removed rules' patterns, clearing the body memo with it
+        (every memo key carries the epoch serial, ticket 14).
         """
         self._rules = [rule for rule in self._rules if rule.id not in rule_ids]
-        self._epoch = _RulesetEpoch(self._rules)
+        self._epoch_serial += 1
+        self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
+        self._memo.clear()
 
     async def run(self) -> None:
         """Drain queued flow records against the rules until cancelled.
@@ -362,21 +576,26 @@ class Scanner:
         """Scan one flow record against its arrival-time ruleset epoch."""
         flow_id = str(record.get("id", "?"))
         view = FlowView(self._data_dir, record)
-        # The one body pass every rule shares: GIL-released, superset
-        # for the whole epoch, before any per-rule gate or assembly.
-        stage = self._body_stage(view, epoch)
-        for rule, layout in zip(epoch.rules, epoch.layout, strict=True):
+        # The body stage is memoized per (epoch, stored-body digest)
+        # (ticket 14): a repeated body replays every rule's pre-gate
+        # body-stage result instead of rescanning. Evidence assembly
+        # beyond the body and Finding emission stay per flow, so two
+        # flows with the same body record their own findings, and the
+        # memo is invisible to everything except drain time.
+        digest = self._body_digest(view) if epoch.memoizable else None
+        stage = self._body_stage(view, epoch, digest)
+        for index, rule in enumerate(epoch.rules):
             try:
                 # Dataset-backed rules (ADR-0035) override Rule.scan:
                 # the vendored data's extractors and per-advisory
                 # severities cannot fold into the declarative spec, so
                 # they hand back fully formed findings.
-                findings = rule.scan(view)
+                findings = self._scan_rule(rule, view, epoch, digest, index)
                 if findings is not None:
                     for finding in findings:
                         self._emit(finding)
                     continue
-                evidence = self._match(rule, view, layout, stage)
+                evidence = self._match(rule, view, stage, index)
             except Exception:
                 logger.exception(
                     "scanner rule %r failed on flow %s; skipped", rule.id, flow_id
@@ -406,17 +625,53 @@ class Scanner:
             for finding in findings:
                 self._emit(finding)
 
-    def _body_stage(self, view: FlowView, epoch: _RulesetEpoch) -> _BodyStage:
-        """Run the epoch's single engine pass over the stored body.
+    def _body_digest(self, view: FlowView) -> bytes | None:
+        """Digest of the flow's stored body bytes, or ``None``.
 
-        Reads the body once and scans it once — ``find_all`` releases
-        the GIL for the engine pass — whatever the rule count. A body
-        that cannot be read (or scanned) fails here once and is
-        re-raised per rule at the point the all-stdlib path raised
-        it, so containment skips exactly the rules it always did.
+        SHA-256 over the file on disk — the exact bytes every stage of
+        the scan reads — hashed in 1 MiB chunks so the digest read
+        drops the GIL between slices (the drain worker is already off
+        the loop thread; the chunking keeps the hash from hitching any
+        thread that shares the GIL). An unreadable body has no digest
+        and takes the uncached path — the body read itself then fails
+        exactly where it always did.
+        """
+        body_file = view.record.get("body_file")
+        if body_file is None:
+            return None
+        hasher = hashlib.sha256()
+        try:
+            with (self._data_dir / body_file).open("rb") as handle:
+                while chunk := handle.read(_HASH_CHUNK):
+                    hasher.update(chunk)
+        except Exception:
+            # Unreadable or malformed record: no digest, uncached path
+            # — the body read itself then fails where it always did,
+            # contained per rule.
+            return None
+        return hasher.digest()
+
+    def _body_stage(
+        self, view: FlowView, epoch: _RulesetEpoch, digest: bytes | None
+    ) -> _BodyStage:
+        """The epoch's body-stage results for one flow's body, memoized.
+
+        The cold path reads the body once, runs the single engine pass
+        (``find_all`` releases the GIL), and assembles every rule's
+        pre-gate body evidence — all the expensive work, now done once
+        per (epoch, body). A repeat of the same body under the same
+        epoch replays the whole stage from the memo. A body that
+        cannot be read (or scanned) fails here once and is re-raised
+        per rule at the point the all-stdlib path raised it; errors
+        are not memoized — an unreadable body has no digest to key on.
         """
         if not epoch.scans_body:
-            return _BodyStage(None, None, None)
+            return _BodyStage(None, ())
+        key = ("stage", epoch.serial, digest) if digest is not None else None
+        if key is not None:
+            cached = self._memo.get(key)
+            if cached is not _MEMO_MISS:
+                return cached
         try:
             text = view.body
             spans = (
@@ -424,18 +679,71 @@ class Scanner:
                 if text is not None and epoch.fast is not None
                 else None
             )
+            stage = _BodyStage(
+                None,
+                tuple(
+                    _rule_body_evidence(rule, layout, text, spans)
+                    for rule, layout in zip(epoch.rules, epoch.layout, strict=True)
+                ),
+            )
         except Exception as exc:
-            return _BodyStage(None, exc, None)
-        return _BodyStage(text, None, spans)
+            # Read or scan failure (and a raising pattern, which the
+            # old path contained per rule the same way): fail here
+            # once, re-raise per rule — never memoized.
+            return _BodyStage(exc, ())
+        if key is not None:
+            self._memo.put(key, stage, _stage_size(stage))
+        return stage
+
+    def _scan_rule(
+        self,
+        rule: Rule,
+        view: FlowView,
+        epoch: _RulesetEpoch,
+        digest: bytes | None,
+        index: int,
+    ) -> list[Finding] | None:
+        """Run one rule's ``scan()`` override, memoized per body (ticket 14).
+
+        The override is an opaque body of work — the retire.js corpus
+        pass above all — so the memo caches its whole result under
+        (epoch, body digest, flow context, rule index) and re-stamps
+        each cached Finding with the current flow's id on replay: a
+        duplicate pays the digest read instead of the dataset scan,
+        and still records its own findings. The flow-context half of
+        the key (``_scan_context``) is everything such an override
+        lawfully reads per flow — its own gates (retire.js's
+        content-type screen) and the record's stable routing fields —
+        so a flow the override gates out never replays a gated-in
+        flow's findings.
+        """
+        if digest is None or type(rule).scan is Rule.scan:
+            return rule.scan(view)
+        key = ("scan", epoch.serial, digest, _scan_context(view), index)
+        cached = self._memo.get(key)
+        if cached is not _MEMO_MISS:
+            flow_id = str(view.record.get("id", "?"))
+            return [replace(finding, flow_id=flow_id) for finding in cached]
+        findings = rule.scan(view)
+        if findings is not None:
+            frozen = tuple(findings)
+            self._memo.put(key, frozen, _findings_size(frozen))
+        return findings
 
     def _match(
         self,
         rule: Rule,
         view: FlowView,
-        layout: tuple[int | None, ...],
         stage: _BodyStage,
+        index: int,
     ) -> list[Evidence]:
-        """Apply a rule's gates, then its match spec, to one flow view."""
+        """Apply a rule's gates, then its match spec, to one flow view.
+
+        The body half replays the rule's memoized pre-gate body-stage
+        result (ticket 14); the gates — flow context — filter here,
+        per flow, so one cached body-stage entry byte-identically
+        serves flows the gates disagree on.
+        """
         browser = view.is_browser
         query_patterns, request_header_patterns = _request_patterns(
             rule, browser=browser
@@ -451,7 +759,7 @@ class Scanner:
             return []
         if not _passes_gates(rule, view.record, view):
             return []
-        evidence = _response_evidence(rule, view, layout, stage)
+        evidence = _response_evidence(rule, view, stage, index)
         return [
             *evidence,
             *_request_evidence(query_patterns, request_header_patterns, view),
@@ -587,29 +895,26 @@ def _request_patterns(
 def _response_evidence(
     rule: Rule,
     view: FlowView,
-    layout: tuple[int | None, ...],
     stage: _BodyStage,
+    index: int,
 ) -> list[Evidence]:
     """Body and response-header matches; absent material is a skip.
 
-    The body half reads the one engine pass — spans in, evidence out
-    — for compiled patterns and the gated stdlib path for the
-    residuals, interleaved in the rule's body_patterns order so
-    records stay byte-identical to the all-stdlib scan.
+    The body half is the rule's memoized pre-gate body-stage result
+    (ticket 14) — assembled once per (epoch, body) by
+    ``_rule_body_evidence`` and replayed per flow, in the rule's
+    body_patterns order, byte-identical to the all-stdlib scan. The
+    index into ``stage.body_evidence`` happens only for a rule that
+    carries body patterns (an epoch that scans no bodies stores an
+    empty row), after the error re-raise. The header half is per-flow
+    stored material. Unreadable body: fail this rule where the old
+    path did.
     """
     evidence: list[Evidence] = []
     if rule.body_patterns:
         if stage.error is not None:
-            # Unreadable body: fail this rule where the old path did.
             raise stage.error
-        if stage.text is not None:
-            for pattern, db_index in zip(rule.body_patterns, layout, strict=True):
-                if db_index is None or stage.spans is None:
-                    evidence += _pattern_evidence(
-                        (pattern,), stage.text, _RESPONSE_BODY
-                    )
-                else:
-                    evidence += _span_evidence(stage.spans[db_index], stage.text)
+        evidence.extend(stage.body_evidence[index])
     if rule.header_patterns:
         headers = _stored_response_headers(view)
         if headers is not None:
