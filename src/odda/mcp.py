@@ -56,7 +56,8 @@ from odda.request import (
     send_repeat as send_request_repeat,
 )
 from odda.scanner.engine import Scanner
-from odda.scanner.userrules import RULE_FILE_SKELETON, UserRuleManager
+from odda.scanner.guide import RULE_GUIDE
+from odda.scanner.userrules import UserRuleManager
 
 # Two or more names selects the multi-name pipeline mode (ADR-0019);
 # repeat >= 2 selects the concurrent-send mode (ADR-0020) — the same
@@ -1063,18 +1064,37 @@ async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str
 # --- passive scanner: user rules ---
 
 
-# The rule-file contract rides the tool description (an agent cannot
-# infer the format), derived from the one skeleton the load-failure
-# rejections also show — a single source, so the surfaces cannot
-# drift. The id-uniqueness constraint is deliberately absent here: it
-# lives in the firing error (CODING_STANDARDS), fixes included.
+# The install surface's one docs resource (ADR-0038): the full
+# authoring guide — rule fields, FlowView, worked examples — which no
+# tool surface can carry and no author can proceed without. Its
+# rule-file section is built from the same RULE_FILE_SKELETON every
+# load-failure rejection shows, so guide and errors cannot drift.
+@mcp_server.resource(
+    "odda://scanner/rule-guide",
+    name="rule-guide",
+    title="Scanner rule guide",
+    description=(
+        "The complete rule-authoring guide: the rule-file shape, every "
+        "matcher and gate, the FlowView API, worked examples of both "
+        "rule styles, the severity scale, and install semantics."
+    ),
+    mime_type="text/markdown",
+)
+def scanner_rule_guide() -> str:
+    """Serve the rule guide payload (single-sourced skeleton)."""
+    return RULE_GUIDE
+
+
+# The description carries the install contract plus the one-line
+# pointer to the guide resource; the rule-file skeleton itself lives in
+# the guide and in every load-failure rejection — one constant, so the
+# surfaces cannot drift.
 _RULE_INSTALL_DOC = (
-    "Install a passive-scanner rule slot from file or source. The slot "
-    "is a Python file whose module-level RULES list holds Rule objects; "
-    "installed rules scan flows captured after the install, never "
-    "retroactively. Installing from a file path copies the file's "
-    "sibling non-.py assets (datasets) into the slot. A rule file looks "
-    "like:\n" + RULE_FILE_SKELETON
+    "Install a passive-scanner rule slot from file or source. Installed "
+    "rules scan flows captured after the install, never retroactively, "
+    "and persist in the global rules dir. Installing from a file path "
+    "copies the file's sibling non-.py assets (datasets) into the slot. "
+    "The full authoring guide is the odda://scanner/rule-guide resource."
 )
 
 

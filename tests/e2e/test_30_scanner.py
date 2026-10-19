@@ -36,7 +36,7 @@ from odda.scanner.model import (
     _literal_gates,
     _passes_literal_gates,
 )
-from odda.scanner.userrules import load_slot_source
+from odda.scanner.userrules import RULE_FILE_SKELETON, load_slot_source
 from tests.e2e.conftest import curl, dyn_server, fixture_site
 
 _FX = "stack-trace.html"
@@ -1252,9 +1252,9 @@ async def test_syntax_error_install_rejected_with_expected_shape(
         )
         assert "Failed to load rule slot 'bad'" in err
         assert "SyntaxError" in err
-        # the expected file shape rides the rejection
-        assert "from odda.scanner import Rule, Severity" in err
-        assert "RULES = [" in err
+        # the expected file shape rides the rejection — the exact
+        # skeleton constant, so error teaching can never drift from it
+        assert RULE_FILE_SKELETON in err
         assert not _slot_path(h, "bad").exists()
 
 
@@ -2714,3 +2714,107 @@ async def test_rule_slots_are_machine_global_across_data_dirs(
             flow = await _drive(b, fx, "t15-cross-boot")
             finding = await _wait_rule_finding(b, flow["id"], "user.ticket06-canary")
             assert finding["flow_id"] == flow["id"]
+
+
+# --- ticket 18: rule guide resource ---
+
+
+async def test_rule_guide_resource_covers_the_authoring_surface(
+    odda_session,
+) -> None:
+    """The odda://scanner/rule-guide resource is listed and readable over
+    MCP; its payload covers every section of the authoring guide and its
+    rule-file section embeds the exact skeleton the install rejections
+    teach — one source, so the guide and the errors cannot drift."""
+    async with odda_session() as h:
+        listed = await h.client.list_resources()
+        guide = next(
+            (r for r in listed.resources if str(r.uri) == "odda://scanner/rule-guide"),
+            None,
+        )
+        assert guide is not None, "rule guide not listed over MCP"
+
+        r = await h.client.read_resource("odda://scanner/rule-guide")
+        text = r.contents[0].text
+
+        # every section of the guide rides the payload
+        for heading in (
+            "## Installing rules — arrival-time semantics",
+            "## The rule file",
+            "## Rule fields — matchers and gates",
+            "## The severity scale",
+            "## Rule ids are permanent",
+            "## scan() overrides — dataset-style rules",
+            "## FlowView — what a scan() override can read",
+            "## Worked example — declarative rule",
+            "## Worked example — scan() override",
+            "## Engine compatibility — the pattern-shape tradeoff",
+        ):
+            assert heading in text, f"guide section missing: {heading}"
+
+        # the skeleton section is the single-sourced constant
+        assert RULE_FILE_SKELETON in text
+
+        # every pattern kind and every gate is documented
+        for field in (
+            "body_patterns",
+            "header_patterns",
+            "request_query_patterns",
+            "request_header_patterns",
+            "schemes",
+            "statuses",
+            "content_types",
+            "browser_only",
+            "request_browser_only",
+        ):
+            assert field in text, f"rule field not documented: {field}"
+
+        # the whole FlowView API is documented
+        for attr in (
+            "record",
+            "request",
+            "request_method",
+            "request_path",
+            "request_query",
+            "request_headers",
+            "response_headers",
+            "body",
+            "body_bytes",
+            "content_type",
+            "is_browser",
+        ):
+            assert attr in text, f"FlowView attribute not documented: {attr}"
+
+        # the severity scale is the five-level enum, name for name
+        for level in ("info", "low", "medium", "high", "critical"):
+            assert level in text
+
+        # both worked examples are real rule files
+        assert "body_patterns=(" in text
+        assert "def scan(self, view" in text
+
+        # the engine tradeoff names its parts: the approximate
+        # prefilter, the confirm it forces, the bounded-repeat hazard —
+        # and the accepted catastrophic-backtracking tail
+        assert "prefilter" in text
+        assert "confirm" in text
+        assert "backtrack" in text
+
+
+async def test_rule_install_description_is_contract_plus_guide_pointer(
+    odda_session,
+) -> None:
+    """rule_install's description is the install contract plus a one-line
+    pointer to the guide resource; the skeleton it used to carry is gone
+    from the description (it keeps riding the rejections)."""
+    async with odda_session() as h:
+        tools = await h.client.list_tools()
+        doc = next(t.description for t in tools.tools if t.name == "rule_install")
+        assert "odda://scanner/rule-guide" in doc
+        # the skeleton no longer rides the description
+        assert "RULES = [" not in doc
+        assert "from odda.scanner import" not in doc
+        # the install contract stays: applies forward only, assets ride
+        # file installs
+        assert "never retroactively" in doc
+        assert "assets" in doc
