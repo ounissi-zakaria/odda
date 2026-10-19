@@ -5,7 +5,7 @@ A session-live passive scanner observes every flow the session writes
 task owned by the lifespan scans — and appends findings to
 ``<data_dir>/scanner/findings.jsonl`` (one line per rule-flow pair,
 evidence aggregated). No rules ship with odda (ADR-0036): every test
-seeds the slots it needs from the repo's rules/ corpus through the
+seeds the slots it needs from the test-fixture rules corpus through the
 real rule_install path. External behavior only: traffic in via curl
 through proxy_url or request_send, findings out via a bounded poll of
 the index (the ``wait_flow`` precedent).
@@ -31,6 +31,7 @@ from odda.scanner.gates import _literal_gates, passes_literal_gates
 from odda.scanner.model import Evidence, Finding, FlowView, Rule, Severity
 from odda.scanner.userrules import RULE_FILE_SKELETON, load_slot_source
 from tests.e2e.conftest import (
+    _RULES_SRC,
     _findings_index,
     _seed_slot,
     _slot_rules,
@@ -1399,10 +1400,8 @@ async def test_force_overwrite_swaps_the_slot_live(odda_session) -> None:
 
 
 # The converted corpus lives outside the shipped package (ADR-0036):
-# one slot dir per family under the repo's rules/ tree, seeded through
+# one slot dir per family under the fixtures' rules tree, seeded through
 # the real rule_install path.
-_RULES_SRC = Path(__file__).resolve().parents[2] / "rules"
-
 # Every converted family, in one list (library-level tests scan against
 # the whole corpus the way sessions do when every slot is installed).
 _SLOT_FAMILIES = (
@@ -1532,7 +1531,7 @@ def test_package_ships_no_rules_or_datasets() -> None:
     """The shipped package carries scanner machinery only: no rule
     registrations (no builtins modules exist to import) and no rule
     datasets (no data dir, no package-data entry) — the corpus lives
-    as installable slot sources under the repo's rules/ tree, outside
+    as installable slot sources under tests/e2e/fixtures/rules/, outside
     the package (ADR-0036)."""
     scanner_src = Path(__file__).resolve().parents[2] / "src" / "odda" / "scanner"
     names = {p.name for p in scanner_src.iterdir()}
@@ -2431,8 +2430,8 @@ _T13_HIT_BODY = (
 # The corpus's three refusal families in one rule, restated within the
 # engine's compile-expansion budget (ADR-0037: over-budget shapes stay
 # stdlib residuals however they scan): the Prometheus backreference
-# (rules/fingerprints), the compromised-CDN lookarounds
-# (rules/supplychain, bridging repeat shortened), and the quote-pair
+# (fixtures/rules/fingerprints), the compromised-CDN lookarounds
+# (fixtures/rules/supplychain, bridging repeat shortened), and the quote-pair
 # secret an agent authors the same way.
 _T13_REFUSED = Rule(
     id="user.ticket13-refused",

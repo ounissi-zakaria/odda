@@ -12,8 +12,8 @@ objects in a stable author surface, not a DSL — stands unchanged.
 
 The converted corpus (disclosure, fingerprint, cookie, takeover,
 supply-chain, and request families, plus the retire.js adapter) lives
-as installable slot sources in the repo, under `rules/` at the repo
-root — one slot directory per family, outside the shipped package
+as installable slot sources at `tests/e2e/fixtures/rules/` — one slot
+directory per family, test-local material outside the shipped package
 (setuptools packages `src/` only). The corpus is source material for
 installs, not a distribution: nothing auto-installs it, and whether it
 returns as a separate distribution is a later maintainer decision. The
@@ -29,8 +29,9 @@ freeze a layout the config home already replaces.
 
 The decision is recorded because "a scanner with no rules" reads as a
 regression — the previous behavior found findings out of the box — and
-because the corpus's in-repo home will look like bundling to anyone
-who finds `rules/` without its reason. The scanner's value is the
-machinery: capture-time observation, arrival-time semantics, the
-findings index. Curation of what fires is a maintainer act, performed
-out of band through the same install surface every rule uses.
+because a rule corpus anywhere in the tree can read as bundling
+without its reason; keeping it test-local makes its purpose
+unambiguous. The scanner's value is the machinery: capture-time
+observation, arrival-time semantics, the findings index. Curation of
+what fires is a maintainer act, performed out of band through the same
+install surface every rule uses.

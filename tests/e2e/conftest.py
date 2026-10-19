@@ -623,20 +623,22 @@ def odda_subprocess_session(tmp_path: Path, config_home: Path) -> Iterator[objec
 
 # --- scanner suite helpers (test_30 / test_32) ---
 #
-# The repo's rules/ corpus (ADR-0036: no rules ship with odda) loaded
-# or seeded through the real paths, plus the findings-index reader the
-# harness cannot serve (its assertions run with no live session).
-_RULES_SRC = REPO_ROOT / "rules"
+# The scanner tests' rule corpus (ADR-0036: no rules ship with odda)
+# loaded or seeded through the real paths, plus the findings-index
+# reader the harness cannot serve (its assertions run with no live
+# session). Test-local slot sources — the spec's "test-local slots"
+# wording — kept under fixtures/, not at the repo root.
+_RULES_SRC = Path(__file__).parent / "fixtures" / "rules"
 
 
 def _slot_rules(family: str) -> list[Rule]:
-    """Load one repo rules/<family> slot through the slot loader."""
+    """Load one fixtures/rules/<family> slot through the slot loader."""
     path = _RULES_SRC / family / "rule.py"
     return load_slot_source(family, path.read_text(encoding="utf-8"), str(path))
 
 
 async def _seed_slot(h: Harness, family: str) -> dict:
-    """Install the repo's rules/<family> slot through the real tool path."""
+    """Install the fixtures' rules/<family> slot through the real tool path."""
     return await h.call(
         "rule_install",
         {"name": family, "file": str(_RULES_SRC / family / "rule.py")},

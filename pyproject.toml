@@ -146,7 +146,7 @@ split-on-trailing-comma = false
 "tests/e2e/fixtures/forward_proxy.py" = ["INP001"]
 # The converted rule corpus: slot sources outside any package (install
 # material, not importable modules — ADR-0036).
-"rules/*/rule.py" = ["INP001"]
+"tests/e2e/fixtures/rules/*/rule.py" = ["INP001"]
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
