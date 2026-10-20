@@ -12,6 +12,7 @@ import contextlib
 import itertools
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -202,7 +203,14 @@ def _build_request_bytes(flow) -> bytes:
     origin-form and goes on the wire verbatim").
     """
     request = flow.request
-    lines = [f"{request.method} {request.path} {request.http_version}".encode("ascii")]
+    if request.method == "CONNECT":
+        # Authority form: the CONNECT target is host:port (the path is
+        # empty for tunnel requests), so the request line stays on-wire
+        # faithful: ``CONNECT host:port HTTP/1.1``.
+        target = request.authority or f"{request.host}:{request.port}"
+    else:
+        target = request.path
+    lines = [f"{request.method} {target} {request.http_version}".encode("ascii")]
     for name, value in request.headers.items(multi=True):
         lines.append(f"{name}: {value}".encode("ascii", errors="replace"))
 
@@ -512,6 +520,50 @@ class RequestMeta:
     path: str
 
 
+def _flow_browser_id(flow) -> str | None:
+    """Return the browser id a flow is attributed to, if any.
+
+    The auth addon (proxy.py) stamps the parsed proxy credentials —
+    (username, password), the username being the browser's browser_id
+    token (ADR-0031) — into flow metadata; flows that rode no
+    browser's credentials have no attribution.
+
+    Args:
+        flow: mitmproxy flow object.
+
+    Returns:
+        The browser id token, or ``None`` for unattributed flows.
+    """
+    auth = flow.metadata.get(PROXYAUTH_METADATA_KEY)
+    return auth[0] if auth else None
+
+
+def _request_meta(
+    flow, *, scheme: str | None = None, path: str | None = None
+) -> RequestMeta:
+    """Build the :class:`RequestMeta` for a flow from its request side.
+
+    Both overrides exist for CONNECT flows, whose request side is the
+    tunnel attempt rather than an inner request.
+
+    Args:
+        flow: mitmproxy flow object.
+        scheme: Scheme override; defaults to ``flow.request.scheme``.
+        path: Path override; defaults to ``flow.request.path``.
+
+    Returns:
+        The populated request metadata.
+    """
+    request = flow.request
+    return RequestMeta(
+        method=request.method,
+        scheme=scheme if scheme is not None else request.scheme,
+        host=request.host,
+        port=request.port,
+        path=path if path is not None else request.path,
+    )
+
+
 _writer: FlowRecordWriter | None = None
 
 
@@ -549,8 +601,7 @@ class FlowFileAddon:
         """
         if flow.metadata.get(AUTH_CHALLENGE_TAG):
             return
-        auth = flow.metadata.get(PROXYAUTH_METADATA_KEY)
-        browser_id: str | None = auth[0] if auth else None
+        browser_id = _flow_browser_id(flow)
         flow_id = self._writer.alloc_flow_id()
         self._writer.write_request(flow_id, _build_request_bytes(flow))
         self._writer.write_meta(
@@ -583,13 +634,7 @@ class FlowFileAddon:
             elapsed = response.timestamp_end - request.timestamp_start
             total_duration_ms = elapsed * 1000
 
-        meta = RequestMeta(
-            method=request.method,
-            scheme=request.scheme,
-            host=request.host,
-            port=request.port,
-            path=request.path,
-        )
+        meta = _request_meta(flow)
         self._writer.write_response(
             flow_id=flow_id,
             meta=meta,
@@ -613,13 +658,100 @@ class FlowFileAddon:
         flow_id, browser_id = pending
 
         msg = flow.error.msg if flow.error else "unknown error"
-        meta = RequestMeta(
-            method=flow.request.method,
-            scheme=flow.request.scheme,
+        meta = _request_meta(flow)
+        self._writer.write_error(
+            flow_id=flow_id, meta=meta, error_msg=msg, browser_id=browser_id
+        )
+
+    def http_connect_error(self, flow) -> None:
+        """Handle failed CONNECTs - write an error flow for the tunnel.
+
+        An ``https://`` request to a dead host never has an inner
+        request: the browser sends ``CONNECT host:443``, upstream
+        resolution fails inside mitmproxy's connect layer, and the
+        ``request`` hook never fires. This hook (fired by mitmproxy on
+        the non-2xx CONNECT response) writes the Flow model's error
+        shape for the tunnel attempt itself: flow dir + request +
+        meta.json + error file + ``flows.jsonl`` line, scheme ``https``
+        (the CONNECT targets a TLS tunnel), the authority form as the
+        path, and browser attribution from the CONNECT's proxy
+        credentials (the auth addon stamped them at ``http_connect``
+        time). Request-side rules see it exactly like a cleartext-http
+        error flow.
+
+        Successful CONNECTs never reach this hook (the tunnel's inner
+        flows capture that traffic), and benign client cancels — the
+        client walked away before the tunnel existed — are dropped so
+        they do not spam the flow store.
+
+        Args:
+            flow: The CONNECT mitmproxy flow with the failure response.
+        """
+        if flow.metadata.get(AUTH_CHALLENGE_TAG):
+            return
+        msg = _connect_failure_message(flow)
+        if msg is None:
+            return
+        browser_id = _flow_browser_id(flow)
+        flow_id = self._writer.alloc_flow_id()
+        self._writer.write_request(flow_id, _build_request_bytes(flow))
+        # Tunnel attempts are labeled https by convention: browsers
+        # CONNECT because they want a TLS tunnel — the target port does
+        # not determine the scheme. Capture is deliberately
+        # port-agnostic, so dangling-host detection works on any port.
+        self._writer.write_meta(
+            flow_id,
+            scheme="https",
             host=flow.request.host,
             port=flow.request.port,
-            path=flow.request.path,
+        )
+        meta = _request_meta(
+            flow, scheme="https", path=flow.request.authority or flow.request.path
         )
         self._writer.write_error(
             flow_id=flow_id, meta=meta, error_msg=msg, browser_id=browser_id
         )
+
+
+# Client-side cancellation texts seen on failed CONNECTs (mitmproxy's
+# kill message and its client-gone wording). These are the benign
+# shapes — the client walked away before the tunnel existed — and must
+# not produce flows. Everything else (DNS failures, refused, timeouts)
+# is an upstream failure worth capturing. Wording audited against
+# mitmproxy 12.2.3 (the version pinned in .venv).
+_CLIENT_CANCEL_MESSAGES = ("client disconnected", "connection killed")
+
+# Eager CONNECT failures surface as a mitmproxy-synthesized 502 whose
+# body carries the upstream error verbatim:
+# ``Cannot connect to <host>:<port>: <err> If you plan to ...``
+# Wording audited against mitmproxy 12.2.3 (the version pinned in .venv);
+# the pinning tests in test_34 guard it against upstream drift.
+_CONNECT_502 = re.compile(r"^Cannot connect to .*?: (.*?)(?: If you plan|$)", re.DOTALL)
+
+
+def _connect_failure_message(flow) -> str | None:
+    """Extract the upstream failure text from a failed CONNECT flow.
+
+    Prefers ``flow.error`` (set on some failure paths); otherwise parses
+    the synthesized 502 body. Returns ``None`` when no upstream failure
+    text exists or the failure is a benign client-side cancellation.
+
+    Args:
+        flow: The CONNECT mitmproxy flow at ``http_connect_error`` time.
+
+    Returns:
+        The error message (e.g. ``[Errno -2] Name or service not
+        known``), or ``None`` for benign cancels.
+    """
+    if flow.error is not None and flow.error.msg:
+        msg: str = flow.error.msg
+    else:
+        msg = ""
+        response = flow.response
+        if response is not None and response.content:
+            match = _CONNECT_502.match(response.get_text(strict=False) or "")
+            if match is not None:
+                msg = match.group(1)
+    if not msg or any(c in msg for c in _CLIENT_CANCEL_MESSAGES):
+        return None
+    return msg

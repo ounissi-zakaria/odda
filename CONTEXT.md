@@ -19,7 +19,7 @@ _Avoid_: server instance, odda server, daemon
 _Avoid_: project dir, state dir, .odda dir
 
 **Flow**:
-One captured HTTP exchange — a request, its response (or network error) — recorded as a read-only directory under the Data dir (named by the flow id) plus one line in the flows index (`flows.jsonl`). Written exactly once, when the exchange completes; attributed to the Browser whose proxy credentials carried it, when it rode one.
+One captured HTTP exchange — a request, its response (or network error, including a failed CONNECT tunnel whose upstream resolution or connection failed) — recorded as a read-only directory under the Data dir (named by the flow id) plus one line in the flows index (`flows.jsonl`). Written exactly once, when the exchange completes; attributed to the Browser whose proxy credentials carried it, when it rode one.
 _Avoid_: transaction, request/response pair, capture entry, traffic entry
 
 ## Browser sessions
