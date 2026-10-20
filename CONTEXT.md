@@ -145,19 +145,31 @@ The record of one Rule matching one Flow: a severity-tagged observation with agg
 _Avoid_: alert, issue, hit, match
 
 **Rule**:
-A single passive check over one Flow's captured material, gated on flow context (scheme, status, content type, attribution). Rule identifiers are permanent — they key Findings. No Rules ship with odda: the Scanner boots with an empty ruleset, and every Rule lives in a Rule slot persisted in the Global rules dir and surviving sessions — machine-global, unlike Proxy-scripts.
+A single passive check over one Flow's captured material, gated on flow context (scheme, status, content type, attribution). Rule identifiers are permanent — they key Findings — and unique across both scopes. No Rules ship with odda: the Scanner boots with an empty ruleset, and every Rule lives in a Rule slot surviving sessions.
 _Avoid_: check, signature, template, detector
 
 **Rule slot**:
-One persisted unit of Rules: a named directory in the Global rules dir holding a single Python file whose module-level `RULES` list defines the slot's Rules. Installed via `rule_install` (`force` overwrites by name), removed via `rule_remove`, re-loaded on every session boot; a slot that fails to load is skipped without blocking the others. Slots are machine-global and shared across projects, unlike Proxy-scripts, which persist per-project in the Data dir.
+One persisted unit of Rules: a named directory holding a single Python file whose module-level `RULES` list defines the slot's Rules, living in one Scope — the Project rules dir (installed via `rule_install`, `force` overwrites by name; removed via `rule_remove`) or the Global rules dir (placed and removed by hand). Re-loaded on every session boot; a slot that fails to load is skipped without blocking the others.
 _Avoid_: rule file, custom rule, rule package
 
+**Scope**:
+Which of a Rule slot's two homes a rule belongs to: project or global. Every `rule_list` row carries it; install and remove act on project slots only.
+_Avoid_: rules location, rule origin, rule source
+
+**Project rules dir**:
+The directory project Rule slots persist in: `rules/` under the Data dir, created lazily on the first `rule_install`. Per-project, like the Proxy-scripts tree, and what `rule_install`/`rule_remove` manage.
+_Avoid_: local rules dir, .odda rules
+
 **Global rules dir**:
-The directory Rule slots persist in: `rules/` under the odda config home (`~/.config/odda` by default; the `ODDA_CONFIG_HOME` environment variable redirects it, and the Base profile lives under the same root). Machine-global — one ruleset shared across every project and MCP session on the machine — which is why it never holds the per-project Data dir's flows or findings.
+The directory global Rule slots persist in: `rules/` under the odda config home (`~/.config/odda` by default; the `ODDA_CONFIG_HOME` environment variable redirects it, and the Base profile lives under the same root). Machine-global — its slots load in every project and MCP session on the machine — and hand-managed: no tool writes it.
 _Avoid_: rules folder, user rules dir, rule store
 
+**Disable**:
+Project-scoped suppression of an installed Rule — a whole Rule slot by name, or a single Rule by id (`rule_disable`, undone by `rule_enable` with the same target). The Rule stays installed and listed, stops matching Flows arriving after the Disable, and the entry persists in the Data dir; the Global rules dir is never touched.
+_Avoid_: mute, suppress, shadow, override
+
 **Ruleset epoch**:
-One immutable generation of the Scanner's live ruleset: the rules tuple plus the compiled response-body database those rules scan through (one multi-pattern engine pass per body, built at boot and rebuilt on every slot install, remove, or force-swap). Each Flow carries the epoch it arrived under, so mid-session ruleset changes never apply retroactively; patterns the engine refuses or cannot compile within budget stay on the stdlib path for their epoch.
+One immutable generation of the Scanner's live ruleset: the rules tuple plus the compiled response-body database those rules scan through (one multi-pattern engine pass per body, built at boot and rebuilt on every slot install, remove, force-swap, disable, or enable). Each Flow carries the epoch it arrived under, so mid-session ruleset changes never apply retroactively; patterns the engine refuses or cannot compile within budget stay on the stdlib path for their epoch.
 _Avoid_: ruleset version, rule generation, database generation, engine epoch
 
 **Body memoization**:

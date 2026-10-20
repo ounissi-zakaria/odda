@@ -1161,7 +1161,7 @@ RULES = [
 
 
 def _slot_path(h, name: str) -> Path:
-    return h.config_home / "rules" / name / "rule.py"
+    return h.data_dir / "rules" / name / "rule.py"
 
 
 async def _drive(h, fx, marker: str) -> dict:
@@ -1213,9 +1213,9 @@ async def test_rule_install_applies_to_flows_after_install_only(
 
 
 async def test_rule_install_from_file_and_rule_list_rows(odda_session) -> None:
-    """install from a file path persists the slot and rule_list shows
-    exactly the installed slots' rules — user rows only (nothing ships
-    with odda), with slot, id, severity, source, and state."""
+    """install from a file path persists the project slot and rule_list
+    shows exactly the installed slots' rules — nothing ships with odda
+    — with slot, id, severity, scope, and state."""
     async with odda_session() as h:
         r = await _seed_slot(h, "disclosure")
         assert r["name"] == "disclosure"
@@ -1234,7 +1234,7 @@ async def test_rule_install_from_file_and_rule_list_rows(odda_session) -> None:
                 "slot": "disclosure",
                 "id": rule_id,
                 "severity": severity,
-                "source": "user",
+                "scope": "project",
                 "state": "active",
                 "error": None,
             }
@@ -1570,7 +1570,7 @@ async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
         failed = [row for row in rows if row["state"] == "failed"]
         assert len(failed) == 1
         assert failed[0]["slot"] == "broken"
-        assert failed[0]["source"] == "user"
+        assert failed[0]["scope"] == "global"
         assert "SyntaxError" in failed[0]["error"]
 
         keeper = next(row for row in rows if row["id"] == "user.ticket06-canary")
@@ -1578,7 +1578,7 @@ async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
             "slot": "keeper",
             "id": "user.ticket06-canary",
             "severity": "medium",
-            "source": "user",
+            "scope": "project",
             "state": "active",
             "error": None,
         }
@@ -2681,15 +2681,16 @@ def test_config_home_resolver_honors_override_and_keeps_default_paths(
     assert paths.global_rules_dir() == override / "rules"
 
 
-async def test_rule_slots_are_machine_global_across_data_dirs(
+async def test_rule_slots_are_project_scoped_with_a_shared_global_tree(
     odda_subprocess_session, config_home, tmp_path
 ) -> None:
-    """Rule slots are machine-global: two subprocess sessions over two
-    different data dirs but one config home share the slot store — a slot
-    installed in session A (project-a) is loaded by session B's next boot
-    (project-b) and fires on B's flows. Live registration stays
-    per-session and arrival-time: A's pre-install flow never matches the
-    rule, and no rules tree appears under either data dir."""
+    """Two subprocess sessions over two data dirs but one config home:
+    a slot installed in project-a stays in project-a (project B's boot
+    never loads it, and no rules tree appears under B's data dir),
+    while a slot hand-placed in the config home's rules dir loads in
+    both projects and fires — the global tree is the sharing path, and
+    install never writes it. Live registration stays per-session and
+    arrival-time: A's pre-install flow never matches the rule."""
     project_a = tmp_path / "project-a"
     project_b = tmp_path / "project-b"
     project_a.mkdir()
@@ -2698,31 +2699,44 @@ async def test_rule_slots_are_machine_global_across_data_dirs(
     async with fixture_site(index_body=_T06_BODY) as fx:
         async with odda_subprocess_session(cwd=project_a) as a:
             pre = await _drive(a, fx, "t15-pre-install")
-            r = await a.call("rule_install", {"name": "shared", "source": _RULE_CANARY})
+            r = await a.call("rule_install", {"name": "local", "source": _RULE_CANARY})
             assert r["rules"] == ["user.ticket06-canary"]
-            assert _slot_path(a, "shared").is_file()
+            assert (project_a / ".odda" / "rules" / "local" / "rule.py").is_file()
+            assert not (config_home / "rules" / "local").exists()
 
             post = await _drive(a, fx, "t15-post-install")
             await _wait_rule_finding(a, post["id"], "user.ticket06-canary")
-            # arrival-time: the pre-install flow drained after the install
-            # (post's finding proves it) yet never matches the rule
+            # arrival-time: the pre-install flow drained after the
+            # install (post's finding proves it) yet never matches
             assert all(
                 f["rule_id"] != "user.ticket06-canary"
                 for f in a.findings_for(pre["id"])
             )
 
-        # slots live in the config home, never in a data dir
-        assert not (project_a / ".odda" / "rules").exists()
-        assert not (project_b / ".odda" / "rules").exists()
+        # a global slot rides the config home: hand-placed, it loads
+        # in every project on the machine
+        curated = config_home / "rules" / "curated"
+        curated.mkdir(parents=True)
+        (curated / "rule.py").write_text(_RULE_ALT, encoding="utf-8")
 
         async with odda_subprocess_session(cwd=project_b) as b:
             rows = await b.call_json("rule_list", {})
-            canary = next(row for row in rows if row["id"] == "user.ticket06-canary")
-            assert canary["slot"] == "shared"
-            assert canary["state"] == "active"
+            by_id = {row["id"]: row for row in rows}
+            # A's project install never reached B
+            assert "user.ticket06-canary" not in by_id
+            assert not (project_b / ".odda" / "rules").exists()
+            # the hand-placed global slot did
+            assert by_id["user.ticket06-alt"] == {
+                "slot": "curated",
+                "id": "user.ticket06-alt",
+                "severity": "low",
+                "scope": "global",
+                "state": "active",
+                "error": None,
+            }
 
             flow = await _drive(b, fx, "t15-cross-boot")
-            finding = await _wait_rule_finding(b, flow["id"], "user.ticket06-canary")
+            finding = await _wait_rule_finding(b, flow["id"], "user.ticket06-alt")
             assert finding["flow_id"] == flow["id"]
 
 

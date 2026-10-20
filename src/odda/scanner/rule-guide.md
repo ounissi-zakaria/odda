@@ -7,26 +7,52 @@ rule-flow pair, evidence aggregated, never retracted. Nothing is ever
 sent anywhere (the scanner reads captured material only), and flows
 that predate the session are never scanned.
 
-No rules ship with odda. Every rule is a slot in the global rules dir
-under the odda config home (`~/.config/odda/rules`), installed through
-`rule_install`, machine-global across projects, persisted across
-sessions, and reloaded on every boot.
+No rules ship with odda. Rules live in two scopes, both loaded on
+every boot: this project's rules dir (`.odda/rules/`, what
+`rule_install` and `rule_remove` manage, private to the project like
+everything else in `.odda/`) and the global rules dir under the odda
+config home (`~/.config/odda/rules`), which no tool writes — global
+slots are placed and removed by hand and fire in every project on the
+machine.
 
 ## Installing rules — arrival-time semantics
 
-`rule_install` takes a slot name plus the rule file's source text or a
-file path (pass exactly one; `force` overwrites an existing slot by
-name). Installing from a file path copies the file's sibling non-.py
-assets — datasets — into the slot. Install validates before persisting:
-a file that fails to load, or whose rule ids collide with another
-slot's, is rejected naming the problem (and showing the file shape),
-and nothing reaches disk.
+`rule_install` installs into the project's rules dir. It takes a slot
+name plus the rule file's source text or a file path (pass exactly
+one; `force` overwrites an existing slot by name). Installing from a
+file path copies the file's sibling non-.py assets — datasets — into
+the slot. Install validates before persisting: a file that fails to
+load, or whose rule ids collide with another slot's in either scope,
+is rejected naming the problem (and showing the file shape), and
+nothing reaches disk.
 
 Rules apply from arrival, not from scan time: a rule installed
 mid-session matches flows captured after the install, never
 retroactively — even a flow whose scan drains after the install.
 Removing a slot (`rule_remove`) stops its future findings only; past
 findings stay in the append-only index.
+
+## Scopes, disabling, and the listing
+
+Every installed rule belongs to one scope — `project` (`.odda/rules/`)
+or `global` (the config home's rules dir, hand-managed) — and
+`rule_list` shows one row per rule with its `scope` and `state`.
+Rule ids are unique across both scopes: an install whose id already
+lives in either one is rejected.
+
+`rule_disable` suppresses an installed rule without removing it —
+pass exactly one of `name` (every rule in that slot) or `id` (a
+single rule); a name covers every slot of that name in both scopes.
+Disabled rules stay installed and listed (`state: "disabled"`), stop
+matching flows captured after the disable, and come back with
+`rule_enable` (same params, and strict: disabling what is already
+disabled or enabling what is not errors). Disables are project state:
+they persist under `.odda/` and never touch the global rules dir, and
+like every ruleset change they apply from arrival — findings already
+recorded stay. Removing a project slot takes its disable entries with
+it — an entry survives only while some rule it covers remains — so a
+fresh install of the same name starts active; `force` keeps a slot's
+name-keyed disable across the swap.
 
 ## The rule file
 
@@ -112,10 +138,11 @@ dataset-rule shape below).
 
 Rule ids key the findings index — the pair (rule id, flow id) is a
 finding's identity. Ids are forever: renaming a rule severs its
-findings history, and findings already recorded never change. Ids must
-be unique across every installed slot; a colliding install is rejected
-naming the collision. Pick a dotted `<family>.<name>` id (like
-`example.backup-artifact`) and never rename it once findings exist.
+findings history, and findings already recorded never change.
+Ids must be unique across every installed slot in both scopes; a
+colliding install is rejected naming the collision. Pick a dotted
+`<family>.<name>` id (like `example.backup-artifact`) and never
+rename it once findings exist.
 
 ## scan() overrides — dataset-style rules
 
