@@ -31,10 +31,13 @@ necessary-literal gated).
 Repeated bodies are memoized (ticket 14): the epoch's body-stage
 results — every rule's pre-gate body evidence, dataset-backed
 ``scan()`` results included — are a pure function of (ruleset epoch,
-stored body bytes), cached per session under a byte-budget LRU with a
-hard entry cap. Gates are flow context and filter per flow after the
-memo; evidence assembly beyond the body and Finding emission stay per
-flow, so memoization is invisible to everything except drain time.
+stored body bytes), cached per epoch under a byte-budget LRU with a
+hard entry cap. Each ruleset generation owns its memo — a mutation
+starts the next epoch with an empty one, and a retired epoch's memo
+dies with its last queued record. Gates are flow context and filter
+per flow after the memo; evidence assembly beyond the body and
+Finding emission stay per flow, so memoization is invisible to
+everything except drain time.
 """
 
 from __future__ import annotations
@@ -86,12 +89,12 @@ _REQUEST_HEADERS = "request_headers"
 _EXPANSION_MAX = 64
 
 # Body memoization (ticket 14): repeated identical bodies stop
-# rescanning within a session. The epoch's body-stage results are a
-# pure function of (ruleset epoch, stored body bytes), cached under a
-# byte-budget LRU with a hard entry cap. Both ceilings are on the
-# *stored results* — a match-heavy body stores thousands of evidence
-# entries, and a burst of unique bodies must never grow the scanner
-# without bound.
+# rescanning under one ruleset generation. The epoch's body-stage
+# results are a pure function of (ruleset epoch, stored body bytes),
+# cached per epoch under a byte-budget LRU with a hard entry cap.
+# Both ceilings are on the *stored results* — a match-heavy body
+# stores thousands of evidence entries, and a burst of unique bodies
+# must never grow the scanner without bound.
 _MEMO_BUDGET_BYTES = 8 * 1024 * 1024
 _MEMO_MAX_ENTRIES = 1024
 
@@ -309,12 +312,14 @@ class _RulesetEpoch:
     arrive confirmed — or ``None`` for the stdlib residuals
     (``_compile_body_scan``); ``corpus_layout`` does the same for each
     dataset rule's declared body corpus (``Rule.body_corpus``), whose
-    patterns ride the same one database. ``serial`` is the generation
-    number the body memo keys on (ticket 14): it rises with every
-    mutation, so a rule installed after a body was seen cannot be
-    answered by that body's cached results — the re-arrival misses the
-    memo and scans fresh, exactly as arrival-time install semantics
-    demand.
+    patterns ride the same one database. ``memo`` is the generation's own
+    body-results cache (ticket 14): it starts empty with the epoch and
+    dies with it, so a cached result can never answer for a generation
+    that no longer exists. ``serial`` is the generation number its keys
+    carry: it rises with every mutation, so a rule installed after a body
+    was seen cannot be answered by that body's cached results — the
+    re-arrival misses and scans fresh, exactly as arrival-time install
+    semantics demand.
     """
 
     __slots__ = (
@@ -322,6 +327,7 @@ class _RulesetEpoch:
         "fast",
         "has_scan_overrides",
         "layout",
+        "memo",
         "memoizable",
         "rules",
         "scans_body",
@@ -359,6 +365,12 @@ class _RulesetEpoch:
         # Worth reading a body for its digest at all: any declarative
         # body pattern, or any dataset rule whose scan() is memoized.
         self.memoizable = self.scans_body or self.has_scan_overrides
+        # The generation's own memo (ticket 14): owned here, so it
+        # needs no lock — the drain's serialized scan sequence (one
+        # flow at a time through Scanner._scan) is its only toucher,
+        # and it is collected with the epoch once its last queued
+        # record has drained.
+        self.memo = _BodyMemo(_MEMO_BUDGET_BYTES, _MEMO_MAX_ENTRIES)
 
 
 class _BodyStage(NamedTuple):
@@ -389,9 +401,9 @@ class _StageKey(NamedTuple):
     """Memo key of one epoch's body-stage results (ticket 14).
 
     Fields:
-        epoch: The ruleset epoch serial — every mutation clears the
-            memo wholesale, so a cached stage can never answer for a
-            ruleset generation that no longer exists.
+        epoch: The ruleset epoch serial — the memo is the epoch's
+            own, so a cached stage can never answer for a ruleset
+            generation that no longer exists.
         digest: SHA-256 of the stored body bytes — the body half of
             the key (results are pure in exactly these two).
     """
@@ -419,19 +431,19 @@ class _ScanKey(NamedTuple):
 
 
 class _BodyMemo:
-    """Session-scoped memo of body-stage results (ticket 14).
+    """One epoch's memo of body-stage results (ticket 14).
 
     One byte-budget LRU with a hard entry cap: ``put`` inserts at the
     MRU end and evicts from the LRU end until both ceilings hold; a
     single result larger than the whole budget is never stored (it
-    could not fit and would evict everything else trying). Reads and
-    writes come from the drain worker (one flow at a time through
-    ``Scanner._scan``) while ``clear`` comes from the event-loop
-    thread's register/deregister — a tiny lock holds that overlap;
-    every other operation runs uncontended.
+    could not fit and would evict everything else trying). Owned by
+    its :class:`_RulesetEpoch` and touched only by the drain's
+    serialized scan sequence (one flow at a time through
+    ``Scanner._scan``) — single-toucher by construction, so it needs
+    no lock.
     """
 
-    __slots__ = ("_budget", "_cap", "_entries", "_lock", "_stored_bytes")
+    __slots__ = ("_budget", "_cap", "_entries", "_stored_bytes")
 
     def __init__(self, budget: int, cap: int) -> None:
         """Bound the memo by stored bytes and entry count."""
@@ -441,36 +453,27 @@ class _BodyMemo:
             OrderedDict()
         )
         self._stored_bytes = 0
-        self._lock = threading.Lock()
 
     def get(self, key: _StageKey | _ScanKey) -> Any:
         """The cached value, promoted to MRU — or ``_MEMO_MISS``."""
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                return _MEMO_MISS
-            self._entries.move_to_end(key)
-            return entry[0]
+        entry = self._entries.get(key)
+        if entry is None:
+            return _MEMO_MISS
+        self._entries.move_to_end(key)
+        return entry[0]
 
     def put(self, key: _StageKey | _ScanKey, value: Any, size: int) -> None:
         """Store ``value`` (``size`` estimated bytes) under ``key``."""
         if size > self._budget:
             return
-        with self._lock:
-            old = self._entries.pop(key, None)
-            if old is not None:
-                self._stored_bytes -= old[1]
-            self._entries[key] = (value, size)
-            self._stored_bytes += size
-            while len(self._entries) > self._cap or self._stored_bytes > self._budget:
-                _, (_, evicted) = self._entries.popitem(last=False)
-                self._stored_bytes -= evicted
-
-    def clear(self) -> None:
-        """Drop every entry — a ruleset mutation invalidates all keys."""
-        with self._lock:
-            self._entries.clear()
-            self._stored_bytes = 0
+        old = self._entries.pop(key, None)
+        if old is not None:
+            self._stored_bytes -= old[1]
+        self._entries[key] = (value, size)
+        self._stored_bytes += size
+        while len(self._entries) > self._cap or self._stored_bytes > self._budget:
+            _, (_, evicted) = self._entries.popitem(last=False)
+            self._stored_bytes -= evicted
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -574,11 +577,6 @@ class Scanner:
         # this thread; observe snapshots the object itself.
         self._epoch_serial = 0
         self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
-        # Session-scoped memo of body-stage results (ticket 14): keys
-        # carry the epoch serial, so every ruleset mutation clears it
-        # wholesale — cached results can never answer for a ruleset
-        # generation that no longer exists.
-        self._memo = _BodyMemo(_MEMO_BUDGET_BYTES, _MEMO_MAX_ENTRIES)
         # Serializes ruleset mutations (register/deregister): the
         # epoch build they carry can run on a worker thread (the
         # user-rule manager's off-loop install), and concurrent
@@ -621,9 +619,9 @@ class Scanner:
         Applies forward only: flows that arrived before the
         registration never match the new rules. Registering builds
         the next ruleset epoch — the rules' body patterns and declared
-        corpora compile into a fresh database — and the body memo
-        clears with it: every memo key carries the epoch serial
-        (ticket 14). The build can cost seconds (a dataset corpus
+        corpora compile into a fresh database — and the next epoch
+        carries a fresh memo (ticket 14): cached results never cross
+        generations. The build can cost seconds (a dataset corpus
         compiles pattern by pattern), so the user-rule manager runs
         it off the event loop via a worker thread; ``_build_lock``
         keeps registrations serialized whichever thread they arrive
@@ -636,7 +634,6 @@ class Scanner:
             self._rules.extend(rules)
             self._epoch_serial += 1
             self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
-            self._memo.clear()
 
     def deregister_rules(self, rule_ids: AbstractSet[str]) -> None:
         """Drop every live rule whose id is in ``rule_ids`` (the remove path).
@@ -645,14 +642,12 @@ class Scanner:
         already recorded are never retracted — removal stops future
         findings only — and the next ruleset epoch compiles without
         the removed rules' patterns (under ``_build_lock``, like every
-        registration), clearing the body memo with it (every memo key
-        carries the epoch serial, ticket 14).
+        registration), carrying a fresh memo (ticket 14).
         """
         with self._build_lock:
             self._rules = [rule for rule in self._rules if rule.id not in rule_ids]
             self._epoch_serial += 1
             self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
-            self._memo.clear()
 
     async def run(self) -> None:
         """Drain queued flow records against the rules until cancelled.
@@ -770,7 +765,7 @@ class Scanner:
             return _BodyStage(None, (), (None,) * len(epoch.rules))
         key = _StageKey(epoch.serial, digest) if digest is not None else None
         if key is not None:
-            cached = self._memo.get(key)
+            cached = epoch.memo.get(key)
             if cached is not _MEMO_MISS:
                 return cached
         try:
@@ -804,7 +799,7 @@ class Scanner:
             # once, re-raise per rule — never memoized.
             return _BodyStage(exc, (), (None,) * len(epoch.rules))
         if key is not None:
-            self._memo.put(key, stage, _stage_size(stage))
+            epoch.memo.put(key, stage, _stage_size(stage))
         return stage
 
     def _scan_rule(
@@ -843,7 +838,7 @@ class Scanner:
         # scan's reads are tracked against it, and a scan that reads
         # beyond it is never memoized — fresh scan per flow.
         key = _ScanKey(epoch.serial, digest, view.dataset_facet(), index)
-        cached = self._memo.get(key)
+        cached = epoch.memo.get(key)
         if cached is not _MEMO_MISS:
             flow_id = str(view.record.get("id", "?"))
             return [replace(finding, flow_id=flow_id) for finding in cached]
@@ -851,7 +846,7 @@ class Scanner:
             findings = rule.scan(view, *args)
         if findings is not None and reads <= FlowView.DATASET_SCAN_READS:
             frozen = tuple(findings)
-            self._memo.put(key, frozen, _findings_size(frozen))
+            epoch.memo.put(key, frozen, _findings_size(frozen))
         return findings
 
     def _match(

@@ -2,7 +2,7 @@
 
 The scanner suite's memoization section: the epoch's body-stage
 results are a pure function of (ruleset epoch, stored body bytes),
-cached per session under a byte-budget LRU — a duplicate pays the
+cached per ruleset epoch under a byte-budget LRU — a duplicate pays the
 digest read instead of the scan, gates stay per-flow context applied
 after the memo, every flow still records its own findings, and every
 ruleset mutation (an install, a remove) starts a fresh epoch that
@@ -198,7 +198,7 @@ async def test_body_memo_stays_bounded_under_pressure(tmp_path) -> None:
     index, _ = await _drain_findings(scanner, data_dir, records)
     # The one sanctioned internals touch (the bounded-growth
     # observation): entries and stored bytes under their ceilings.
-    memo = scanner._memo  # noqa: SLF001
+    memo = scanner._epoch.memo  # noqa: SLF001
     assert len(index) == len(records)
     assert len(memo) <= _MEMO_MAX_ENTRIES
     assert memo.bytes <= _MEMO_BUDGET_BYTES
@@ -442,7 +442,7 @@ async def test_rule_installed_after_body_seen_matches_its_rearrival(
         title="Installed late",
         body_patterns=(rf"{_T14}-7",),
     )
-    scanner.register_rules((late,))  # next epoch: the memo clears with it
+    scanner.register_rules((late,))  # next epoch carries a fresh memo
     scanner.observe(_stored_flow(data_dir, "00002", body, query="t14param=yes"))
     findings_path = data_dir / "scanner" / "findings.jsonl"
     drain = asyncio.create_task(scanner.run())

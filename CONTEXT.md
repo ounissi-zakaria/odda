@@ -161,7 +161,7 @@ One immutable generation of the Scanner's live ruleset: the rules tuple plus the
 _Avoid_: ruleset version, rule generation, database generation, engine epoch
 
 **Body memoization**:
-The session-scoped cache of a Ruleset epoch's response-body scan results: keyed by (epoch, digest of the stored body bytes), holding every Rule's pre-gate body-stage evidence — dataset-backed `scan()` results included — under a byte-budget LRU with a hard entry cap. Gates stay per Flow (they filter after the cache), evidence assembly beyond the body and Finding emission stay per Flow, and every ruleset mutation clears the cache with its epoch — so memoization changes nothing observable except drain time, and a Rule installed after a body was seen still matches that body's later re-arrival.
+The per-epoch cache of a Ruleset epoch's response-body scan results: keyed by (epoch, digest of the stored body bytes), holding every Rule's pre-gate body-stage evidence — dataset-backed `scan()` results included — under a byte-budget LRU with a hard entry cap. Gates stay per Flow (they filter after the cache), evidence assembly beyond the body and Finding emission stay per Flow, and each epoch owns its cache — a ruleset mutation starts the next generation with an empty one — so memoization changes nothing observable except drain time, and a Rule installed after a body was seen still matches that body's later re-arrival.
 _Avoid_: body cache, deduplication, result cache
 
 ## Testing

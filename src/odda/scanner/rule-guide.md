@@ -141,8 +141,9 @@ subclass `Rule` and override `scan`:
   (`method`, `scheme`, `host`, `port`, `path`, `browser_id`,
   `status_code`, `error`), the stored response headers (so
   content-type screens work), and the body file's extension.
-  Repeated bodies are memoized per session keyed on (ruleset, body
-  bytes, facet) — and a scan that reads beyond the facet
+  Repeated bodies are memoized keyed on (ruleset, body bytes, facet;
+  the cache resets whenever rules are installed or removed) — and a
+  scan that reads beyond the facet
   (request-side material above all) is never memoized: it runs fresh
   on every flow, so a cached result can never answer for a flow it
   never saw.
