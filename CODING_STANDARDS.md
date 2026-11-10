@@ -1,11 +1,12 @@
 ## Agent-facing surfaces are self-contained
 
 Agent-facing text lives in four surfaces — tool descriptions, server
-instructions, tool results, error messages — and nowhere else: there are no
-docs resources (`odda://docs/*` was removed; agents learn from the surfaces
-themselves). All four state behavior itself and never cite repo-internal
-references (ADR numbers, internal module/class/CDP API names, repo paths, CLI
-flag dialect); the reader is an agent with no repo access.
+instructions, tool results, error messages — plus the one docs-resource
+exception below (`odda://docs/*` was otherwise removed; agents learn from
+the surfaces themselves). All surfaces state behavior itself and never
+cite repo-internal references (ADR numbers, internal module/class/CDP API
+names, repo paths, CLI flag dialect); the reader is an agent with no
+repo access.
 
 - Tool descriptions are one line: the name-level contract. Only contracts an
   agent cannot infer and would silently get wrong get more (request-file
@@ -17,6 +18,15 @@ flag dialect); the reader is an agent with no repo access.
   `flows.jsonl` index, body decode semantics), phrased as what exists.
 - Results teach their own shape: legends, sentinels, and cap notes ride on
   the result and are documented nowhere else.
+
+**The docs-resource exception** (ADR 0038): a docs resource may exist
+only for content no tool surface can carry and an agent cannot proceed
+without. The rule guide (`odda://scanner/rule-guide`) is the standing
+instance — the rule-file contract, the FlowView API, and worked examples
+of both rule styles cannot ride a one-line tool description, install
+errors can only repeat the file shape at the point of failure, and no
+rule can be authored without them. Everything that fails this test goes
+to the four surfaces, where it belongs.
 
 ## Architecture: thin surface, deep library
 

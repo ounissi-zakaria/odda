@@ -23,11 +23,12 @@ contract is the one pinned in ticket #03 (``.scratch/odda-mcp/issues/
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import json
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -45,6 +46,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
 from odda.browser import BrowserManager, BrowserOperationError
+from odda.paths import global_rules_dir
 from odda.proxy import ProxyServer
 from odda.request import (
     clone as clone_request,
@@ -53,6 +55,9 @@ from odda.request import (
     send_pipeline as send_request_pipeline,
     send_repeat as send_request_repeat,
 )
+from odda.scanner.engine import Scanner
+from odda.scanner.guide import load_rule_guide
+from odda.scanner.userrules import RuleManager
 
 # Two or more names selects the multi-name pipeline mode (ADR-0019);
 # repeat >= 2 selects the concurrent-send mode (ADR-0020) — the same
@@ -121,10 +126,11 @@ def odda_tool(fn):
 
 @dataclass
 class OddaState:
-    """What the MCP lifespan owns: proxy, browser manager, flowstore dir."""
+    """What the MCP lifespan owns: proxy, browser manager, rules."""
 
     proxy: ProxyServer
     browser: BrowserManager
+    rules: RuleManager
 
 
 def resolve_data_dir() -> Path:
@@ -166,9 +172,38 @@ async def odda_lifespan(
     # ProxyServer so the DumpMaster addon chain is ready. A failing
     # proxy-script is logged and skipped, never blocking boot.
     proxy.restore_scripts_on_boot()
+    # The passive scanner (ADR-0034): the writer's post-append hook
+    # only enqueues, and the drain task started here scans. Both come
+    # before the yield so no tools/call can produce a flow before
+    # observation is live; teardown cancels the drain before the proxy
+    # stops, so scanning never outlives the session that captured.
+    # The ruleset boots empty (ADR-0036): no rules ship with odda —
+    # every rule arrives as a slot in one of two scopes. Project slots
+    # (.odda/rules/, what rule_install/rule_remove manage) sit in the
+    # data dir next to the proxy-scripts; global slots live in the
+    # config home's rules dir, hand-managed and shared across every
+    # project on the machine (ODDA_CONFIG_HOME redirects them). Both
+    # scopes restore here, minus the project's persisted disable
+    # entries (.odda/scanner/disabled/), so the session's first flow
+    # is scanned against the full active ruleset; a failing slot is
+    # logged and skipped, never blocking boot.
+    scanner = Scanner(data_dir)
+    rules = RuleManager(
+        scanner,
+        global_dir=global_rules_dir(),
+        project_dir=data_dir / "rules",
+        disabled_dir=data_dir / "scanner" / "disabled",
+    )
+    rules.restore_on_boot()
+    flowstore.get_writer().set_observer(scanner.observe)
+    scanner_task = asyncio.create_task(scanner.run())
     try:
-        yield OddaState(proxy=proxy, browser=browser)
+        yield OddaState(proxy=proxy, browser=browser, rules=rules)
     finally:
+        scanner_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await scanner_task
+        flowstore.get_writer().set_observer(None)
         await browser.close_all()
         await proxy.shutdown()
 
@@ -185,7 +220,10 @@ mcp_server = MCPServer[OddaState](
         "All traffic that goes through the proxy (including browser "
         "traffic) is captured as flows under .odda/flows/ — driving "
         "the browser is capture. flows.jsonl is the append-only "
-        "index. Response bodies are stored decoded."
+        "index. Response bodies are stored decoded. Captured flows "
+        "are passively scanned while the session lives and findings "
+        "append to .odda/scanner/findings.jsonl; flows that predate "
+        "the session are never scanned."
     ),
 )
 
@@ -1026,6 +1064,130 @@ async def proxy_script_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
 async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
     """Remove a proxy-script: live instance + on-disk source."""
     return ctx.request_context.lifespan_context.proxy.remove_script(name)
+
+
+# --- passive scanner: user rules ---
+
+
+# The install surface's one docs resource (ADR-0038): the full
+# authoring guide — rule fields, FlowView, worked examples — which no
+# tool surface can carry and no author can proceed without. Its
+# rule-file section is spliced, at serve time, from the same
+# RULE_FILE_SKELETON every load-failure rejection shows, so guide and
+# errors cannot drift.
+@mcp_server.resource(
+    "odda://scanner/rule-guide",
+    name="rule-guide",
+    title="Scanner rule guide",
+    description=(
+        "The complete rule-authoring guide: the rule-file shape, every "
+        "matcher and gate, the FlowView API, worked examples of both "
+        "rule styles, the severity scale, and install semantics."
+    ),
+    mime_type="text/markdown",
+)
+def scanner_rule_guide() -> str:
+    """Serve the rule guide payload (single-sourced skeleton)."""
+    return load_rule_guide()
+
+
+# The description carries the install contract plus the one-line
+# pointer to the guide resource; the rule-file skeleton itself lives in
+# the guide and in every load-failure rejection — one constant, so the
+# surfaces cannot drift.
+_RULE_INSTALL_DOC = (
+    "Install a passive-scanner rule slot from file or source into this "
+    "project's rules dir (.odda/rules/). Installed rules scan flows "
+    "captured after the install, never retroactively. Installing from a "
+    "file path copies the file's sibling non-.py assets (datasets) into "
+    "the slot; rule_disable suppresses an installed rule without removing "
+    "it. The full authoring guide is the odda://scanner/rule-guide "
+    "resource."
+)
+
+
+@mcp_server.tool(description=_RULE_INSTALL_DOC)
+@odda_tool
+async def rule_install(
+    name: str,
+    file: str | None = None,
+    source: str | None = None,
+    *,
+    force: bool = False,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Install a passive-scanner rule slot from file or source."""
+    py = _read_install_source(file, source, "py")
+    if not py.strip():
+        raise ToolParamError("source is empty")
+    rules = ctx.request_context.lifespan_context.rules
+    if not force and rules.name_exists(name):
+        raise ToolParamError(
+            f"Rule slot '{name}' already installed. Use force to overwrite."
+        )
+    return await rules.install(name, py, assets_from=file)
+
+
+@mcp_server.tool(structured_output=False)
+@odda_tool
+async def rule_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
+    """List every installed rule: slot, scope, and state."""
+    return _json_result(ctx.request_context.lifespan_context.rules.list_rules())
+
+
+@mcp_server.tool()
+@odda_tool
+async def rule_remove(name: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
+    """Remove a rule slot: live rules stop, past findings remain."""
+    return await ctx.request_context.lifespan_context.rules.remove(name)
+
+
+# The descriptions carry what an agent cannot infer — what a disable
+# leaves in place and the arrival-time effect; the param constraint
+# lives in the error that fires, with the fix (CODING_STANDARDS).
+_RULE_DISABLE_DOC = (
+    "Disable an installed rule for this project — a slot name disables "
+    "every rule in the slot, a rule id disables that one rule. Disabled "
+    "rules stay installed and listed, stop matching flows captured after "
+    "the disable, and rule_enable restores them."
+)
+_RULE_ENABLE_DOC = (
+    "Restore a disabled rule — by the slot name or rule id it was "
+    "disabled under. Its rules match flows captured after the enable."
+)
+
+
+def _rule_target(name: str | None, rule_id: str | None) -> tuple[str, str]:
+    """Resolve the disable/enable target kind and value (XOR params)."""
+    if (name is None) == (rule_id is None):
+        raise ToolParamError("Pass exactly one of name or id")
+    return ("name", name) if name is not None else ("id", rule_id)
+
+
+@mcp_server.tool(description=_RULE_DISABLE_DOC)
+@odda_tool
+async def rule_disable(
+    name: str | None = None,
+    id: str | None = None,
+    *,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Disable an installed rule slot (by name) or rule (by id)."""
+    kind, value = _rule_target(name, id)
+    return await ctx.request_context.lifespan_context.rules.disable(kind, value)
+
+
+@mcp_server.tool(description=_RULE_ENABLE_DOC)
+@odda_tool
+async def rule_enable(
+    name: str | None = None,
+    id: str | None = None,
+    *,
+    ctx: Context[OddaState],
+) -> dict[str, Any]:
+    """Re-enable a disabled rule slot (by name) or rule (by id)."""
+    kind, value = _rule_target(name, id)
+    return await ctx.request_context.lifespan_context.rules.enable(kind, value)
 
 
 def main() -> None:

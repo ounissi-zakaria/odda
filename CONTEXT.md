@@ -18,6 +18,10 @@ _Avoid_: server instance, odda server, daemon
 `.odda/` under the MCP process's working directory — holds persisted project state: `flows/`, `requests/`, `browsers/`. Created lazily on the first state-producing call (browser open, request clone, etc.), not when the session starts. Absent until odda is actually used; read-only calls (`version`, `proxy_url`) never create it.
 _Avoid_: project dir, state dir, .odda dir
 
+**Flow**:
+One captured HTTP exchange — a request, its response (or network error, including a failed CONNECT tunnel whose upstream resolution or connection failed) — recorded as a read-only directory under the Data dir (named by the flow id) plus one line in the flows index (`flows.jsonl`). Written exactly once, when the exchange completes; attributed to the Browser whose proxy credentials carried it, when it rode one.
+_Avoid_: transaction, request/response pair, capture entry, traffic entry
+
 ## Browser sessions
 
 **Browser identifier**:
@@ -29,7 +33,7 @@ The durable, per-project form of a Browser: a directory under the Data dir holdi
 _Avoid_: saved browser, browser folder, browser entry
 
 **Base profile**:
-The global seed Chrome profile at `~/.config/odda/chrome-profile`, built once by the `init-chrome-profile` helper. Copied into a Browser record when the browser is first created — never on reopen — so every record diverges from the seed with use.
+The global seed Chrome profile at `chrome-profile` under the odda config home (`~/.config/odda` unless `ODDA_CONFIG_HOME` redirects it), built once by the `init-chrome-profile` helper. Copied into a Browser record when the browser is first created — never on reopen — so every record diverges from the seed with use.
 _Avoid_: template profile, master profile, default profile
 
 **Cookie jar**:
@@ -39,6 +43,10 @@ _Avoid_: cookie store, cookie storage, browser cookies
 **UA normalization**:
 Launch-time behavior of headless browsers: odda derives a headed Chrome User-Agent from the installed Chrome's real version and the driver applies it across the whole browser context, so the wire User-Agent header and page-visible `navigator.userAgent` both present a headed browser. Covers every page of a headless browser, including tabs opened later; headed launches keep Chrome's own UA.
 _Avoid_: UA spoofing, stealth mode, user-agent override
+
+**Headed viewport**:
+Launch-time behavior of headed browsers: the page sizes to the window and reflows on resize, with no fixed viewport override; headless browsers keep the driver's fixed 1280×720 viewport. See ADR-0039.
+_Avoid_: responsive mode, window-fit layout
 
 ## Page interaction
 
@@ -129,6 +137,48 @@ _Avoid_: dialog response, auto-accept, dialog handler
 **Proxy-script**:
 A Python file in mitmproxy `-s` script format that odda execs and adds to the running proxy's addon chain. Installed via the `proxy_script_install` tool (`force` overwrites by name), persisted under `.odda/proxy-scripts/<name>/script.py`, re-added on session boot; scope is global (one proxy shared across all browsers, not per-browser like userscripts).
 _Avoid_: addon, interceptor, proxy addon, mitmproxy script, userscript
+
+## Passive scanning
+
+**Scanner**:
+The session-live passive analyzer of captured traffic: starts with each MCP session and observes Flows as that session writes them, recording Findings. Two definitional invariants: zero egress (nothing is ever sent — analysis of what was captured, only) and forward-only (a Flow that predates the Scanner's start is never analyzed; each Flow is observed exactly once, by the session that wrote it).
+_Avoid_: watcher, monitor, audit module, linter
+
+**Finding**:
+The record of one Rule matching one Flow: a severity-tagged observation with aggregated evidence and references, keyed by the Rule–Flow pair. Findings accumulate append-only like Flows — an observation is never retracted; removing a Rule stops future Findings without erasing past ones.
+_Avoid_: alert, issue, hit, match
+
+**Rule**:
+A single passive check over one Flow's captured material, gated on flow context (scheme, status, content type, attribution). Rule identifiers are permanent — they key Findings — and unique across both scopes. No Rules ship with odda: the Scanner boots with an empty ruleset, and every Rule lives in a Rule slot surviving sessions.
+_Avoid_: check, signature, template, detector
+
+**Rule slot**:
+One persisted unit of Rules: a named directory holding a single Python file whose module-level `RULES` list defines the slot's Rules, living in one Scope — the Project rules dir (installed via `rule_install`, `force` overwrites by name; removed via `rule_remove`) or the Global rules dir (placed and removed by hand). Re-loaded on every session boot; a slot that fails to load is skipped without blocking the others.
+_Avoid_: rule file, custom rule, rule package
+
+**Scope**:
+Which of a Rule slot's two homes a rule belongs to: project or global. Every `rule_list` row carries it; install and remove act on project slots only.
+_Avoid_: rules location, rule origin, rule source
+
+**Project rules dir**:
+The directory project Rule slots persist in: `rules/` under the Data dir, created lazily on the first `rule_install`. Per-project, like the Proxy-scripts tree, and what `rule_install`/`rule_remove` manage.
+_Avoid_: local rules dir, .odda rules
+
+**Global rules dir**:
+The directory global Rule slots persist in: `rules/` under the odda config home (`~/.config/odda` by default; the `ODDA_CONFIG_HOME` environment variable redirects it, and the Base profile lives under the same root). Machine-global — its slots load in every project and MCP session on the machine — and hand-managed: no tool writes it.
+_Avoid_: rules folder, user rules dir, rule store
+
+**Disable**:
+Project-scoped suppression of an installed Rule — a whole Rule slot by name, or a single Rule by id (`rule_disable`, undone by `rule_enable` with the same target). The Rule stays installed and listed, stops matching Flows arriving after the Disable, and the entry persists in the Data dir; the Global rules dir is never touched.
+_Avoid_: mute, suppress, shadow, override
+
+**Ruleset epoch**:
+One immutable generation of the Scanner's live ruleset: the rules tuple plus the compiled response-body database those rules scan through (one multi-pattern engine pass per body, built at boot and rebuilt on every slot install, remove, force-swap, disable, or enable). Each Flow carries the epoch it arrived under, so mid-session ruleset changes never apply retroactively; patterns the engine refuses or cannot compile within budget stay on the stdlib path for their epoch.
+_Avoid_: ruleset version, rule generation, database generation, engine epoch
+
+**Body memoization**:
+The per-epoch cache of a Ruleset epoch's response-body scan results: keyed by (epoch, digest of the stored body bytes), holding every Rule's pre-gate body-stage evidence — dataset-backed `scan()` results included — under a byte-budget LRU with a hard entry cap. Gates stay per Flow (they filter after the cache), evidence assembly beyond the body and Finding emission stay per Flow, and each epoch owns its cache — a ruleset mutation starts the next generation with an empty one — so memoization changes nothing observable except drain time, and a Rule installed after a body was seen still matches that body's later re-arrival.
+_Avoid_: body cache, deduplication, result cache
 
 ## Testing
 

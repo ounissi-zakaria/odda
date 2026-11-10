@@ -48,8 +48,12 @@ from typing import TYPE_CHECKING
 import pytest
 from mcp import Client
 
+from odda.scanner.userrules import load_slot_source
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from odda.scanner.model import Rule
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "e2e" / "fixtures"
@@ -308,7 +312,7 @@ async def script_server(script: str, *args: str) -> AsyncIterator[ServerHandle]:
 
 
 class Harness:
-    """One MCP session + one data dir; the assertion conventions every test shares.
+    """One MCP session + one data dir + one config home; the assertion conventions every test shares.
 
     ``call`` asserts the tool *succeeded* and returns the natural value:
     dict results pass through (structuredContent); unstructured tools
@@ -320,9 +324,10 @@ class Harness:
     tool <name>: `` prefix, param names never ``--flag`` spellings.
     """
 
-    def __init__(self, client: Client, data_dir: Path) -> None:
+    def __init__(self, client: Client, data_dir: Path, config_home: Path) -> None:
         self.client = client
         self.data_dir = data_dir
+        self.config_home = config_home
 
     async def call(self, name: str, args: dict | None = None) -> object:
         """Call a tool, assert success, return the natural value (dict via
@@ -433,6 +438,36 @@ class Harness:
             await asyncio.sleep(delay)
         raise AssertionError(f"no flow matching {marker!r} flushed to disk")
 
+    def _findings_lines(self) -> list[str]:
+        f = self.data_dir / "scanner" / "findings.jsonl"
+        if not f.is_file():
+            return []
+        return f.read_text().splitlines()
+
+    def findings_for(self, flow_id: str) -> list[dict]:
+        """All findings.jsonl records for flow_id."""
+        out: list[dict] = []
+        for l in self._findings_lines():
+            rec = json.loads(l)
+            if rec.get("flow_id") == flow_id:
+                out.append(rec)
+        return out
+
+    async def wait_finding(
+        self, flow_id: str, attempts: int = 200, delay: float = 0.05
+    ) -> dict:
+        """Bounded poll until a finding for flow_id lands in findings.jsonl.
+
+        One async hop beyond wait_flow: the flow line lands first, then
+        the scanner's drain task records the finding.
+        """
+        for _ in range(attempts):
+            findings = self.findings_for(flow_id)
+            if findings:
+                return findings[0]
+            await asyncio.sleep(delay)
+        raise AssertionError(f"no finding for flow {flow_id!r} in findings.jsonl")
+
 
 def self_signed_cert(tmp_dir: Path) -> tuple[Path, Path]:
     """Generate a self-signed cert/key pair (CN=127.0.0.1) into tmp_dir; returns paths."""
@@ -498,8 +533,24 @@ async def slow_load_server(site_dir: Path) -> AsyncIterator[ServerHandle]:
         await _stop(handle)
 
 
+@pytest.fixture(autouse=True)
+def config_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Per-test ODDA_CONFIG_HOME: every test runs against its own config home.
+
+    odda's machine-global state — the global rules dir, the Base profile —
+    roots at the ODDA_CONFIG_HOME override, so pointing it at the test's
+    tmp keeps the suite off the real ``~/.config/odda`` for every session
+    a test boots, in-process or subprocess (the subprocess fixture
+    forwards it explicitly: the stdio client passes only a safelisted env).
+    """
+    home = tmp_path / "config-home"
+    home.mkdir()
+    monkeypatch.setenv("ODDA_CONFIG_HOME", str(home))
+    return home
+
+
 @pytest.fixture
-def odda_session(tmp_path: Path) -> Iterator[object]:
+def odda_session(tmp_path: Path, config_home: Path) -> Iterator[object]:
     """Per-test MCP session factory: ``async with odda_session() as h:``.
 
     A sync fixture returning an async context manager: the session is
@@ -522,21 +573,147 @@ def odda_session(tmp_path: Path) -> Iterator[object]:
                 assert flowstore.DATA_DIR == data_dir, (
                     "lifespan did not set the data dir for this session"
                 )
-                yield Harness(client, data_dir)
+                yield Harness(client, data_dir, config_home)
         finally:
             os.chdir(old_cwd)
 
     return _session
 
 
+@pytest.fixture
+def odda_subprocess_session(tmp_path: Path, config_home: Path) -> Iterator[object]:
+    """Per-test subprocess MCP session factory: ``async with
+    odda_subprocess_session() as h:`` — the production
+    one-process-per-session shape over stdio, sharing the test's data dir.
+
+    Concurrently-live sessions cannot share one process: mitmproxy keeps
+    process-global context (``mitmproxy_ctx.master``/``options``), so a
+    second in-process master absorbs the first's traffic. A concurrently-
+    live sibling session must be its own process — ``python -m odda mcp``
+    with its cwd at the test's tmp dir (same ``.odda`` data dir) and
+    PYTHONPATH pointing at this checkout's ``src`` so the child runs the
+    code under test, not any installed odda. ``_session(cwd=...)`` boots
+    the child against a different project dir (its own ``.odda``); the
+    config-home override is forwarded explicitly because the stdio
+    client passes the child only a safelisted environment plus
+    ``env``.
+    """
+    from mcp.client.stdio import StdioServerParameters
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    assert src.is_dir(), f"checkout src not found at {src}"
+
+    @asynccontextmanager
+    async def _session(cwd: Path | None = None) -> AsyncIterator[Harness]:
+        cwd = tmp_path if cwd is None else cwd
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "odda", "mcp"],
+            env={
+                "PYTHONPATH": str(src),
+                "ODDA_CONFIG_HOME": str(config_home),
+            },
+            cwd=cwd,
+        )
+        async with Client(params) as client:
+            yield Harness(client, cwd / ".odda", config_home)
+
+    return _session
+
+
+# --- scanner suite helpers (test_30 / test_32) ---
+#
+# The scanner tests' rule corpus (ADR-0036: no rules ship with odda)
+# loaded or seeded through the real paths, plus the findings-index
+# reader the harness cannot serve (its assertions run with no live
+# session). Test-local slot sources — the spec's "test-local slots"
+# wording — kept under fixtures/, not at the repo root.
+_RULES_SRC = Path(__file__).parent / "fixtures" / "rules"
+
+
+def _slot_rules(family: str) -> list[Rule]:
+    """Load one fixtures/rules/<family> slot through the slot loader."""
+    path = _RULES_SRC / family / "rule.py"
+    return load_slot_source(family, path.read_text(encoding="utf-8"), str(path))
+
+
+async def _seed_slot(h: Harness, family: str) -> dict:
+    """Install the fixtures' rules/<family> slot through the real tool path."""
+    return await h.call(
+        "rule_install",
+        {"name": family, "file": str(_RULES_SRC / family / "rule.py")},
+    )
+
+
+def _findings_index(data_dir: Path) -> list[dict]:
+    """Every findings.jsonl record on the data dir ([] when absent).
+
+    Harness-free on purpose: the assertions between sessions (one
+    closed, the next not yet booted) have no live session to ask.
+    """
+    f = data_dir / "scanner" / "findings.jsonl"
+    if not f.is_file():
+        return []
+    return [json.loads(line) for line in f.read_text().splitlines()]
+
+
+def _stored_flow(
+    data_dir: Path,
+    flow_id: str,
+    body: bytes = b"payload",
+    *,
+    content_type: str = "text/plain",
+    status_code: int = 200,
+    query: str | None = None,
+) -> dict:
+    """One stored flow through the real on-disk layout, as the store
+    writes it: the flow directory (``flows/<id>``) with the stored
+    response body, stored response headers, and — when ``query`` is
+    given — the stored request file (request-stage rules need it).
+    Parameterized status/content type, so flow-context gates can vary
+    while the body stays byte-identical; the record handed to
+    ``Scanner.observe`` comes back.
+    """
+    flow_dir = data_dir / "flows" / flow_id
+    flow_dir.mkdir(parents=True)
+    (flow_dir / "response_body.txt").write_bytes(body)
+    header_block = (
+        f"HTTP/1.1 {status_code} X\r\n"
+        f"Content-Type: {content_type}\r\n"
+        + ("X-T14-Hit: yes\r\n" if query is not None else "")
+        + "\r\n"
+    )
+    (flow_dir / "response_headers").write_bytes(header_block.encode())
+    path = f"/{flow_id}.txt" + (f"?{query}" if query else "")
+    if query is not None:
+        (flow_dir / "request").write_bytes(
+            f"GET {path} HTTP/1.1\r\nHost: fixture.local\r\n\r\n".encode()
+        )
+    return {
+        "id": flow_id,
+        "method": "GET",
+        "scheme": "http",
+        "host": "fixture.local",
+        "port": 80,
+        "path": path,
+        "browser_id": None,
+        "status_code": status_code,
+        "total_duration_ms": 1.0,
+        "body_file": f"flows/{flow_id}/response_body.txt",
+        "error": None,
+    }
+
+
 __all__ = [
     "FIXTURES",
     "Harness",
     "ServerHandle",
+    "config_home",
     "curl",
     "dyn_server",
     "fixture_site",
     "odda_session",
+    "odda_subprocess_session",
     "script_server",
     "self_signed_cert",
     "slow_load_server",

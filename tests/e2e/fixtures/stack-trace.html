@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head><title>500 Internal Server Error</title></head>
+<body>
+<h1>500 Internal Server Error</h1>
+<p>Something went wrong. The incident has been logged.</p>
+<h2>Application log</h2>
+<pre>
+Traceback (most recent call last):
+  File "/app/web/handlers/checkout.py", line 88, in post
+    charge = gateway.charge(order.total)
+  File "/app/vendor/gateway/client.py", line 41, in charge
+    raise GatewayUnavailable(f"upstream {self.endpoint} timed out")
+GatewayUnavailable: upstream https://pgw.internal:443 timed out
+</pre>
+<h2>Billing service</h2>
+<pre>
+java.lang.IllegalStateException: charge job not scheduled
+	at com.example.billing.ChargeRunner.run(ChargeRunner.java:42)
+	at com.example.billing.JobQueue.drain(JobQueue.java:118)
+</pre>
+<h2>Legacy PHP endpoint</h2>
+<pre>
+Fatal error: Uncaught UnexpectedValueException: order total missing in /var/www/html/checkout.php:23
+Stack trace:
+#0 /var/www/html/checkout.php(23): process_order()
+#1 /var/www/html/index.php(5): require_once()
+  thrown in /var/www/html/checkout.php on line 23
+</pre>
+<h2>Renderer worker</h2>
+<pre>
+Error: Cannot find module 'invoice-tpl'
+    at Module._compile (node:internal/modules/cjs/loader:1105:14)
+    at Object.require (node:internal/modules/cjs/loader:1185:22)
+</pre>
+<h2>Report exporter</h2>
+<pre>
+Unhandled exception. System.NullReferenceException: Object reference not set to an instance of an object.
+   at Reporting.InvoiceExporter.Export(Invoice invoice)
+   at System.Runtime.CompilerServices.TaskAwaiter.GetResult()
+</pre>
+</body>
+</html>

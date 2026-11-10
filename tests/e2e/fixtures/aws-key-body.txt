@@ -1,0 +1,10 @@
+# deployment debug dump — identity section
+account_id: 123456789012
+arn: arn:aws:iam::123456789012:user/deployer
+access_key_id = AKIAIOSFODNN7EXAMPLE
+region: eu-central-1
+
+# near-misses that must not fire (too short / lowercase / embedded):
+truncated: AKIA1234
+lowercase: akiaiosfodnn7example
+embedded: XAKIAIOSFODNN7EXAMPLEY

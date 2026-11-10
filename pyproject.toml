@@ -20,6 +20,7 @@ dependencies = [
     "pillow>=11.0.0",
     "h2>=4.0.0",
     "mcp==2.1.1",
+    "hyperscan==0.9.1",
 ]
 
 [project.scripts]
@@ -45,7 +46,7 @@ where = ["src"]
 "" = "src"
 
 [tool.setuptools.package-data]
-odda = ["userscripts/default/*.js"]
+odda = ["scanner/rule-guide.md", "userscripts/default/*.js"]
 
 [tool.ruff]
 target-version = "py311"
@@ -143,6 +144,9 @@ split-on-trailing-comma = false
 "tests/e2e/fixtures/close_after_first_server.py" = ["INP001", "S110"]
 "tests/e2e/fixtures/close_without_response_server.py" = ["INP001", "S110"]
 "tests/e2e/fixtures/forward_proxy.py" = ["INP001"]
+# The converted rule corpus: slot sources outside any package (install
+# material, not importable modules — ADR-0036).
+"tests/e2e/fixtures/rules/*/rule.py" = ["INP001"]
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"

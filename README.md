@@ -4,6 +4,7 @@
 
 - **Drive Chrome** — open, navigate, run JS, screenshot (optionally annotated with numbered markers + a ref/box legend), and interact with the page by accessibility-tree refs.
 - **Capture every flow** — a transparent proxy writes every request/response to disk, including media bodies browser capture drops.
+- **Scan as you capture** — every flow is passively scanned as it lands; findings append to a greppable index. Zero egress, forward-only.
 - **Observe JS in progress** — wrap functions/properties, plant source logpoints, record block coverage.
 - **Craft raw HTTP** — byte-faithful sends for smuggling, parser-differentials, and races.
 
@@ -83,10 +84,13 @@ A typical session:
 browser_open          → {browser_id, tab_id}
 navigate              → tab loads https://target.example/
 read .odda/flows/flows.jsonl     → every request/response captured on disk
+read .odda/scanner/findings.jsonl → what the scanner flagged in that traffic
 request_clone + request_send           → the Burp Repeater loop, as tools
 ```
 
 All captured traffic is stored under `.odda/flows/<id>/` — request bytes, response body, headers, timing — plus the append-only `flows.jsonl` index. Grep the index to find flows; read `.odda/flows/<id>/response_body.*` for the body (including image/video/audio/font Content-Types that browser capture drops).
+
+While the session lives, each captured flow is also passively scanned as it lands; findings append to the `.odda/scanner/findings.jsonl` index (see *Scan as you capture* below).
 
 ## Features
 
@@ -102,6 +106,12 @@ A real Chrome (via patchright/Playwright), headless by default:
 ### Capture every flow
 
 A transparent mitmproxy sits between Chrome and the network; driving the browser *is* traffic capture. Every request/response is saved under `.odda/flows/<id>/`; the index is `.odda/flows/flows.jsonl`. The proxy can also chain through an upstream forward proxy (`proxy_upstream_set`) to change the session's network vantage.
+
+### Scan as you capture
+
+Every flow is passively scanned the moment it lands — driving traffic *is* scanning, and no scan step or trigger exists. Findings append to `.odda/scanner/findings.jsonl`, the same greppable-index habit as `flows.jsonl`: each line is one finding with `rule_id`, `flow_id`, `severity`, `title`, `evidence` (where in the flow each match sits, with the matched text), and `refs` (CWE/CVE/OSV identifiers). There is one line per rule–flow pair — repeated matches aggregate into that line's evidence — and the index is append-only: findings are never retracted, and removing a rule (`rule_remove`) stops its future findings only.
+
+The scanner is passive by construction: **zero egress** (nothing is ever sent — analysis reads captured material only), **session-live** (only flows the current session captures are scanned), and **forward-only** (flows predating the session are never analyzed — no catch-up or backfill exists). No rules ship with odda: the scanner boots with an empty ruleset, and a fresh install scans nothing until rules arrive. Every rule is a Python rule slot in one of two scopes, both reloaded on boot: this project's rules dir (`.odda/rules/`, where `rule_install` places slots and `rule_remove` / `rule_disable` / `rule_enable` retire, suppress, and restore them — per-project like the rest of `.odda/`), and the global rules dir under the odda config home (`~/.config/odda/rules/` unless `ODDA_CONFIG_HOME` redirects it — hand-managed, shared across every project on the machine, never written by a tool). `rule_list` shows every rule with its scope. The repo's own `rules/` tree carries the converted high-signal corpus as installable slot sources — stack traces, leaked private/AWS/frontend keys, subdomain-takeover confirmations, compromised-CDN script imports, outdated-library detection via the offline retire.js dataset (which rides inside its slot), exposed metrics, and request-side token leaks (browser-driven flows only).
 
 ### Observe JS in progress
 
