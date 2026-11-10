@@ -2307,6 +2307,11 @@ class BrowserManager:
             headless=headless,
             # Headed UA, applied driver-side context-wide (see helper).
             user_agent=user_agent,
+            # Headed windows size the page to the window (no fixed viewport
+            # override) so resize/maximize doesn't strand the page in a
+            # 1280x720 corner. Headless keeps the fixed 1280x720 viewport.
+            # See ADR-0039.
+            no_viewport=not headless,
             proxy=proxy_config,
             ignore_https_errors=True,
             # ignore_default_args=True (bool) so Chrome receives only our

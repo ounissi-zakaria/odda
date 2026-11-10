@@ -44,6 +44,10 @@ _Avoid_: cookie store, cookie storage, browser cookies
 Launch-time behavior of headless browsers: odda derives a headed Chrome User-Agent from the installed Chrome's real version and the driver applies it across the whole browser context, so the wire User-Agent header and page-visible `navigator.userAgent` both present a headed browser. Covers every page of a headless browser, including tabs opened later; headed launches keep Chrome's own UA.
 _Avoid_: UA spoofing, stealth mode, user-agent override
 
+**Headed viewport**:
+Launch-time behavior of headed browsers: the page sizes to the window and reflows on resize, with no fixed viewport override; headless browsers keep the driver's fixed 1280×720 viewport. See ADR-0039.
+_Avoid_: responsive mode, window-fit layout
+
 ## Page interaction
 
 **Page interaction**:
