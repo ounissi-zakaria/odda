@@ -4,9 +4,10 @@
 FROM python:3.14-slim
 
 # System deps: curl for install scripts, gnupg for Chrome repo signing,
-# openssl for the e2e suite's self-signed fixture certs
+# openssl for the e2e suite's self-signed fixture certs, TigerVNC's Xvnc
+# for the per-browser virtual displays (ADR-0040)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl gnupg openssl \
+    curl gnupg openssl tigervnc-standalone-server \
     && rm -rf /var/lib/apt/lists/*
 
 # Google Chrome from Google's apt repo

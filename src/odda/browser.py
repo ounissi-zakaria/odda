@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-import functools
 import logging
 import os
-import platform
 import re
 import secrets
 import shutil
 import string
 import subprocess
-import sys
 import tempfile
 import time
 import weakref
@@ -41,6 +38,12 @@ from odda import (
 from odda.chrome_args import build_chrome_args
 from odda.paths import base_profile_dir
 from odda.proxy import AUTH_CANARY_URL, PROXY_AUTH_PASSWORD
+from odda.vdisplay import (
+    SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+    VirtualDisplay,
+    start_virtual_display,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -208,50 +211,6 @@ def _find_chrome_executable() -> str:
             return path
     msg = "No Chrome or Chromium executable found on PATH"
     raise RuntimeError(msg)
-
-
-@functools.cache
-def _headless_launch_user_agent(chrome_executable: str) -> str | None:
-    """Build a headed-Chrome UA from the installed binary, or ``None``.
-
-    Chrome brands ``--headless`` sessions ``HeadlessChrome/<version>`` and
-    some origins reset such connections outright, so headless launches hand
-    patchright a headed-shaped UA (same major version, Chrome's reduced
-    form, headed token). The
-    driver applies it via ``Emulation.setUserAgentOverride``, covering the
-    wire header and page-visible ``navigator.userAgent`` for every page in
-    the context. The version is probed from the actual binary; any failure
-    returns ``None`` and the launch proceeds without an override.
-    Memoized per binary path: the probe is a ``--version`` subprocess, and
-    one installed binary's UA cannot change under a running process.
-    """
-    try:
-        proc = subprocess.run(  # noqa: S603
-            [chrome_executable, "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    match = re.search(r"\d+(?:\.\d+){3}", proc.stdout)
-    if match is None:
-        return None
-    # Chrome's UA reduction: the UA string carries major.0.0.0; the full
-    # build surfaces only in high-entropy client hints.
-    version = f"{match.group(0).split('.')[0]}.0.0.0"
-    if sys.platform.startswith("win"):
-        ua_platform = "Windows NT 10.0; Win64; x64"
-    elif sys.platform == "darwin":
-        ua_platform = "Macintosh; Intel Mac OS X 10_15_7"
-    else:
-        machine = platform.machine() or "x86_64"
-        ua_platform = f"X11; Linux {machine}"
-    return (
-        f"Mozilla/5.0 ({ua_platform}) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
-    )
 
 
 # A Browser record is its directory: browsers/<token>/profile under the
@@ -653,15 +612,18 @@ class BrowserInstance:
         self,
         browser_id: str,
         context: BrowserContext,
+        display: VirtualDisplay,
     ) -> None:
         """Initialize a browser instance.
 
         Args:
             browser_id: Unique ID for this browser.
             context: BrowserContext (persistent context for this browser).
+            display: The virtual display this browser's Chrome runs on.
         """
         self.browser_id = browser_id
         self.context = context
+        self.display = display
         self._next_tab_id: int = 1
         self._tabs: dict[int, Page] = {}
         self._cdp_sessions: dict[int, CDPSession] = {}
@@ -1247,8 +1209,17 @@ class BrowserInstance:
     async def close_tab(self, tab_id: int) -> None:
         """Close a tab by id. No-op if already closed."""
         page = self._require_tab(tab_id)
+        # page.close() carries no driver-side timeout: under load its
+        # reply can be lost racing browser teardown, and a bare await
+        # then parks forever (the e2e parallel wedge). Bound both the
+        # close and its one retry; a still-unclosed page after both is
+        # a dead context's zombie — the registry drops it regardless.
         with suppress(Exception):
-            await page.close()
+            with suppress(TimeoutError):
+                await asyncio.wait_for(page.close(), 10)
+            if not page.is_closed():
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(page.close(), 5)
         self._on_page_close(tab_id)
 
     async def navigate(
@@ -2094,7 +2065,7 @@ class BrowserInstance:
     # --- teardown ------------------------------------------------------
 
     async def _close(self) -> None:
-        """Close the browser context and release resources."""
+        """Close the browser context and tear down its virtual display."""
         # Detaching a per-tab CDP session parks forever while a native
         # dialog is open on that tab (the driver can't complete the
         # detach). The context close below tears the sessions down
@@ -2111,10 +2082,23 @@ class BrowserInstance:
         # dialogs) are going away with the context.
         self._dialogs.clear()
         self._script_maps.clear()
-        with suppress(Exception):
-            if self.context:
-                await self.context.close()
+        if self.context:
+            closed = False
+            with suppress(Exception, TimeoutError):
+                await asyncio.wait_for(self.context.close(), 15)
+                closed = True
+            if not closed and self.display:
+                # Escalate a close whose reply was lost: Chrome exits
+                # when its X display dies, which unblocks the close.
+                await self.display.close()
+                with suppress(Exception, TimeoutError):
+                    await asyncio.wait_for(self.context.close(), 10)
         self.context = None  # type: ignore[assignment]
+        # The display dies with the browser (unless it already died as
+        # the escalation above): teardown is idempotent either way.
+        if self.display:
+            await self.display.close()
+            self.display = None  # type: ignore[assignment]
 
 
 # One patchright driver per event loop, per process. Starting a driver
@@ -2174,7 +2158,8 @@ class BrowserManager:
         """List every Browser record with its open state (ADR-0032).
 
         Backs the ``browser_list`` tool. This session's browsers come
-        from the manager (state ``open``, with their raw ``tab_count``);
+        from the manager (state ``open``, raw ``tab_count``, and the
+        endpoints of the odda-owned virtual display they run on);
         the data dir's other records join them — ``open in another
         session`` when a live Chrome holds the profile's SingletonLock
         elsewhere, ``closed`` otherwise. Closed records carry no
@@ -2193,6 +2178,8 @@ class BrowserManager:
                     "browser_id": bid,
                     "state": "open",
                     "tab_count": len(inst._tabs),  # noqa: SLF001
+                    "vnc_url": inst.display.vnc_url,
+                    "novnc_url": inst.display.novnc_url,
                 }
             )
         with suppress(OSError):
@@ -2264,7 +2251,7 @@ class BrowserManager:
             )
 
     async def _create_instance(
-        self, *, browser_id: str | None = None, headless: bool = True
+        self, *, browser_id: str | None = None
     ) -> BrowserInstance:
         """Create and register a new BrowserInstance.
 
@@ -2294,40 +2281,53 @@ class BrowserManager:
         user_data_dir = _prepare_record_profile(browser_id)
         chrome_executable = _find_chrome_executable()
 
-        # Headless UA normalization: probe once, off the event loop.
-        user_agent = (
-            await asyncio.to_thread(_headless_launch_user_agent, chrome_executable)
-            if headless
-            else None
-        )
-        playwright = await _driver()
-        context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
-            executable_path=chrome_executable,
-            headless=headless,
-            # Headed UA, applied driver-side context-wide (see helper).
-            user_agent=user_agent,
-            # Headed windows size the page to the window (no fixed viewport
-            # override) so resize/maximize doesn't strand the page in a
-            # 1280x720 corner. Headless keeps the fixed 1280x720 viewport.
-            # See ADR-0039.
-            no_viewport=not headless,
-            proxy=proxy_config,
-            ignore_https_errors=True,
-            # ignore_default_args=True (bool) so Chrome receives only our
-            # redeclared args (src/odda/chrome_args.py), which carry the m150
-            # model-store suppression names in --disable-features. See
-            # chrome_args.py and the AGENTS.md drift note for the two
-            # deliberate omissions (password-store/mock-keychain).
-            ignore_default_args=True,
-            args=build_chrome_args(
-                user_data_dir,
-                self.proxy.proxy_url if self.proxy else None,
-                headless=headless,
-            ),
-        )
-
-        instance = BrowserInstance(browser_id, context)
+        # Headed Chrome on an odda-owned virtual display (ADR-0040):
+        # never headless, never the user's desktop. Started before Chrome
+        # (Chrome needs a DISPLAY) and torn down together with the browser.
+        display = await start_virtual_display(SCREEN_WIDTH, SCREEN_HEIGHT)
+        try:
+            playwright = await _driver()
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=user_data_dir,
+                executable_path=chrome_executable,
+                # Headed, explicitly: real rendering path and Chrome's own
+                # User-Agent — the headless-era UA override is gone with
+                # the mode, so wire header and navigator.userAgent both
+                # present the real browser, zero lies to maintain.
+                headless=False,
+                # The page sizes to the window (ADR-0039); the window is
+                # pinned to the display geometry in chrome_args, so
+                # geometry stays deterministic without a viewport override.
+                no_viewport=True,
+                proxy=proxy_config,
+                ignore_https_errors=True,
+                # ignore_default_args=True (bool) so Chrome receives only our
+                # redeclared args (src/odda/chrome_args.py), which carry the m150
+                # model-store suppression names in --disable-features. See
+                # chrome_args.py and the AGENTS.md drift note for the two
+                # deliberate omissions (password-store/mock-keychain).
+                ignore_default_args=True,
+                # Chrome lands on this browser's virtual display, never on
+                # the inherited session: DISPLAY points at the Xvnc,
+                # WAYLAND_DISPLAY is scrubbed and XDG_SESSION_TYPE pinned
+                # to x11 — Chrome's ozone auto-hint prefers Wayland when
+                # either says Wayland, which would put the window on the
+                # user's real desktop and read the host monitor as the
+                # screen (caught by the pinned-geometry e2e test).
+                env={
+                    **{k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"},
+                    **display.env,
+                    "XDG_SESSION_TYPE": "x11",
+                },
+                args=build_chrome_args(
+                    user_data_dir,
+                    self.proxy.proxy_url if self.proxy else None,
+                ),
+            )
+        except BaseException:
+            await display.close()
+            raise
+        instance = BrowserInstance(browser_id, context, display)
 
         # Register the initial page (Chrome opens one automatically).
         # context.on('page') may have already fired for it during context
@@ -2351,9 +2351,7 @@ class BrowserManager:
         self._instances[browser_id] = instance
         return instance
 
-    async def open(
-        self, *, browser_id: str | None = None, headless: bool = True
-    ) -> dict[str, Any]:
+    async def open(self, *, browser_id: str | None = None) -> dict[str, Any]:
         """Open a browser: a fresh one, or reopen a closed record (ADR-0032).
 
         Without ``browser_id``, launches a new browser under a fresh
@@ -2365,14 +2363,15 @@ class BrowserManager:
         browser only comes from bare ``open``.
 
         Returns:
-            Dict with browser_id, the initial tab_id, and a status.
+            Dict with browser_id, the initial tab_id, a status, and the
+            browser's virtual display endpoints (ADR-0040).
         """
         bid = browser_id.lower() if browser_id is not None else None
         try:
             if bid is None:
-                instance = await self._create_instance(headless=headless)
+                instance = await self._create_instance()
             else:
-                instance = await self._reopen_instance(bid, headless=headless)
+                instance = await self._reopen_instance(bid)
         except BrowserOperationError:
             raise
         except Exception as e:
@@ -2382,11 +2381,12 @@ class BrowserManager:
             "browser_id": instance.browser_id,
             "tab_id": initial_tab_id,
             "status": "launched",
+            "display": instance.display.display,
+            "vnc_url": instance.display.vnc_url,
+            "novnc_url": instance.display.novnc_url,
         }
 
-    async def _reopen_instance(
-        self, browser_id: str, *, headless: bool
-    ) -> BrowserInstance:
+    async def _reopen_instance(self, browser_id: str) -> BrowserInstance:
         """Relaunch a closed record on its own profile (ADR-0032).
 
         The record boundary is its ``profile/`` dir: a directory without
@@ -2404,7 +2404,7 @@ class BrowserManager:
             raise BrowserOperationError(
                 f"Browser {browser_id} is open in another session."
             )
-        return await self._create_instance(browser_id=browser_id, headless=headless)
+        return await self._create_instance(browser_id=browser_id)
 
     async def close_instance(self, browser_id: str) -> dict[str, Any]:
         """Close a browser instance by ID.
@@ -2493,11 +2493,14 @@ class BrowserManager:
         If the closed tab had an open dialog (ADR-0022), the result
         carries ``closed_dialog: {type, message}`` so the agent knows
         what they destroyed with the close. The lookup happens before
-        the close.
+        the close. Closing the browser's last tab also carries
+        ``browser_closed: true`` — headed Chrome exits with its last
+        window (ADR-0040), so the whole browser closes.
 
         Returns:
             Dict with browser_id, tab_id, and status; plus
-            ``closed_dialog`` when a dialog was open.
+            ``closed_dialog`` when a dialog was open, and
+            ``browser_closed`` when this was the last tab.
         """
         inst = self._require_instance(browser_id)
         tab_dialog = next(
@@ -2508,10 +2511,23 @@ class BrowserManager:
             if tab_dialog is not None
             else None
         )
+        # Closing its last tab kills headed Chrome (the last window
+        # closes and the process exits — ADR-0040), so odda closes the
+        # whole browser with it: the record, the context, and the
+        # display go the way of the process. The result says so.
+        last_tab = len(inst._tabs) == 1  # noqa: SLF001
         await inst.close_tab(tab_id)
-        result = {"browser_id": browser_id, "tab_id": tab_id, "status": "closed"}
+        result: dict[str, Any] = {
+            "browser_id": browser_id,
+            "tab_id": tab_id,
+            "status": "closed",
+        }
         if closed_dialog is not None:
             result["closed_dialog"] = closed_dialog
+        if last_tab:
+            await inst._close()  # noqa: SLF001
+            del self._instances[inst.browser_id]
+            result["browser_closed"] = True
         return result
 
     async def navigate(

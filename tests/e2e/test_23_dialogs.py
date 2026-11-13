@@ -314,7 +314,7 @@ async def test_beforeunload_dialog_on_navigate(odda_session) -> None:
         r = await asyncio.wait_for(nav, 10)
         d = r["dialog"]
         assert d["type"] == "beforeunload"
-        # Headless Chrome reports the beforeunload dialog with no
+        # Chrome reports the beforeunload dialog with no
         # message text; the pin's trigger rule carries the empties.
         assert d["message"] == ""
         assert d["default_value"] == ""

@@ -20,6 +20,7 @@ MCP client.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from odda import __version__
@@ -42,6 +43,14 @@ def _build_parser() -> argparse.ArgumentParser:
     mcp_p = sub.add_parser(
         "mcp",
         help="Run the odda MCP server over stdio (spawned by a harness)",
+    )
+    mcp_p.add_argument(
+        "--vnc-bind",
+        default=None,
+        metavar="ADDR",
+        help="Address the per-browser noVNC endpoints bind (default "
+        "127.0.0.1; same as the ODDA_VNC_BIND env var, flag wins). "
+        "Raw VNC ports stay loopback-only.",
     )
     mcp_p.set_defaults(func=_cmd_mcp)
 
@@ -78,13 +87,18 @@ def _cmd_init_chrome_profile(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_mcp(_args: argparse.Namespace) -> None:
+def _cmd_mcp(args: argparse.Namespace) -> None:
     """Run the stdio MCP server; blocks until the client disconnects."""
     # Deferred import: dragging the mcp SDK (and its mitmproxy/browser
     # imports) into every `odda --version`/`--help` run costs ~1.3s; the
     # mcp path pays it alone (lazy-CLI-imports convention, commit a0a2f5c).
+    from odda import vdisplay
     from odda.mcp import main as mcp_main
 
+    # The flag is the operator-visible form of the env knob (flag wins);
+    # the display layer reads the env so the MCP path stays unthreaded.
+    if args.vnc_bind:
+        os.environ[vdisplay.BIND_ENV] = args.vnc_bind
     mcp_main()
 
 

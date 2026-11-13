@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 
+from odda.vdisplay import SCREEN_HEIGHT, SCREEN_WIDTH
+
 # patchright's ``disabledFeatures`` array, verbatim (16 names).
 _DISABLED_FEATURES: tuple[str, ...] = (
     "AvoidUnnecessaryBeforeUnloadCheckSync",
@@ -87,12 +89,14 @@ _CHROMIUM_SWITCHES: tuple[str, ...] = (
     "--disable-sync",
 )
 
+# Window geometry: pinned to the virtual display's size (vdisplay's
+# SCREEN_WIDTH/SCREEN_HEIGHT — ADR-0040), so with no window manager the
+# Chrome window keeps exactly that size at (0,0).
+
 
 def build_chrome_args(
     user_data_dir: str,
     proxy_url: str | None = None,
-    *,
-    headless: bool = True,
 ) -> list[str]:
     """Assemble the complete Chrome ``args=`` list for a persistent context.
 
@@ -112,8 +116,6 @@ def build_chrome_args(
         user_data_dir: Chrome ``--user-data-dir`` target (temp profile).
         proxy_url: Optional proxy server URL. When ``None`` no proxy flags
             are emitted.
-        headless: When true (default), add the headless block; odda defaults to
-            headless and ``--headed`` is the explicit override.
 
     Returns:
         The complete ``args`` list, with ``about:blank`` last.
@@ -122,14 +124,10 @@ def build_chrome_args(
     enabled = _enable_features_value()
     if enabled:
         switches.append(enabled)
-    if headless:
-        switches.append("--headless")
-        switches.append("--hide-scrollbars")
-        switches.append("--mute-audio")
-        switches.append(
-            "--blink-settings=primaryHoverType=2,availableHoverTypes=2,"
-            "primaryPointerType=4,availablePointerTypes=4"
-        )
+    # Deterministic geometry on the virtual display: no WM, so the
+    # window keeps exactly the display's size at (0,0).
+    switches.append("--window-position=0,0")
+    switches.append(f"--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}")
     # Required in the Docker test container (non-root, restricted namespaces).
     switches.append("--no-sandbox")
     proxy_flags = [f"--proxy-server={proxy_url}"] if proxy_url else []

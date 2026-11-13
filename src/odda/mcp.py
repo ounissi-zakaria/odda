@@ -223,12 +223,11 @@ mcp_server = MCPServer[OddaState](
 async def browser_open(
     *,
     browser_id: str | None = None,
-    headless: bool = True,
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Open a browser: fresh, or reopen a closed record (same id, same profile)."""
     return await ctx.request_context.lifespan_context.browser.open(
-        browser_id=browser_id, headless=headless
+        browser_id=browser_id
     )
 
 

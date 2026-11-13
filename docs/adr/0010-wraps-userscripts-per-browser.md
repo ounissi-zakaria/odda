@@ -1,4 +1,8 @@
 # Wraps and userscripts are per-browser-scoped, not globally shared
+> Partially superseded by [0040](0040-headed-browsers-on-odda-owned-virtual-displays.md):
+> wraps/userscripts stay browser-scope, but the "zero open tabs"
+> state is gone — headed Chrome exits when its last tab closes, so
+> closing the last tab now closes the whole browser.
 
 Wraps and userscripts are stored per-browser: each `BrowserInstance`
 owns its own userscripts directory on disk and its own userscript

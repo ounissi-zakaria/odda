@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from tests.e2e.conftest import fixture_site
+from tests.e2e.conftest import fixture_site, sans_display_urls
 
 
 async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
@@ -31,7 +31,9 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
         assert tid == 1
 
         r = await h.call("browser_list", {})
-        assert r == [{"browser_id": bid, "state": "open", "tab_count": 1}]
+        assert sans_display_urls(r) == [
+            {"browser_id": bid, "state": "open", "tab_count": 1}
+        ]
 
         title = await h.eval(bid, tid, "document.title")
         assert title == "Listener Test"

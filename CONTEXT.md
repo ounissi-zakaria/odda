@@ -40,12 +40,12 @@ _Avoid_: template profile, master profile, default profile
 The full cookie set of one Browser: browser-scoped state living in the Browser record's Chrome profile, not per-tab state. Includes the cookies page JavaScript can neither read nor change (httpOnly, and those outside the page's domain/path) — which is why cookie state has its own tools rather than riding on `eval`. Survives close, reopen, and MCP session teardown with the record; clearing deletes permanently for that Browser.
 _Avoid_: cookie store, cookie storage, browser cookies
 
-**UA normalization**:
-Launch-time behavior of headless browsers: odda derives a headed Chrome User-Agent from the installed Chrome's real version and the driver applies it across the whole browser context, so the wire User-Agent header and page-visible `navigator.userAgent` both present a headed browser. Covers every page of a headless browser, including tabs opened later; headed launches keep Chrome's own UA.
-_Avoid_: UA spoofing, stealth mode, user-agent override
+**Virtual display**:
+The odda-owned screen one open browser runs on, from open to close: an Xvnc (X server and VNC server in one process) plus a websockify serving the built-in noVNC page, spawned per browser. Identified by the endpoints odda reports — `vnc://…` for a native client (loopback-only), `http://…/vnc.html` for a browser tab (binds the operator-configured address, default localhost); connecting shows exactly that browser, which is the whole identification story (nothing in the page marks it). Dies with the browser; a closed Browser record has none. Never the user's desktop. See ADR-0040.
+_Avoid_: hidden display, VNC display, screen, headless display
 
-**Headed viewport**:
-Launch-time behavior of headed browsers: the page sizes to the window and reflows on resize, with no fixed viewport override; headless browsers keep the driver's fixed 1280×720 viewport. See ADR-0039.
+**Viewport**:
+Launch-time behavior of every browser: the page sizes to the Chrome window and reflows on resize, with no fixed viewport override; the window is pinned to the virtual display's 1440×900 geometry, so screenshots and coordinates stay deterministic. See ADR-0039 and ADR-0040.
 _Avoid_: responsive mode, window-fit layout
 
 ## Page interaction

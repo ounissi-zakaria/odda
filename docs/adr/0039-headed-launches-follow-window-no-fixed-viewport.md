@@ -1,4 +1,8 @@
 # Headed launches size the page to the window; headless keeps the fixed 1280×720 viewport
+Headless mode was later removed entirely (ADR-0040); the follow-the-window
+half stands for every browser, with the window pinned to the virtual
+display's geometry for determinism.
+
 
 `launch_persistent_context` was called with no `viewport=`, so patchright
 applied its default — a fixed 1280×720 viewport enforced through a CDP

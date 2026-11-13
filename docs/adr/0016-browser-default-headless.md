@@ -1,4 +1,7 @@
 # `browser_open` defaults to headless
+Superseded by ADR-0040 — headless mode no longer exists; browsers run
+headed on odda-owned virtual displays.
+
 
 `browser_open(headless=True)` launches Chrome headless by default; an
 agent that wants a visible window passes `headless=False`. The param

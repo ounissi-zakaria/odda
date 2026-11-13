@@ -190,9 +190,15 @@ async def test_logpoint_warnings_errors_and_tab_session(odda_session) -> None:
 
         # Per-tab-session (ADR-0004): closing the tab drops the
         # installations; a fresh tab starts with an empty registry.
-        await h.call("tabs_close", {"browser_id": bid, "tab_id": tid})
+        # Open the fresh tab first — closing the browser's last tab
+        # closes the browser (ADR-0040).
         r = await h.call("tabs_open", {"browser_id": bid, "url": url})
-        tid = r["tab_id"]
-        await h.wait_for(bid, tid, "typeof window.__oddaLogpointFixture === 'function'")
-        r = await h.call("logpoint_list", {"browser_id": bid, "tab_id": tid})
+        new_tid = r["tab_id"]
+        await h.wait_for(
+            bid, new_tid, "typeof window.__oddaLogpointFixture === 'function'"
+        )
+        await h.call("tabs_close", {"browser_id": bid, "tab_id": tid})
+        err = await h.call_error("logpoint_list", {"browser_id": bid, "tab_id": tid})
+        assert err == f"Tab {tid} not found in browser {bid}."
+        r = await h.call("logpoint_list", {"browser_id": bid, "tab_id": new_tid})
         assert r == []

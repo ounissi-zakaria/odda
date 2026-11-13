@@ -12,6 +12,7 @@
 
 - Python 3.14+
 - Chrome or Chromium installed and on `PATH`
+- TigerVNC's `Xvnc` (Debian/Ubuntu: `apt install tigervnc-standalone-server`) — every browser runs headed on its own virtual display; `websockify` and the noVNC client ride with the pip install
 
 ## Installation
 
@@ -96,12 +97,14 @@ While the session lives, each captured flow is also passively scanned as it land
 
 ### Drive Chrome
 
-A real Chrome (via patchright/Playwright), headless by default:
+A real Chrome (via patchright/Playwright), always headed, each on its own odda-owned virtual display — so a browser never pops on your desktop, and you can watch or drive any of them yourself:
 
 - **Open / navigate / eval / wait-for / screenshot** — drive the browser and run JS in the page.
 - **Ref-driven page interaction** — `page_snapshot` returns the accessibility tree with `[ref=eN]` tags; pass the ref to `page_click` / `page_fill` / `page_hover` / `page_upload`. `page_snapshot` caps render depth — when the tree actually reaches the cap, cut points carry their hidden subtree depth (`[deeper=k]`) and the result ends with a note stating the real depth; `page_find` regex-searches the snapshot and returns matches with context instead of the whole tree (the cheap way to locate a ref on a large page); `diff: true` returns only the `-`/`+` lines that changed since the tab's previous same-depth snapshot (fresh refs on `+` lines are directly actionable; scrolling never reads as change; navigation clears the baseline); `boxes: true` adds element geometry for coordinate clicks. `page_click` and `page_hover` also accept viewport coordinates as a raw trusted event for targets the a11y tree can't name. `screenshot(annotate=true)` draws a numbered marker on every ref's box and returns a CSV legend mapping each number to its ref and viewport box — pixels, refs, and coordinates in one artifact for coordinate targeting (canvas, overlays, anything the a11y tree can't name). Cross-iframe is transparent.
 - **Per-browser userscripts** — JS that auto-runs at `document_start` on every navigation, before the page's own scripts.
 - **Dialog blocking** — `alert` / `confirm` / `prompt` / `beforeunload` stay open until handled: the action that opens one returns its details, other tools on that tab wait, and every same-browser result lists open dialogs. Resolve with `dialog_handle` (accept/dismiss, prompt text); a human closing it in a headed window works too.
+
+- **Virtual displays (VNC + noVNC)** — `browser_open` / `browser_list` report `vnc_url` (native client, loopback) and `novnc_url` (open in any browser — the client is built in). One display per browser: the endpoint you connect to *is* the browser, which is how you find the one the agent means when it asks for help with a captcha or login. Endpoints bind localhost by default; `odda mcp --vnc-bind` / `ODDA_VNC_BIND` exposes the noVNC endpoint on another interface (trusted-network posture: no auth — everything that can reach it can drive the browsers; remote boxes: SSH-tunnel). Raw VNC ports stay loopback-only.
 
 ### Capture every flow
 

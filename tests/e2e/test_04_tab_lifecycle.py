@@ -2,8 +2,9 @@
 monotonicity.
 
 Tab and browser IDs are integers, monotonic, and never reused. A closed
-tab's id is retired forever. The browser stays alive with zero tabs
-after its last tab is closed. Multiple browsers are isolated. Deviation
+tab's id is retired forever. Closing the browser's last tab closes the
+browser (headed Chrome exits with its last window — ADR-0040).
+Multiple browsers are isolated. Deviation
 from the scrut doc: the multi-browser isolation check navigates browser
 2 to the local fixture site (both browsers hit distinct pages there)
 instead of https://example.org — the e2e run must not depend on real
@@ -24,9 +25,8 @@ def _tab_total(rows: list[dict]) -> int:
 
 async def test_tab_lifecycle_and_id_monotonicity(odda_session) -> None:
     """tabs_open returns the new tab id and status 'opened'; ids are
-    strictly monotonic and never reused; closing all tabs leaves the
-    browser alive with zero tabs, and a zero-tab browser can still open
-    new tabs."""
+    strictly monotonic and never reused; closing the last tab closes
+    the browser (headed Chrome exits with its last window)."""
     async with odda_session() as h, fixture_site(["index.html", "dialogs.html"]) as fx:
         bid, tid = await h.open_browser()
         assert tid == 1
@@ -58,18 +58,17 @@ async def test_tab_lifecycle_and_id_monotonicity(odda_session) -> None:
         err = await h.call_error("eval", {"browser_id": bid, "tab_id": 2, "js": "1"})
         assert err == f"Tab 2 not found in browser {bid}."
 
-        # Closing all tabs leaves the browser alive with zero tabs.
-        for t in (1, 3, 4):
+        # Closing tabs down to one keeps the browser alive; closing
+        # the last tab closes the browser (headed Chrome exits with
+        # its last window — ADR-0040).
+        for t in (1, 3):
             await h.call("tabs_close", {"browser_id": bid, "tab_id": t})
-        r = await h.call("tabs_list", {"browser_id": bid})
-        assert r == [{"browser_id": bid, "tabs": []}]
-
-        # A browser with zero tabs can still open new tabs (id keeps
-        # climbing past every retired id).
-        r = await h.call("tabs_open", {"browser_id": bid, "url": f"{fx.base}/"})
-        assert r == {"browser_id": bid, "tab_id": 5, "status": "opened"}
-        r = await h.call("tabs_list", {"browser_id": bid})
+        r = await h.call("tabs_list", {})
         assert len(r[0]["tabs"]) == 1
+        r = await h.call("tabs_close", {"browser_id": bid, "tab_id": 4})
+        assert r["browser_closed"] is True
+        err = await h.call_error("tabs_list", {"browser_id": bid})
+        assert err == f"Browser {bid} is not open."
 
 
 async def test_multiple_browsers_isolated_and_ids_never_reused(

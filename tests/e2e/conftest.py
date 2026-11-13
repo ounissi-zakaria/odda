@@ -360,7 +360,7 @@ class Harness:
 
     async def open_browser(self, url: str | None = None) -> tuple[str, int]:
         """Open a browser; optionally navigate its initial tab; return (browser_id, tab_id)."""
-        r = await self.call("browser_open", {"headless": True})
+        r = await self.call("browser_open", {})
         bid, tid = r["browser_id"], r["tab_id"]
         assert re.fullmatch(r"[a-z]{5}", bid), f"browser_id not a token: {bid!r}"
         if url is not None:
@@ -658,6 +658,18 @@ def _findings_index(data_dir: Path) -> list[dict]:
     if not f.is_file():
         return []
     return [json.loads(line) for line in f.read_text().splitlines()]
+
+
+def sans_display_urls(rows):
+    """Drop the per-open Virtual display endpoints from browser_list rows.
+
+    The URLs carry dynamic ports; their shape is asserted where it
+    belongs, in test_01's test_open_runs_on_a_virtual_display.
+    """
+    return [
+        {k: v for k, v in row.items() if k not in ("vnc_url", "novnc_url")}
+        for row in rows
+    ]
 
 
 def _stored_flow(

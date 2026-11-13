@@ -13,9 +13,13 @@ import base64
 import json
 import platform
 import re
+import socket
+import urllib.request
 from pathlib import Path
 
-from tests.e2e.conftest import fixture_site
+import pytest
+
+from tests.e2e.conftest import fixture_site, sans_display_urls
 
 
 async def test_browser_list_rows_and_closing(odda_session) -> None:
@@ -29,13 +33,15 @@ async def test_browser_list_rows_and_closing(odda_session) -> None:
         assert tid == 1
 
         r = await h.call("browser_list", {})
-        assert r == [{"browser_id": bid, "state": "open", "tab_count": 1}]
+        assert sans_display_urls(r) == [
+            {"browser_id": bid, "state": "open", "tab_count": 1}
+        ]
 
         bid2, tid2 = await h.open_browser()
         assert tid2 == 1
         assert bid2 != bid
         r = await h.call("browser_list", {})
-        assert r == _by_id(
+        assert sans_display_urls(r) == _by_id(
             [
                 {"browser_id": bid, "state": "open", "tab_count": 1},
                 {"browser_id": bid2, "state": "open", "tab_count": 1},
@@ -43,7 +49,7 @@ async def test_browser_list_rows_and_closing(odda_session) -> None:
         )
 
         await h.call("browser_close", {"browser_id": bid2})
-        assert await h.call("browser_list", {}) == _by_id(
+        assert sans_display_urls(await h.call("browser_list", {})) == _by_id(
             [
                 {"browser_id": bid, "state": "open", "tab_count": 1},
                 {"browser_id": bid2, "state": "closed"},
@@ -51,12 +57,50 @@ async def test_browser_list_rows_and_closing(odda_session) -> None:
         )
 
         await h.call("browser_close", {"browser_id": bid})
-        assert await h.call("browser_list", {}) == _by_id(
+        assert sans_display_urls(await h.call("browser_list", {})) == _by_id(
             [
                 {"browser_id": bid, "state": "closed"},
                 {"browser_id": bid2, "state": "closed"},
             ]
         )
+
+
+async def test_open_runs_on_a_virtual_display(odda_session) -> None:
+    """browser_open runs headed Chrome on its own Virtual display
+    (ADR-0040): the result carries the display number, a localhost
+    vnc_url whose port speaks RFB, and a novnc_url serving the built-in
+    noVNC page; the page reports the pinned window geometry; and
+    browser_close tears the display down with the browser."""
+    async with odda_session() as h:
+        r = await h.call("browser_open", {})
+        bid, tid = r["browser_id"], r["tab_id"]
+        assert r["status"] == "launched"
+        assert re.fullmatch(r":\d+", r["display"])
+        m = re.fullmatch(r"vnc://127\.0\.0\.1:(\d+)", r["vnc_url"])
+        assert m, r["vnc_url"]
+        rfb_port = int(m.group(1))
+        with socket.create_connection(("127.0.0.1", rfb_port), timeout=5) as s:
+            assert s.recv(12).startswith(b"RFB ")
+
+        m = re.fullmatch(r"http://127\.0\.0\.1:(\d+)/vnc\.html", r["novnc_url"])
+        assert m, r["novnc_url"]
+        novnc_port = int(m.group(1))
+        assert novnc_port != rfb_port
+        with urllib.request.urlopen(  # noqa: S310 - http scheme asserted above
+            r["novnc_url"], timeout=5
+        ) as resp:
+            assert b"noVNC" in resp.read(4096)
+
+        assert (
+            await h.eval(bid, tid, "[screen.width, screen.height].join('x')")
+            == "1440x900"
+        )
+
+        await h.call("browser_close", {"browser_id": bid})
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", rfb_port), timeout=1)
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", novnc_port), timeout=1)
 
 
 async def test_eval_runs_js_and_renders_values(odda_session) -> None:
@@ -261,10 +305,10 @@ async def test_reopen_record_restores_profile(odda_session) -> None:
             {"browser_id": bid, "state": "closed"}
         ]
 
-        r = await h.call("browser_open", {"browser_id": bid, "headless": True})
+        r = await h.call("browser_open", {"browser_id": bid})
         assert r["browser_id"] == bid
         assert r["tab_id"] == 1
-        assert await h.call("browser_list", {}) == [
+        assert sans_display_urls(await h.call("browser_list", {})) == [
             {"browser_id": bid, "state": "open", "tab_count": 1}
         ]
 
@@ -312,7 +356,7 @@ async def test_stale_lock_reads_closed(odda_session) -> None:
         assert await h.call("browser_list", {}) == [
             {"browser_id": "qwert", "state": "closed"}
         ]
-        r = await h.call("browser_open", {"browser_id": "qwert", "headless": True})
+        r = await h.call("browser_open", {"browser_id": "qwert"})
         assert r["browser_id"] == "qwert"
 
 
@@ -347,7 +391,7 @@ async def test_base_profile_seeds_creation_only(odda_session, config_home) -> No
         # Diverge from the seed, close, reopen: the seed must not come back.
         (profile / "seed-marker").unlink()
         await h.call("browser_close", {"browser_id": bid})
-        r = await h.call("browser_open", {"browser_id": bid, "headless": True})
+        r = await h.call("browser_open", {"browser_id": bid})
         assert r["browser_id"] == bid
         assert not (profile / "seed-marker").exists()
 
@@ -369,8 +413,8 @@ async def test_open_in_another_session(odda_session) -> None:
         assert await h2.call("browser_list", {}) == [
             {"browser_id": bid, "state": "closed"}
         ]
-        r = await h2.call("browser_open", {"browser_id": bid, "headless": True})
+        r = await h2.call("browser_open", {"browser_id": bid})
         assert r["browser_id"] == bid
-        assert await h2.call("browser_list", {}) == [
+        assert sans_display_urls(await h2.call("browser_list", {})) == [
             {"browser_id": bid, "state": "open", "tab_count": 1}
         ]

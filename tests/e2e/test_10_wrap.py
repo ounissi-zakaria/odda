@@ -168,8 +168,9 @@ async def test_wrap_records_wipe_installation_persists_iframes(
 
 async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
     """Large arrays truncate; remove stops future recording; missing
-    browser and non-existent-wrap errors are verbatim; wrap
-    install/list/remove work with zero open tabs."""
+    browser and non-existent-wrap errors are verbatim; closing the
+    last tab closes the browser — headed Chrome exits with its last
+    window, and the record goes with it (ADR-0040)."""
     async with (
         odda_session() as h,
         fixture_site(["wrap.html", "iframe-inner.html"]) as fx,
@@ -239,22 +240,14 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         )
         assert err == "Userscript '__odda-wrap__no-such-wrap' not found"
 
-        # Wrap install/list/remove are browser-scope operations
-        # (ADR-0010): they must work with zero open tabs instead of
-        # erroring on a missing tab.
-        await h.call("tabs_close", {"browser_id": bid, "tab_id": tid})
-        r = await h.call("wrap_list", {"browser_id": bid})
-        assert sorted(w["name"] for w in r) == ["ael", "big", "ih"]
-        await h.call(
-            "wrap_calls_add",
-            {"browser_id": bid, "name": "post", "expr": "Array.of"},
-        )
-        r = await h.call("wrap_list", {"browser_id": bid})
-        assert sorted(w["name"] for w in r) == ["ael", "big", "ih", "post"]
-        r = await h.call("wrap_remove", {"browser_id": bid, "name": "post"})
-        assert (r["name"], r["removed"]) == ("post", True)
-        r = await h.call("wrap_list", {"browser_id": bid})
-        assert sorted(w["name"] for w in r) == ["ael", "big", "ih"]
+        # Closing the browser's last tab closes the browser: headed
+        # Chrome exits with its last window (ADR-0040), so odda closes
+        # the record, context, and display with it. Wrap ops stay
+        # browser-scope (ADR-0010) — no tab reference anywhere above.
+        r = await h.call("tabs_close", {"browser_id": bid, "tab_id": tid})
+        assert r["browser_closed"] is True
+        rows = await h.call("browser_list", {})
+        assert rows == [{"browser_id": bid, "state": "closed"}]
 
 
 async def test_wrap_access_data_slots_and_page_defined_props(odda_session) -> None:

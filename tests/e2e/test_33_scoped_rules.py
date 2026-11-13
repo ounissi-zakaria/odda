@@ -101,9 +101,7 @@ async def _assert_no_finding(h, flow_id: str, rule_id: str) -> None:
 
 
 async def _rows(h) -> dict[tuple[str, str], dict]:
-    return {
-        (row["scope"], row["id"]): row for row in await h.call("rule_list", {})
-    }
+    return {(row["scope"], row["id"]): row for row in await h.call("rule_list", {})}
 
 
 async def test_disable_by_name_suppresses_future_only_and_enable_restores(
@@ -270,9 +268,7 @@ async def test_force_reinstall_keeps_the_name_disable(odda_session) -> None:
             "rule_install", {"name": "swap", "source": _RULE_ALT, "force": True}
         )
 
-        assert (await _rows(h))[("project", "user.ticket06-alt")][
-            "state"
-        ] == "disabled"
+        assert (await _rows(h))[("project", "user.ticket06-alt")]["state"] == "disabled"
         flow = await _drive(h, fx, "t33-force")
         await _assert_no_finding(h, flow["id"], "user.ticket06-alt")
 
