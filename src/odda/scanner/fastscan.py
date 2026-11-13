@@ -57,6 +57,7 @@ those on the stdlib path outright.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from typing import TYPE_CHECKING, NamedTuple
@@ -90,6 +91,26 @@ _CATEGORY = {
     sre_constants.CATEGORY_WORD: r"\w",
     sre_constants.CATEGORY_NOT_WORD: r"\W",
 }
+# Anchors for the straight (non-reversed) prefilter emission. Emitted
+# faithfully: zero-width constructs carry no widening risk of their own —
+# the engine's prefilter mode approximates what it cannot honor exactly.
+_AT_STRAIGHT = {
+    sre_constants.AT_BEGINNING: "^",
+    sre_constants.AT_BEGINNING_STRING: r"\A",
+    sre_constants.AT_END: "$",
+    sre_constants.AT_END_STRING: r"\z",
+    sre_constants.AT_BOUNDARY: r"\b",
+    sre_constants.AT_NON_BOUNDARY: r"\B",
+}
+
+# Bounded repeats whose upper bound reaches this ceiling are widened to
+# unbounded form in the prefilter source only (see _prefilter_repeat):
+# vectorscan's bounded-repeat compilation explodes superlinearly with the
+# bound (the S3-rule NoSuchBucket shape, `.{0,500}?` under (?s), costs
+# ~42 s to compile for one expression) while an unbounded quantifier
+# compiles in microseconds.
+_PREFILTER_REPEAT_CEILING = 64
+
 _UNI_CLASS_CATEGORIES = frozenset(_CATEGORY)
 # Characters where the engine's simple case folding differs from Python's
 # full folding (U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE, U+0131 DOTLESS
@@ -234,6 +255,170 @@ def _reversed_source(tree) -> str:
     return "".join(source for source, _ in reversed(items))
 
 
+def _prefilter_repeat(av) -> str:
+    """Straight source for one repeat node, wide bounds widened.
+
+    A bounded repeat ``X{mn,mx}`` with ``mx`` at or above
+    :data:`_PREFILTER_REPEAT_CEILING` becomes the unbounded ``X{mn,}``:
+    every match of the original is a match of the widened form, so the
+    approximation can only over-report — the same license
+    ``HS_FLAG_PREFILTER`` already grants, and over-reports cost only a
+    stdlib confirmation that was already the design's answer to them
+    (ADR-0037). Laziness and possessiveness change backtracking, not
+    the match language, so every flavor emits greedy plain.
+    """
+    mn, mx, sub = av
+    body, atom = _prefilter_single(sub)
+    if not atom:
+        body = f"(?:{body})"
+    if mx == sre_constants.MAXREPEAT or mx >= _PREFILTER_REPEAT_CEILING:
+        if mn == 0:
+            return body + "*"
+        if mn == 1:
+            return body + "+"
+        return f"{body}{{{mn},}}"
+    if mn == mx:
+        return f"{body}{{{mn}}}"
+    if (mn, mx) == (0, 1):
+        return body + "?"
+    return f"{body}{{{mn},{mx}}}"
+
+
+def _scoped_flags_source(add: int, del_: int) -> str:
+    """Emit the letters of a scoped flag group, ``ism``-shaped only."""
+    letters = {
+        re.IGNORECASE: "i",
+        re.DOTALL: "s",
+        re.MULTILINE: "m",
+    }
+    parts = []
+    for flags, joiner in ((add, ""), (del_, "-")):
+        bits = "".join(letter for bit, letter in letters.items() if flags & bit)
+        rest = flags & ~(re.IGNORECASE | re.DOTALL | re.MULTILINE)
+        if rest:
+            raise _UnsupportedError(f"scoped flag {rest}")
+        if bits:
+            parts.append(joiner + bits)
+    return "".join(parts)
+
+
+def _prefilter_atom(node) -> tuple[str, bool]:
+    """Straight source for the atom shapes: literals, classes, backrefs."""
+    op, av = node
+    if op is sre_constants.LITERAL:
+        return _escape(chr(av)), True
+    if op is sre_constants.IN:
+        return _class_source(av), True
+    if op is sre_constants.ANY:
+        return ".", True
+    if op is sre_constants.NOT_LITERAL:
+        return f"[^{_escape(chr(av), in_class=True)}]", True
+    return f"\\{av}", True  # GROUPREF: numbering survives faithful emission
+
+
+def _prefilter_grouping(node) -> tuple[str, bool]:
+    """Straight source for groups and lookarounds.
+
+    Atomic groups emit their plain body: atomicity restricts
+    backtracking, not the match language, so the plain form is a
+    superset. Lookarounds emit faithfully — a wrong arrow is not a
+    widening but a different language.
+    """
+    op, av = node
+    if op is sre_constants.SUBPATTERN:
+        group, add_flags, del_flags, sub = av
+        body = _prefilter_source(sub)
+        if add_flags or del_flags:
+            letters = _scoped_flags_source(add_flags, del_flags)
+            return f"(?{letters}:{body})", True
+        if group is not None:
+            # Numbered groups stay capturing: backreferences may follow.
+            return f"({body})", True
+        return f"(?:{body})", True
+    if op is sre_constants.ATOMIC_GROUP:
+        return f"(?:{_prefilter_source(av)})", True
+    direction, sub = av  # ASSERT / ASSERT_NOT
+    kind = "=" if op is sre_constants.ASSERT else "!"
+    arrow = "<" if direction < 0 else ""
+    return f"(?{arrow}{kind}{_prefilter_source(sub)})", True
+
+
+def _prefilter_item(node) -> tuple[str, bool]:
+    """Straight source for one sequence item (faithful except widening).
+
+    Returns the source and whether it is a single atom (safe to quantify
+    without grouping). Anything the emitter cannot serialize faithfully
+    raises :class:`_UnsupportedError` and the caller keeps the pattern's
+    raw source instead — never a silent mis-approximation.
+    """
+    op, av = node
+    if op in (
+        sre_constants.LITERAL,
+        sre_constants.IN,
+        sre_constants.ANY,
+        sre_constants.NOT_LITERAL,
+        sre_constants.GROUPREF,
+    ):
+        return _prefilter_atom(node)
+    if op is sre_constants.AT:
+        token = _AT_STRAIGHT.get(av)
+        if token is None:
+            raise _UnsupportedError(f"anchor {av}")
+        return token, True
+    if op in (
+        sre_constants.SUBPATTERN,
+        sre_constants.ATOMIC_GROUP,
+        sre_constants.ASSERT,
+        sre_constants.ASSERT_NOT,
+    ):
+        return _prefilter_grouping(node)
+    if op is sre_constants.BRANCH:
+        alts = "|".join(_prefilter_source(branch) for branch in av[1])
+        return f"(?:{alts})", True
+    if op in (
+        sre_constants.MAX_REPEAT,
+        sre_constants.MIN_REPEAT,
+        sre_constants.POSSESSIVE_REPEAT,
+    ):
+        return _prefilter_repeat(av), True
+    raise _UnsupportedError(f"construct {op}")
+
+
+def _prefilter_single(tree) -> tuple[str, bool]:
+    """Straight source of a whole subexpression treated as one unit."""
+    items = list(tree)
+    if len(items) == 1:
+        return _prefilter_item(items[0])
+    return _prefilter_source(items), False
+
+
+def _prefilter_source(tree) -> str:
+    """Straight source for a whole parsed tree."""
+    return "".join(_prefilter_item(node)[0] for node in tree)
+
+
+def _has_wide_repeat(tree) -> bool:
+    """Whether any bounded repeat's upper bound hits the widening ceiling."""
+    found = False
+
+    def check(node) -> None:
+        nonlocal found
+        op, av = node
+        if (
+            op
+            in (
+                sre_constants.MAX_REPEAT,
+                sre_constants.MIN_REPEAT,
+                sre_constants.POSSESSIVE_REPEAT,
+            )
+            and av[1] >= _PREFILTER_REPEAT_CEILING
+        ):
+            found = True
+
+    _walk_tree(tree, check)
+    return found
+
+
 def _walk_tree(tree, fn) -> None:
     """Visit every node of a parsed tree, parents before children."""
     for node in tree:
@@ -244,8 +429,14 @@ def _walk_tree(tree, fn) -> None:
         elif op is sre_constants.BRANCH:
             for branch in av[1]:
                 _walk_tree(branch, fn)
-        elif op in (sre_constants.MAX_REPEAT, sre_constants.MIN_REPEAT):
+        elif op in (
+            sre_constants.MAX_REPEAT,
+            sre_constants.MIN_REPEAT,
+            sre_constants.POSSESSIVE_REPEAT,
+        ):
             _walk_tree(av[2], fn)
+        elif op is sre_constants.ATOMIC_GROUP:
+            _walk_tree(av, fn)
 
 
 def _inline_flags(tree) -> int:
@@ -322,11 +513,22 @@ def _reverse_expression(pattern: re.Pattern) -> tuple[str, int, bool, bool]:
 def _prefilter_expression(pattern: re.Pattern) -> tuple[str, int]:
     """Build the approximate-prefilter compile for one pattern.
 
-    Returns the original source (global inline flags folded away — the
-    engine rejects bare ``(?u)``) and the engine flags.
+    The source is the original pattern (global inline flags folded away —
+    the engine rejects bare ``(?u)``), except when a bounded repeat's
+    upper bound reaches :data:`_PREFILTER_REPEAT_CEILING`: those compile
+    superlinearly in vectorscan (the S3 NoSuchBucket shape costs ~42 s
+    per expression, paid twice — once at the individual probe, once in
+    the batch), so the tree is re-emitted with the wide repeats widened
+    to unbounded form, a strict superset the prefilter license covers.
+    Constructs the straight emitter cannot serialize faithfully fall
+    back to the raw source — today's behavior — never a guess.
     """
     flags = pattern.flags
     source = _RE_LEADING_GLOBAL_FLAGS.sub("", pattern.pattern, count=1)
+    tree = sre_parse(pattern.pattern, flags)
+    if _has_wide_repeat(tree):
+        with contextlib.suppress(_UnsupportedError):
+            source = _prefilter_source(tree)
     hs_flags = hyperscan.HS_FLAG_UTF8 | hyperscan.HS_FLAG_PREFILTER
     if not flags & re.ASCII:
         hs_flags |= hyperscan.HS_FLAG_UCP
