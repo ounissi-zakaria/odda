@@ -100,12 +100,12 @@ async def test_tokens_are_project_lifetime_and_dirs_inert(
 
             # The new browser's scope is fresh: the old session's
             # userscript did not leak into it.
-            fresh = await h2.call_json("userscript_list", {"browser_id": t2})
+            fresh = await h2.call("userscript_list", {"browser_id": t2})
             assert all(s["name"] != "session-one" for s in fresh)
 
             # The past session's dir is still on disk (never-clean
             # policy) but inert — addressable only by its own token.
-            old = await h2.call_json("userscript_list", {"browser_id": t1})
+            old = await h2.call("userscript_list", {"browser_id": t1})
             assert [s["name"] for s in old] == ["session-one"]
             assert (
                 data_dir / "browsers" / t1 / "userscripts" / "session-one" / "script.js"

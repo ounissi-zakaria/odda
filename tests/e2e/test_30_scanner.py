@@ -121,7 +121,7 @@ async def test_request_send_flow_is_scanned(odda_session) -> None:
                 "\r\n"
             ).encode(),
         )
-        rec = await h.call_json("request_send", {"name": "scan-reqsend", "timeout": 10})
+        rec = await h.call("request_send", {"name": "scan-reqsend", "timeout": 10})
         assert isinstance(rec, dict)
 
         finding = await h.wait_finding(rec["id"])
@@ -1228,7 +1228,7 @@ async def test_rule_install_from_file_and_rule_list_rows(odda_session) -> None:
         ]
         assert "disclosure.stack-trace" in _slot_path(h, "disclosure").read_text()
 
-        rows = await h.call_json("rule_list", {})
+        rows = await h.call("rule_list", {})
         assert rows == [
             {
                 "slot": "disclosure",
@@ -1385,7 +1385,7 @@ async def test_force_overwrite_swaps_the_slot_live(odda_session) -> None:
         assert r["rules"] == ["user.ticket06-alt"]
         assert "user.ticket06-alt" in _slot_path(h, "swap").read_text()
 
-        rows = await h.call_json("rule_list", {})
+        rows = await h.call("rule_list", {})
         ids = {row["id"] for row in rows}
         assert "user.ticket06-alt" in ids
         assert "user.ticket06-canary" not in ids
@@ -1485,7 +1485,7 @@ async def test_empty_boot_scans_nothing_and_captures_fine(odda_session) -> None:
     appears, and rule_list shows the empty ruleset (ADR-0036's
     deliberate empty boot)."""
     async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
-        assert await h.call_json("rule_list", {}) == []
+        assert await h.call("rule_list", {}) == []
 
         proxy = await h.call("proxy_url", {})
         marker = "t16-empty-clean"
@@ -1525,7 +1525,7 @@ async def test_empty_boot_scans_nothing_and_captures_fine(odda_session) -> None:
         assert h.findings_for(clean["id"]) == []
         assert h.findings_for(match["id"]) == []
         assert h.findings_for(err["id"]) == []
-        assert await h.call_json("rule_list", {}) == []
+        assert await h.call("rule_list", {}) == []
 
 
 def test_package_ships_no_rules_or_datasets() -> None:
@@ -1566,7 +1566,7 @@ async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
     broken.write_text(_RULE_BROKEN)
 
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
-        rows = await h.call_json("rule_list", {})
+        rows = await h.call("rule_list", {})
         failed = [row for row in rows if row["state"] == "failed"]
         assert len(failed) == 1
         assert failed[0]["slot"] == "broken"
@@ -1670,7 +1670,7 @@ async def test_request_send_probe_is_invisible_to_request_rules(
                 "\r\n"
             ).encode(),
         )
-        rec = await h.call_json("request_send", {"name": "t03-probe", "timeout": 10})
+        rec = await h.call("request_send", {"name": "t03-probe", "timeout": 10})
         assert rec["browser_id"] is None
 
         await _drained_silent(h, fx, "t03-probe-settle", rec["id"])
@@ -2305,7 +2305,7 @@ async def test_mid_session_rule_install_keeps_loop_live(
         await asyncio.gather(hb, return_exceptions=True)
 
         assert installed["rules"] == ["js.outdated-library"]
-        listing = await h.call_json("rule_list", {})
+        listing = await h.call("rule_list", {})
         assert any(row["id"] == "js.outdated-library" for row in listing)
 
         gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
@@ -2720,7 +2720,7 @@ async def test_rule_slots_are_project_scoped_with_a_shared_global_tree(
         (curated / "rule.py").write_text(_RULE_ALT, encoding="utf-8")
 
         async with odda_subprocess_session(cwd=project_b) as b:
-            rows = await b.call_json("rule_list", {})
+            rows = await b.call("rule_list", {})
             by_id = {row["id"]: row for row in rows}
             # A's project install never reached B
             assert "user.ticket06-canary" not in by_id

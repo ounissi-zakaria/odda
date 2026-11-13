@@ -23,18 +23,18 @@ async def test_browser_list_rows_and_closing(odda_session) -> None:
     this session's open browsers carry tab_count; a closed browser persists
     as a closed row (no tab_count — its Chrome is gone, not its record)."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
-        assert await h.call_json("browser_list", {}) == []
+        assert await h.call("browser_list", {}) == []
 
         bid, tid = await h.open_browser(f"{fx.base}/")
         assert tid == 1
 
-        r = await h.call_json("browser_list", {})
+        r = await h.call("browser_list", {})
         assert r == [{"browser_id": bid, "state": "open", "tab_count": 1}]
 
         bid2, tid2 = await h.open_browser()
         assert tid2 == 1
         assert bid2 != bid
-        r = await h.call_json("browser_list", {})
+        r = await h.call("browser_list", {})
         assert r == _by_id(
             [
                 {"browser_id": bid, "state": "open", "tab_count": 1},
@@ -43,7 +43,7 @@ async def test_browser_list_rows_and_closing(odda_session) -> None:
         )
 
         await h.call("browser_close", {"browser_id": bid2})
-        assert await h.call_json("browser_list", {}) == _by_id(
+        assert await h.call("browser_list", {}) == _by_id(
             [
                 {"browser_id": bid, "state": "open", "tab_count": 1},
                 {"browser_id": bid2, "state": "closed"},
@@ -51,7 +51,7 @@ async def test_browser_list_rows_and_closing(odda_session) -> None:
         )
 
         await h.call("browser_close", {"browser_id": bid})
-        assert await h.call_json("browser_list", {}) == _by_id(
+        assert await h.call("browser_list", {}) == _by_id(
             [
                 {"browser_id": bid, "state": "closed"},
                 {"browser_id": bid2, "state": "closed"},
@@ -164,7 +164,7 @@ async def test_event_listeners_lists_window_and_document_types(odda_session) -> 
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         bid, tid = await h.open_browser(f"{fx.base}/")
 
-        r = await h.call_json("event_listeners", {"browser_id": bid, "tab_id": tid})
+        r = await h.call("event_listeners", {"browser_id": bid, "tab_id": tid})
         types = sorted({l["type"] for l in r})
         # Built-in default userscripts still ship in every browser and
         # may register listeners, so containment (not the exact set) is
@@ -250,21 +250,21 @@ async def test_reopen_record_restores_profile(odda_session) -> None:
         bid, tid = await h.open_browser(f"{fx.base}/")
         await h.eval(bid, tid, "localStorage.setItem('persisted', 'yes') || 'set'")
         await h.call("tabs_open", {"browser_id": bid, "url": f"{fx.base}/"})
-        rows = await h.call_json("tabs_list", {"browser_id": bid})
+        rows = await h.call("tabs_list", {"browser_id": bid})
         assert len(rows[0]["tabs"]) == 2
 
         # The record is the directory: profile/ exists from first launch.
         assert (h.data_dir / "browsers" / bid / "profile").is_dir()
 
         await h.call("browser_close", {"browser_id": bid})
-        assert await h.call_json("browser_list", {}) == [
+        assert await h.call("browser_list", {}) == [
             {"browser_id": bid, "state": "closed"}
         ]
 
         r = await h.call("browser_open", {"browser_id": bid, "headless": True})
         assert r["browser_id"] == bid
         assert r["tab_id"] == 1
-        assert await h.call_json("browser_list", {}) == [
+        assert await h.call("browser_list", {}) == [
             {"browser_id": bid, "state": "open", "tab_count": 1}
         ]
 
@@ -309,7 +309,7 @@ async def test_stale_lock_reads_closed(odda_session) -> None:
         # hostname here.
         (record / "profile" / "SingletonLock").symlink_to(f"{platform.node()}-{dead}")
 
-        assert await h.call_json("browser_list", {}) == [
+        assert await h.call("browser_list", {}) == [
             {"browser_id": "qwert", "state": "closed"}
         ]
         r = await h.call("browser_open", {"browser_id": "qwert", "headless": True})
@@ -325,7 +325,7 @@ async def test_legacy_dirs_are_not_records(odda_session) -> None:
         (browsers / "1").mkdir(parents=True)
         (browsers / "abcde" / "userscripts-extension").mkdir(parents=True)
 
-        assert await h.call_json("browser_list", {}) == []
+        assert await h.call("browser_list", {}) == []
         err = await h.call_error("browser_open", {"browser_id": "abcde"})
         assert err == "Browser abcde not found."
 
@@ -359,18 +359,18 @@ async def test_open_in_another_session(odda_session) -> None:
     async with odda_session() as h1, odda_session() as h2:
         bid, _tid = await h1.open_browser()
 
-        assert await h2.call_json("browser_list", {}) == [
+        assert await h2.call("browser_list", {}) == [
             {"browser_id": bid, "state": "open in another session"}
         ]
         err = await h2.call_error("browser_open", {"browser_id": bid})
         assert err == f"Browser {bid} is open in another session."
 
         await h1.call("browser_close", {"browser_id": bid})
-        assert await h2.call_json("browser_list", {}) == [
+        assert await h2.call("browser_list", {}) == [
             {"browser_id": bid, "state": "closed"}
         ]
         r = await h2.call("browser_open", {"browser_id": bid, "headless": True})
         assert r["browser_id"] == bid
-        assert await h2.call_json("browser_list", {}) == [
+        assert await h2.call("browser_list", {}) == [
             {"browser_id": bid, "state": "open", "tab_count": 1}
         ]

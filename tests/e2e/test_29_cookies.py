@@ -42,9 +42,7 @@ async def test_cookies_list_sees_httponly_that_js_cannot(odda_session) -> None:
         )
         await h.navigate(bid, tid, url)
 
-        jar = {
-            c["name"]: c for c in await h.call_json("cookies_list", {"browser_id": bid})
-        }
+        jar = {c["name"]: c for c in await h.call("cookies_list", {"browser_id": bid})}
         assert jar["odda_ht"]["value"] == "1"
         assert jar["odda_ht"]["httpOnly"] is True
         assert jar["odda_ht"]["domain"] == "127.0.0.1"
@@ -76,7 +74,7 @@ async def test_cookies_clear_name_filter_spares_siblings(odda_session) -> None:
 
         ours = {
             c["name"]
-            for c in await h.call_json("cookies_list", {"browser_id": bid})
+            for c in await h.call("cookies_list", {"browser_id": bid})
             if c["domain"] == "127.0.0.1"
         }
         assert ours == {"odda_a", "odda_c"}
@@ -101,7 +99,7 @@ async def test_cookies_clear_wipes_whole_jar(odda_session) -> None:
         # The whole jar was wiped; assert on our origin — the base
         # profile on a dev machine can carry (or Chrome can re-set)
         # third-party cookies that are not ours to assert on.
-        jar = await h.call_json("cookies_list", {"browser_id": bid})
+        jar = await h.call("cookies_list", {"browser_id": bid})
         assert not any(c["domain"] == "127.0.0.1" for c in jar)
 
 
@@ -129,9 +127,7 @@ async def test_cookies_set_plants_httponly_and_sends_on_wire(odda_session) -> No
         )
         assert r == {"set": 2}
 
-        jar = {
-            c["name"]: c for c in await h.call_json("cookies_list", {"browser_id": bid})
-        }
+        jar = {c["name"]: c for c in await h.call("cookies_list", {"browser_id": bid})}
         assert jar["odda_sess"]["value"] == "abc"
         assert jar["odda_sess"]["httpOnly"] is True
         assert jar["odda_pref"]["value"] == "dark"

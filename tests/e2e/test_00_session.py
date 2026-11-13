@@ -25,12 +25,12 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
         proxy = await h.call("proxy_url", {})
         assert str(proxy).startswith("http://127.0.0.1:")
 
-        assert await h.call_json("browser_list", {}) == []
+        assert await h.call("browser_list", {}) == []
 
         bid, tid = await h.open_browser(f"{fx.base}/")
         assert tid == 1
 
-        r = await h.call_json("browser_list", {})
+        r = await h.call("browser_list", {})
         assert r == [{"browser_id": bid, "state": "open", "tab_count": 1}]
 
         title = await h.eval(bid, tid, "document.title")
@@ -43,7 +43,7 @@ async def test_session_boots_and_drives_real_chrome(odda_session) -> None:
         assert str(shot).endswith(".jpeg")
 
         await h.call("browser_close", {"browser_id": bid})
-        assert await h.call_json("browser_list", {}) == [
+        assert await h.call("browser_list", {}) == [
             {"browser_id": bid, "state": "closed"}
         ]
 

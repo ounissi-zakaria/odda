@@ -36,18 +36,21 @@ The CLI stays thin; automation logic belongs in library modules (`browser.py`,
 
 ## Tool results and errors
 
-Tool results are text-first: `dict` returns pass through (structuredContent is the
-dict itself, which omp-style clients dedupe against the text block); the
-str/list/union tools pass `structured_output=False`, keep their natural
-annotations, and carry no structured channel — the SDK's `{"result": ...}` wrap
-would be re-appended by omp's client and double the payload. Str tools return raw
-text; list/union tools wrap in `mcp.py:_json_result` (one JSON document — the
-SDK's per-item list rendering loses array-ness). `screenshot` is the one
-exception: its default result is a native `CallToolResult` — the path text
-plus the inline JPEG image block (ADR 0027), plus a CSV legend text block
-between them when `annotate=true` (ADR 0029). See ADR 0023. Anticipated errors
-(`BrowserOperationError`, `ToolParamError`, `ValueError`) convert to `ToolError`
-with the message verbatim via `@odda_tool`; everything else stays an SDK crash.
+Tool results are natural: every tool returns its declared type and the SDK
+derives the structured channel from the annotation — `dict` returns pass
+through as themselves, str/list/union values arrive wrapped as
+`{"result": ...}`. The harness delivers the payload once by deduping the
+structured channel against the text blocks; omp ≥18.20.0 does (raw-string,
+`{"result"}`-unwrap, and per-element list matching — binary-verified
+2026-11-13), so no server-side workaround exists anymore — the
+`structured_output=False`/`_json_result`
+flattening is gone. `screenshot` is the one exception: it still passes
+`structured_output=False` and its default result is a native
+`CallToolResult` — the path text plus the inline JPEG image block
+(ADR 0027), plus a CSV legend text block between them when `annotate=true`
+(ADR 0029). Anticipated errors (`BrowserOperationError`, `ToolParamError`,
+`ValueError`) convert to `ToolError` with the message verbatim via
+`@odda_tool`; everything else stays an SDK crash.
 
 ## Release consistency
 

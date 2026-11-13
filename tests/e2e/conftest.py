@@ -315,10 +315,11 @@ class Harness:
     """One MCP session + one data dir + one config home; the assertion conventions every test shares.
 
     ``call`` asserts the tool *succeeded* and returns the natural value:
-    dict results pass through (structuredContent); unstructured tools
-    (eval, wait_for as ``-> Any``; the 13 text-first tools via
-    ``structured_output=False`` — ADR 0023) come back as their text,
-    which ``call_json`` parses. ``call_error``
+    dict results pass through, str/list/union unwrap from the SDK's
+    ``{"result": X}`` wrap (natural returns); text-only
+    tools (eval, wait_for as ``-> Any``; screenshot — ADR 0027) come
+    back as their text.
+    ``call_error``
     asserts the call *failed* and returns the error text — the #03
     contract: odda messages verbatim after the SDK's ``Error executing
     tool <name>: `` prefix, param names never ``--flag`` spellings.
@@ -330,22 +331,24 @@ class Harness:
         self.config_home = config_home
 
     async def call(self, name: str, args: dict | None = None) -> object:
-        """Call a tool, assert success, return the natural value (dict via
-        structuredContent; text-first tools as their text — use call_json)."""
+        """Call a tool, assert success, return the natural value.
+
+        Natural-return tools ride the SDK's structured
+        channel: dict results pass through as themselves, str/list/union
+        unwrap from the ``{"result": X}`` wrap. Text-only tools
+        (eval/wait_for as ``-> Any``; screenshot — ADR 0027) return
+        their first text block.
+        """
         r = await self.client.call_tool(name, args or {})
         assert not r.is_error, f"{name} errored: {[c.text for c in r.content]}"
         sc = r.structured_content
         if sc is None and r.content:
-            # Unstructured tools (eval/wait_for as -> Any; the 13
-            # structured_output=False tools — ADR 0023) are text-only.
+            # Text-only tools (eval/wait_for as -> Any; screenshot —
+            # ADR 0027): no structured channel.
             return r.content[0].text
+        if isinstance(sc, dict) and list(sc) == ["result"]:
+            return sc["result"]
         return sc
-
-    async def call_json(self, name: str, args: dict | None = None) -> object:
-        """Call a text-first (unstructured) tool and parse its JSON text."""
-        text = await self.call(name, args)
-        assert isinstance(text, str), f"{name}: expected JSON text, got {type(text)}"
-        return json.loads(text)
 
     async def call_error(self, name: str, args: dict | None = None) -> str:
         """Call a tool, assert failure, return the error text (SDK prefix stripped)."""
@@ -395,7 +398,7 @@ class Harness:
         )
 
     async def page_snapshot(self, bid: str, tid: int) -> str:
-        """page_snapshot is text-first (ADR 0023) → the tree arrives as text."""
+        """page_snapshot returns the tree as its natural str value."""
         return await self.call("page_snapshot", {"browser_id": bid, "tab_id": tid})
 
     def write_request(self, name: str, raw: bytes) -> Path:

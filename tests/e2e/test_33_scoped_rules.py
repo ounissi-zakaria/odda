@@ -102,7 +102,7 @@ async def _assert_no_finding(h, flow_id: str, rule_id: str) -> None:
 
 async def _rows(h) -> dict[tuple[str, str], dict]:
     return {
-        (row["scope"], row["id"]): row for row in await h.call_json("rule_list", {})
+        (row["scope"], row["id"]): row for row in await h.call("rule_list", {})
     }
 
 
@@ -314,7 +314,7 @@ async def test_stale_disable_entry_renders_target_missing_and_clears(
 
     shutil.rmtree(config_home / "rules" / "gone")
     async with odda_session() as h:
-        assert await h.call_json("rule_list", {}) == [
+        assert await h.call("rule_list", {}) == [
             {
                 "slot": "gone",
                 "id": None,
@@ -326,7 +326,7 @@ async def test_stale_disable_entry_renders_target_missing_and_clears(
         ]
         r = await h.call("rule_enable", {"name": "gone"})
         assert r == {"enabled": True, "kind": "name", "value": "gone", "rules": []}
-        assert await h.call_json("rule_list", {}) == []
+        assert await h.call("rule_list", {}) == []
 
 
 async def test_cross_scope_id_collision_rejected_at_install(

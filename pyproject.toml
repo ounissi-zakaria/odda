@@ -19,7 +19,7 @@ dependencies = [
     "patchright==1.62.1",
     "pillow>=11.0.0",
     "h2>=4.0.0",
-    "mcp==2.1.1",
+    "mcp==2.3.0",
     "hyperscan==0.9.1",
 ]
 
