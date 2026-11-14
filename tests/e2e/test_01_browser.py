@@ -13,7 +13,11 @@ import base64
 import json
 import platform
 import re
+import signal
 import socket
+import subprocess
+import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -101,6 +105,64 @@ async def test_open_runs_on_a_virtual_display(odda_session) -> None:
             socket.create_connection(("127.0.0.1", rfb_port), timeout=1)
         with pytest.raises(OSError):
             socket.create_connection(("127.0.0.1", novnc_port), timeout=1)
+
+
+@pytest.mark.parametrize("sig", [signal.SIGKILL, signal.SIGTERM], ids=str)
+def test_hard_killed_session_cannot_leak_its_display(sig) -> None:
+    """A session killed without teardown cannot leak its display
+    (ADR-0040): SIGKILL allows no ``finally`` at all, and Python's
+    default SIGTERM handler exits without running one — yet both kills
+    are real harness session-close paths. The display processes must
+    die and the lock must go either way; SIGTERM is the user-reported
+    scenario ("closed the session but the noVNC URL still works").
+
+    Regression: a hard-killed MCP process left Xvnc + websockify
+    orphaned to init, still serving noVNC for a session that no longer
+    existed, and its ``/tmp/.X<n>-lock`` permanently shrank the display
+    pool. The kernel parent-death signal does the teardown instead; the
+    same SIGTERM also makes Xvnc clean up its own lock.
+    """
+    child = (
+        "import asyncio, json, os, signal\n"
+        "from odda.vdisplay import start_virtual_display\n"
+        "d = asyncio.run(start_virtual_display(640, 480))\n"
+        "print(json.dumps({'display': d.display, 'rfb': d.rfb_port,"
+        " 'http': d.http_port}), flush=True)\n"
+        f"os.kill(os.getpid(), {int(sig)})\n"
+    )
+    proc = subprocess.run(  # noqa: S603 - pinned interpreter, local source
+        [sys.executable, "-c", child],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,  # exit status asserted below: the deliberate self-kill
+    )
+    assert proc.returncode == -int(sig), proc.stderr[-500:]
+    info = json.loads(proc.stdout.strip().splitlines()[-1])
+    display_num = info["display"].lstrip(":")
+    rfb, http = int(info["rfb"]), int(info["http"])
+    lock = Path(f"/tmp/.X{display_num}-lock")  # noqa: S108 - X11 lock
+
+    # Xvnc tears down in steps (listeners close, then the lock goes);
+    # wait for the whole teardown, not just the first step.
+    def display_down() -> bool:
+        return not _port_open(rfb) and not _port_open(http) and not lock.exists()
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not display_down():
+        time.sleep(0.25)
+    assert not _port_open(rfb), "Xvnc survived its killed parent"
+    assert not _port_open(http), "websockify survived its killed parent"
+    assert not lock.exists(), "SIGTERMed Xvnc left its lock behind"
+
+
+def _port_open(port: int) -> bool:
+    """True while the port still accepts connections."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
 
 
 async def test_eval_runs_js_and_renders_values(odda_session) -> None:

@@ -52,9 +52,21 @@ reported endpoint *is* the browser, so no in-page marker is needed.
   and drive any open browser, cookies included. Remote access is
   SSH-tunnel-first; exposing an interface is the operator's conscious
   choice.
-- A SIGKILLed MCP process leaks its display processes (idle, cheap,
-  visible via `/tmp/.X<n>-lock`); every clean path tears them down.
-  Parent-death wiring is deferred until it bites.
+- Display processes carry Linux `PR_SET_PDEATHSIG`: when the MCP
+  process dies (SIGTERM included — Python's default handler exits
+  without running the lifespan teardown; SIGKILL allows no teardown at
+  all), the kernel SIGTERMs each display child, which also makes Xvnc
+  remove its `/tmp/.X<n>-lock`. Every clean path still tears down
+  explicitly first, and remains the only teardown on non-Linux. The
+  fork→prctl race is guarded in the child; a websockify connection
+  child (forked per client, PDEATHSIG not inherited across fork) dies
+  when its sockets close. Numbers locked by a dead owner are reclaimed
+  on the next open, so a pre-fix leak or an uncleanly killed Xvnc does
+  not permanently shrink the display pool. Reclamation is
+  probe-then-unlink, not atomic: concurrent odda processes racing for
+  one number resolve benignly (the loser's Xvnc fails to claim it and
+  the spawn loop retries another number), and a recycled owner pid can
+  keep a number blocked — conservative, safe direction.
 - The e2e suite needs no display management of its own: browsers under
   test create and destroy their displays; xdist workers are isolated
   per browser by construction.

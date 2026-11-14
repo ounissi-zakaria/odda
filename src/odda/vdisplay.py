@@ -19,6 +19,7 @@ can reach the bound address can view and drive any open browser.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import importlib.util
 import os
 import random
@@ -28,6 +29,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -71,6 +73,78 @@ class VirtualDisplayError(RuntimeError):
     """
 
 
+# Parent-death teardown (ADR-0040): the lifespan's ``finally`` only runs
+# when the MCP process exits gracefully — a harness closing a session
+# with SIGTERM (Python's default handler kills immediately, no
+# ``finally``) or SIGKILL leaves the display processes orphaned,
+# reparented to init, still serving. ``PR_SET_PDEATHSIG`` moves the
+# reap into the kernel: the child is SIGTERMed when its creating thread
+# dies. Every odda process spawns displays on its event-loop thread,
+# which lives exactly as long as the process, so thread-death and
+# process-death coincide here. Not inherited across ``fork`` — a
+# websockify connection child survives its server by design and dies
+# when its sockets close.
+if sys.platform == "linux":
+    # ``None``: the main executable's global symbol namespace, which
+    # carries ``prctl`` on both glibc and musl — hardcoding
+    # ``"libc.so.6"`` would crash this module's import on musl (Alpine).
+    _LIBC = ctypes.CDLL(None, use_errno=True)
+    _PR_SET_PDEATHSIG = 1
+
+    def _die_with_parent(parent_pid: int) -> None:
+        """preexec_fn: mark this child to SIGTERM with its parent."""
+        _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+        # fork→prctl race: if the parent died in between, getppid no
+        # longer reports it — deliver the signal ourselves.
+        if os.getppid() != parent_pid:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+else:  # pragma: no cover - prctl is Linux-only; clean-path teardown only
+
+    def _die_with_parent(parent_pid: int) -> None:
+        """No-op where prctl does not exist."""
+        del parent_pid
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether a process with this pid exists (stdlib signal-0 probe).
+
+    ``PermissionError`` means the pid is alive but owned by another
+    user — treated as alive (owned) rather than guessed about.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _reap_stale_display(display_num: int) -> bool:
+    """True when ``display_num`` is usable: free, or its owner is dead.
+
+    An Xvnc killed uncleanly (SIGKILL) cannot remove its lock file, so
+    the number looks taken forever. The lock holds the owner's pid:
+    dead owner means a leftover, safe to reclaim — lock and socket
+    unlinked, the number handed out again. A live owner (or an
+    unparsable lock) still claims the number.
+    """
+    lock = Path(f"/tmp/.X{display_num}-lock")  # noqa: S108 - X11 lock
+    x_socket = _X11_UNIX / f"X{display_num}"
+    if not lock.exists():
+        return not x_socket.exists()
+    try:
+        owner = int(lock.read_text().strip())
+    except (OSError, ValueError):
+        return False  # unreadable/foreign lock: stay out
+    if _process_alive(owner):
+        return False
+    lock.unlink(missing_ok=True)
+    x_socket.unlink(missing_ok=True)
+    return True
+
+
 class VirtualDisplay:
     """A running virtual display: one browser's ``Xvnc`` + ``websockify``.
 
@@ -81,7 +155,9 @@ class VirtualDisplay:
     bind address lives on (deliberately unauthenticated, ADR-0040).
     Started by :func:`start_virtual_display`; torn down by the owning
     BrowserInstance together with the browser (Chrome needs the display
-    until its own shutdown completes).
+    until its own shutdown completes), or by the kernel when the
+    spawning process dies (``PR_SET_PDEATHSIG``) — a session closed
+    with SIGTERM/SIGKILL cannot leak its displays.
     """
 
     def __init__(
@@ -214,6 +290,7 @@ def _spawn_xvnc(display_num: int, port: int, width: int, height: int):
         raise VirtualDisplayError(_XVNC_HINT)
     _X11_UNIX.mkdir(parents=True, exist_ok=True)  # absent on X-less hosts
     err_file = tempfile.TemporaryFile()  # noqa: SIM115 - outlives the child
+    parent_pid = os.getpid()
     process = subprocess.Popen(  # noqa: S603
         [
             xvnc,
@@ -243,6 +320,11 @@ def _spawn_xvnc(display_num: int, port: int, width: int, height: int):
         stderr=err_file,
         # Own session/group: teardown kills exactly this display.
         start_new_session=True,
+        # Kernel-enforced teardown when no userspace path can run.
+        # PLW1509 (fork-in-threads): the preexec body is one ctypes
+        # prctl call plus getppid/kill — no allocation beyond prctl's
+        # syscall, and subprocess has no first-class PDEATHSIG option.
+        preexec_fn=lambda: _die_with_parent(parent_pid),  # noqa: PLW1509
     )
     return process, err_file
 
@@ -254,6 +336,7 @@ def _spawn_websockify(bind: str, http_port: int, rfb_port: int):
     err_file = tempfile.TemporaryFile()  # noqa: SIM115 - outlives the child
     # Run via the running interpreter: PATH-independent, tied to the
     # environment odda itself is installed in.
+    parent_pid = os.getpid()
     process = subprocess.Popen(  # noqa: S603
         [
             sys.executable,
@@ -268,6 +351,8 @@ def _spawn_websockify(bind: str, http_port: int, rfb_port: int):
         stdout=subprocess.DEVNULL,
         stderr=err_file,
         start_new_session=True,
+        # See _spawn_xvnc: same PLW1509 rationale.
+        preexec_fn=lambda: _die_with_parent(parent_pid),  # noqa: PLW1509
     )
     return process, err_file
 
@@ -288,15 +373,24 @@ async def start_virtual_display(width: int, height: int) -> VirtualDisplay:
     until the X socket accepts, the RFB port speaks its banner, and the
     noVNC port accepts, and raises :class:`VirtualDisplayError` when a
     required binary is missing or a display never comes up.
+
+    Must run on the main thread: parent-death teardown keys on the
+    death of the spawning *thread* (PR_SET_PDEATHSIG semantics), and
+    only the main thread is guaranteed to outlive the process — a
+    display spawned on a worker thread would die mid-session when that
+    thread exits.
     """
+    if threading.current_thread() is not threading.main_thread():
+        raise VirtualDisplayError(
+            "virtual displays must be started on the main thread: their "
+            "parent-death teardown keys on the spawning thread, and only "
+            "the main thread is guaranteed to outlive the process"
+        )
     bind = bind_address()
     xvnc_err: Any = None
     ws_err: Any = None
     for display_num in random.sample(list(_DISPLAY_RANGE), _DISPLAY_TRIES):
-        if (
-            Path(f"/tmp/.X{display_num}-lock").exists()  # noqa: S108 - X11 lock
-            or (_X11_UNIX / f"X{display_num}").exists()
-        ):
+        if not _reap_stale_display(display_num):
             continue
         rfb_port = _free_port()
         http_port = _free_port()
