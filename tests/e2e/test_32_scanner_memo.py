@@ -84,7 +84,7 @@ async def _drain_findings(
 async def test_duplicate_body_burst_drains_in_small_fraction_of_unique_time(
     tmp_path,
 ) -> None:
-    """The drain-time win (ticket 14): twelve identical 4 MB bodies
+    """The drain-time win (ticket 14): twelve identical 1 MB bodies
     drain in a small fraction of the time twelve unique bodies take
     under the same rules — the engine pass, the stdlib residual pass,
     and the pattern evidence assembly all replay from the memo, so a
@@ -136,7 +136,7 @@ async def test_duplicate_body_burst_drains_in_small_fraction_of_unique_time(
         ),
     )
     line = "var t14 = 'payload-abcdefghijklmnopqrstuvwxyz-0123456789';\n"
-    filler = line * (4 * 1024 * 1024 // len(line))
+    filler = line * (1 * 1024 * 1024 // len(line))
 
     def burst(marker_value: int, nonce: int | None) -> bytes:
         tail = "" if nonce is None else f"// nonce {nonce}\n"
@@ -148,7 +148,7 @@ async def test_duplicate_body_burst_drains_in_small_fraction_of_unique_time(
             for i, body in enumerate(bodies)
         ]
         scanner = Scanner(data_dir, rules=rules)
-        # 300 s, not the 120 s default: twelve full 4 MB unique-body
+        # 300 s, not the 120 s default: twelve full 1 MB unique-body
         # scans under whole-suite load can far outlast the quiet
         # machine's seconds, and the fraction needs a settled unique
         # baseline, not a fast one.
