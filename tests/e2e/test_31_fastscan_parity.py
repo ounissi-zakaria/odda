@@ -336,6 +336,38 @@ def test_prefiltered_patterns_confirm_to_stdlib_finditer_spans() -> None:
             )
 
 
+def test_wide_bounded_repeats_widen_in_the_prefilter_source() -> None:
+    """Bounded repeats at or above the widening ceiling re-emit as their
+    unbounded superset in the prefilter source — vectorscan's
+    bounded-repeat compilation explodes superlinearly with the bound
+    (the S3 NoSuchBucket shape cost ~42 s per compile, paid twice per
+    build), and ``X{a,b}`` ⊆ ``X{a,}`` keeps the prefilter's
+    never-under-report guarantee. Everything else re-emits faithfully —
+    above all the lookaround direction: a wrong arrow is not a widening
+    but a different language. A construct the straight emitter cannot
+    serialize falls back to the raw source, never a guess."""
+    from odda.scanner.fastscan import _prefilter_expression
+
+    wide, _flags = _prefilter_expression(
+        re.compile(r"(?s)<Code>.{0,500}?<BucketName>[^<]{1,255}")
+    )
+    assert wide == r"<Code>.*<BucketName>[^<]+"
+
+    ahead, _flags = _prefilter_expression(re.compile(r"x(?=[a-z]{0,300})y{2,700}"))
+    assert ahead.startswith("x(?=")
+    assert "(?<=" not in ahead
+
+    # Under the ceiling the bound stays exact: the prefilter keeps its
+    # precision (fewer over-report confirmations to run).
+    exact, _flags = _prefilter_expression(re.compile(r"\bAKIA[0-9A-Z]{16}\b"))
+    assert exact == r"\bAKIA[0-9A-Z]{16}\b"
+
+    # A conditional the emitter cannot serialize: raw-source passthrough.
+    conditional = r"(a)(?(1)b|c)d{0,900}"
+    fallback, _flags = _prefilter_expression(re.compile(conditional))
+    assert fallback == conditional
+
+
 def test_unapproximable_patterns_are_refused_at_build() -> None:
     """Patterns the engine can neither scan exactly nor approximate —
     zero-width-matching constructs above all — are refused at build with
