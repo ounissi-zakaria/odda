@@ -131,7 +131,7 @@ split-on-trailing-comma = false
 "src/odda/flowstore.py" = ["PLW0603", "PLR0913"]
 "src/odda/request/*.py" = ["PLR0913", "PLR2004", "C901", "PLR0912", "PLR0915", "TC003"]
 "src/odda/wrap.py" = ["E501"]
-"src/odda/logpoint.py" = ["E501", "PLR0913"]
+"src/odda/logpoint.py" = ["E501", "PLR0913", "PLR0917"]
 # F401's odda_session flagging is the import-shadow pattern (each test's
 # fixture parameter redefines the imported factory; ruff can't model
 # pytest fixtures) — covered by the F811 ignore; modules use it in-body.

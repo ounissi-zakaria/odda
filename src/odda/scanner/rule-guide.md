@@ -340,9 +340,9 @@ class OutdatedSoftwareRule(Rule):
                 Evidence(
                     where="response_body",
                     offset=match.start(),
-                    detail=(
-                        f"{entry.software} {version} < {entry.vulnerable_below}"
-                    )[:200],
+                    detail=(f"{entry.software} {version} < {entry.vulnerable_below}")[
+                        :200
+                    ],
                 )
             )
             refs.extend(r for r in entry.refs if r not in refs)
