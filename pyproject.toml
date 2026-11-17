@@ -22,6 +22,8 @@ dependencies = [
     "mcp==2.3.0",
     "hyperscan==0.9.1",
     "websockify>=0.13",
+    "brotli>=1.2.0",
+    "zstandard>=0.25.0",
 ]
 
 [project.scripts]

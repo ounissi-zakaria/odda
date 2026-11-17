@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.14"
 
 [[package]]
@@ -926,6 +926,7 @@ name = "odda"
 version = "0.59.2"
 source = { editable = "." }
 dependencies = [
+    { name = "brotli" },
     { name = "h2" },
     { name = "hyperscan" },
     { name = "mcp" },
@@ -933,6 +934,7 @@ dependencies = [
     { name = "patchright" },
     { name = "pillow" },
     { name = "websockify" },
+    { name = "zstandard" },
 ]
 
 [package.optional-dependencies]
@@ -946,6 +948,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "brotli", specifier = ">=1.2.0" },
     { name = "h2", specifier = ">=4.0.0" },
     { name = "hypercorn", marker = "extra == 'dev'", specifier = ">=0.18.0" },
     { name = "hyperscan", specifier = "==0.9.1" },
@@ -958,6 +961,7 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.11" },
     { name = "websockify", specifier = ">=0.13" },
+    { name = "zstandard", specifier = ">=0.25.0" },
 ]
 provides-extras = ["dev"]
 
