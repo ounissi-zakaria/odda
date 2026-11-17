@@ -380,6 +380,7 @@ class FlowRecordWriter:
         total_duration_ms: float | None,
         keep_body: bool = False,
         browser_id: str | None = None,
+        ws: bool = False,
     ) -> dict[str, Any]:
         """Write response files and append the jsonl line for a completed flow.
 
@@ -403,6 +404,10 @@ class FlowRecordWriter:
                 browser's proxy credentials (ADR-0031); ``None`` for
                 non-browser traffic and records written before this
                 field existed.
+            ws: True when the 101 response upgraded to a WebSocket and
+                messages will append to the flow's ``ws.jsonl`` sidecar
+                (ADR-0041); the flag is omitted entirely for non-WS
+                flows so existing record shapes stay byte-identical.
 
         Returns:
             The flows.jsonl record that was appended.
@@ -431,6 +436,8 @@ class FlowRecordWriter:
             "body_file": body_file,
             "error": None,
         }
+        if ws:
+            record["ws"] = True
         self._append_jsonl(record)
         return record
 
@@ -472,6 +479,78 @@ class FlowRecordWriter:
         }
         self._append_jsonl(record)
         return record
+
+    def write_ws_message(
+        self,
+        flow_id: str,
+        *,
+        direction: str,
+        opcode: str,
+        content: str,
+        ts: float,
+    ) -> None:
+        """Append one WebSocket message record to the flow's ws.jsonl sidecar.
+
+        The sidecar is created lazily by this append and stays writable
+        until :meth:`write_ws_close` seals it — sockets stream messages
+        over their whole lifetime. Records are ``{"from", "opcode",
+        "content", "ts"}`` (ADR-0041): text frames carry raw UTF-8;
+        binary frames carry ``bytes.decode("latin-1")``, a bijective
+        byte↔code-point mapping so every byte round-trips via
+        ``content.encode("latin-1")`` and printable ASCII embedded in
+        binary payloads stays greppable like every other stored byte.
+
+        Args:
+            flow_id: The parent handshake flow's id (its directory).
+            direction: ``"client"`` or ``"server"``; stored as ``from``.
+            opcode: ``"text"`` or ``"binary"`` — how to read ``content``.
+            content: The decoded payload (already escaped per opcode).
+            ts: Proxy-side receipt timestamp.
+        """
+        self._append_sidecar(
+            flow_id,
+            {"from": direction, "opcode": opcode, "content": content, "ts": ts},
+        )
+
+    def write_ws_close(
+        self,
+        flow_id: str,
+        *,
+        code: int | None,
+        reason: str | None,
+        closed_by_client: bool,
+    ) -> None:
+        """Append the terminal close record and seal ws.jsonl read-only.
+
+        Written on ``websocket_end`` — clean or abnormal, so a finished
+        socket is always self-describing (``code`` ``None`` on the
+        abnormal shapes). Also runs for sockets that exchanged zero
+        messages: the close code is the signal. Sealing with the same
+        ``_READ_ONLY`` mode as every other stored file marks the
+        sidecar complete.
+
+        Args:
+            flow_id: The parent handshake flow's id (its directory).
+            code: WebSocket close code, ``None`` when none was exchanged.
+            reason: Close reason string, ``None`` when absent.
+            closed_by_client: ``True`` when the client sent the close.
+        """
+        self._append_sidecar(
+            flow_id,
+            {
+                "type": "close",
+                "code": code,
+                "reason": reason,
+                "closed_by_client": closed_by_client,
+            },
+        )
+        (self._flows_dir / flow_id / "ws.jsonl").chmod(_READ_ONLY)
+
+    def _append_sidecar(self, flow_id: str, record: dict[str, Any]) -> None:
+        """Append one JSON line to a flow's ws.jsonl sidecar."""
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        with (self._flows_dir / flow_id / "ws.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(line)
 
     def _append_jsonl(self, record: dict[str, Any]) -> None:
         """Append one record to flows.jsonl atomically (O_APPEND).
@@ -584,6 +663,11 @@ class FlowFileAddon:
         # flow.id -> (flow_id, browser_id token or None). The token comes
         # from the auth addon's proxyauth metadata stamp (ADR-0031).
         self._pending_flows: dict[int, tuple[str, str | None]] = {}
+        # flow.id -> odda flow_id for sockets still streaming: WebSocket
+        # message/end hooks fire after `response` popped the pending
+        # entry, so the handshake mapping moves here and lives until the
+        # socket closes (ADR-0041).
+        self._ws_flows: dict[int, str] = {}
 
     def request(self, flow) -> None:
         """Handle request - create flow dir and write the request + meta files.
@@ -626,6 +710,14 @@ class FlowFileAddon:
         response = flow.response
         request = flow.request
 
+        # A 101 upgrade means a socket is following: keep the handshake
+        # mapping alive for the message/end hooks and flag the index
+        # record so agents can discover the sidecar (ADR-0041). mitmproxy
+        # sets flow.websocket before this hook fires.
+        ws = flow.websocket is not None
+        if ws:
+            self._ws_flows[flow.id] = flow_id
+
         content_type = response.headers.get("Content-Type", "")
         body_bytes = response.content if should_store_body(content_type) else None
 
@@ -644,6 +736,61 @@ class FlowFileAddon:
             content_type=content_type,
             total_duration_ms=total_duration_ms,
             browser_id=browser_id,
+            ws=ws,
+        )
+
+    def websocket_message(self, flow) -> None:
+        """Handle one WebSocket message - append it to the flow's ws.jsonl.
+
+        The message arrives assembled (mitmproxy coalesces fragments and
+        negotiates permessage-deflate, so ``content`` is always the
+        decoded payload). Text frames store raw UTF-8; binary frames
+        store the latin-1 bijective escape (ADR-0041). No index line:
+        the message rides no flows.jsonl append, so the scanner never
+        sees it — WS capture is invisible to rules by design.
+
+        Args:
+            flow: The mitmproxy flow with ``flow.websocket`` populated.
+        """
+        flow_id = self._ws_flows.get(flow.id)
+        if flow_id is None:
+            return
+        message = flow.websocket.messages[-1]
+        if message.is_text:
+            opcode = "text"
+            content = message.content.decode("utf-8", "replace")
+        else:
+            opcode = "binary"
+            content = message.content.decode("latin-1")
+        self._writer.write_ws_message(
+            flow_id,
+            direction="client" if message.from_client else "server",
+            opcode=opcode,
+            content=content,
+            ts=message.timestamp,
+        )
+
+    def websocket_end(self, flow) -> None:
+        """Handle socket close - append the close record and seal ws.jsonl.
+
+        Fires on every socket ending, clean (1000/1001) or abnormal
+        (no close frame exchanged — ``code`` then arrives as None/
+        1005-shaped data from mitmproxy). The close record is the last
+        line; the sidecar is sealed read-only after it.
+
+        Args:
+            flow: The mitmproxy flow whose ``flow.websocket`` carries
+                the close state.
+        """
+        flow_id = self._ws_flows.pop(flow.id, None)
+        if flow_id is None:
+            return
+        websocket = flow.websocket
+        self._writer.write_ws_close(
+            flow_id,
+            code=websocket.close_code,
+            reason=websocket.close_reason,
+            closed_by_client=websocket.closed_by_client,
         )
 
     def error(self, flow) -> None:

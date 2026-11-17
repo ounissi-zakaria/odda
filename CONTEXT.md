@@ -19,8 +19,12 @@ _Avoid_: server instance, odda server, daemon
 _Avoid_: project dir, state dir, .odda dir
 
 **Flow**:
-One captured HTTP exchange — a request, its response (or network error, including a failed CONNECT tunnel whose upstream resolution or connection failed) — recorded as a read-only directory under the Data dir (named by the flow id) plus one line in the flows index (`flows.jsonl`). Written exactly once, when the exchange completes; attributed to the Browser whose proxy credentials carried it, when it rode one.
+One captured HTTP exchange — a request, its response (or network error, including a failed CONNECT tunnel whose upstream resolution or connection failed) — recorded as a read-only directory under the Data dir (named by the flow id) plus one line in the flows index (`flows.jsonl`). Written exactly once, when the exchange completes; attributed to the Browser whose proxy credentials carried it, when it rode one. A 101 WebSocket handshake is a Flow too: its index line carries `"ws": true` and the socket's messages stream into its WebSocket sidecar.
 _Avoid_: transaction, request/response pair, capture entry, traffic entry
+
+**WebSocket sidecar**:
+The per-socket message log `flows/<id>/ws.jsonl` inside a Flow directory: one line per captured WebSocket message — direction (`from`: `client`|`server`), payload type (`opcode`: `text`|`binary`), the decoded `content`, and a `ts` — ending in one close record (`type: close`, with `code`, `reason`, `closed_by_client`). Text frames store raw UTF-8; binary frames are latin-1-escaped, a bijective byte↔code-point mapping: every byte round-trips via `content.encode("latin-1")`, and ASCII embedded in binary payloads stays grep-able like every other stored byte. Appended live while the socket streams, sealed read-only at close; uncapped, like HTTP bodies. Messages ride no index line, so the scanner never sees them (the ADR-0034 hook fires on index appends only).
+_Avoid_: ws log, message stream, socket dump
 
 ## Browser sessions
 

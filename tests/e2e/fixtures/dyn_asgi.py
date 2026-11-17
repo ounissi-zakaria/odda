@@ -17,11 +17,45 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+# The websocket echo payload: fixed frames the server sends on accept, so
+# capture tests can assert exact decoded bytes (high bytes + NULs + an
+# ASCII run) rather than page echoes alone.
+WS_SERVER_HELLO_TEXT = "s2c-hello"
+WS_SERVER_HELLO_BYTES = b"\x83\xa4kind\x00\x01\xfe\xffs2c-binary\xff"
+
+
+async def ws_echo(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    """Echo websocket: greet with one text + one binary frame, echo the rest.
+
+    Any path/query is accepted; the query string carries the marker the
+    capture test greps the flow index for. Disconnect ends the socket.
+    """
+    while True:
+        message = await receive()
+        kind = message["type"]
+        if kind == "websocket.connect":
+            await send({"type": "websocket.accept"})
+            await send({"type": "websocket.send", "text": WS_SERVER_HELLO_TEXT})
+            await send({"type": "websocket.send", "bytes": WS_SERVER_HELLO_BYTES})
+        elif kind == "websocket.receive":
+            if message.get("text") is not None:
+                await send({"type": "websocket.send", "text": message["text"]})
+            else:
+                await send({"type": "websocket.send", "bytes": message["bytes"]})
+        elif kind == "websocket.disconnect":
+            return
+
 
 async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
-    """Serve one dynamic response per request, driven by the query string."""
-    if scope["type"] != "http":
+    """Route by ASGI scope type: websockets to the echo, HTTP to dyn."""
+    if scope["type"] == "websocket":
+        await ws_echo(scope, receive, send)
         return
+    await http_dyn(scope, receive, send)
+
+
+async def http_dyn(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    """Serve one dynamic response per request, driven by the query string."""
     raw_qs = scope.get("query_string", b"")
     qd = urllib.parse.parse_qs(
         raw_qs.decode() if raw_qs else "", keep_blank_values=True

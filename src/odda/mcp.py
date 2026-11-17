@@ -207,7 +207,14 @@ mcp_server = MCPServer[OddaState](
         "All traffic that goes through the proxy (including browser "
         "traffic) is captured as flows under .odda/flows/ — driving "
         "the browser is capture. flows.jsonl is the append-only "
-        "index. Response bodies are stored decoded. Captured flows "
+        "index. Response bodies are stored decoded. WebSocket "
+        "traffic: the 101 handshake is a normal flow record with "
+        '"ws": true, and each message appends one line to '
+        'flows/<id>/ws.jsonl ({"from": client|server, "opcode": '
+        'text|binary, "content", "ts"}; binary frames are '
+        "latin-1-escaped — embedded ASCII stays greppable and every "
+        'byte round-trips via content.encode("latin-1")) until the '
+        "terminal close record. Captured flows "
         "are passively scanned while the session lives and findings "
         "append to .odda/scanner/findings.jsonl; flows that predate "
         "the session are never scanned."
