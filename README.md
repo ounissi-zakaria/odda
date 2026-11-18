@@ -75,6 +75,30 @@ odda init-chrome-profile
 
 This opens a visible Chrome window pointed at odda's base profile directory. Log in, install extensions, and set preferences as you want them; close the window when done. odda copies this profile into each isolated browser session opened by `browser_open`. Skip this step to start from a clean profile each time.
 
+### Session configuration
+
+Sessions take settings from three places — later wins:
+
+1. **Global** — `~/.config/odda/config.toml` (`ODDA_CONFIG_HOME` redirects the whole config home)
+2. **Project** — `.odda/config.toml` under the MCP process's working directory
+3. **Flags** — `odda mcp --max-browsers 5 --stale-browser-timeout 1800 --vnc-bind 0.0.0.0`
+
+TOML, read once when the session boots (no hot reload). An unknown key or invalid value fails the boot with the file and key named.
+
+| Key | Flag | Default | Meaning |
+|---|---|---|---|
+| `max_browsers` | `--max-browsers` | `3` | Most browsers open at once in the session (`0` = unlimited); over the limit, `browser_open` errors until one is closed |
+| `stale_browser_timeout` | `--stale-browser-timeout` | `0` (off) | Seconds without a tool call targeting a browser before odda auto-closes it — closed records stay reopenable, and read-only calls (`browser_list`, unfiltered `tabs_list`) don't count as targeting |
+| `vnc_bind` | `--vnc-bind` | `127.0.0.1` | IP address the per-browser noVNC endpoints bind (raw VNC ports stay loopback-only) |
+
+Example `config.toml`:
+
+```toml
+max_browsers = 5
+stale_browser_timeout = 1800
+vnc_bind = "127.0.0.1"
+```
+
 ## Usage
 
 Agents drive odda through the MCP tools (`browser_open`, `navigate`, `page_snapshot`, `request_send`, ...). IDs are integers, monotonic within a session, and never reused; every browser/tab tool takes explicit `browser_id` / `tab_id` parameters.
@@ -104,7 +128,7 @@ A real Chrome (via patchright/Playwright), always headed, each on its own odda-o
 - **Per-browser userscripts** — JS that auto-runs at `document_start` on every navigation, before the page's own scripts.
 - **Dialog blocking** — `alert` / `confirm` / `prompt` / `beforeunload` stay open until handled: the action that opens one returns its details, other tools on that tab wait, and every same-browser result lists open dialogs. Resolve with `dialog_handle` (accept/dismiss, prompt text); a human closing it in a headed window works too.
 
-- **Virtual displays (VNC + noVNC)** — `browser_open` / `browser_list` report `vnc_url` (native client, loopback) and `novnc_url` (open in any browser — the client is built in). One display per browser: the endpoint you connect to *is* the browser, which is how you find the one the agent means when it asks for help with a captcha or login. Endpoints bind localhost by default; `odda mcp --vnc-bind` / `ODDA_VNC_BIND` exposes the noVNC endpoint on another interface (trusted-network posture: no auth — everything that can reach it can drive the browsers; remote boxes: SSH-tunnel). Raw VNC ports stay loopback-only.
+- **Virtual displays (VNC + noVNC)** — `browser_open` / `browser_list` report `vnc_url` (native client, loopback) and `novnc_url` (open in any browser — the client is built in). One display per browser: the endpoint you connect to *is* the browser, which is how you find the one the agent means when it asks for help with a captcha or login. Endpoints bind localhost by default; `odda mcp --vnc-bind` (or `vnc_bind` in a config.toml) exposes the noVNC endpoint on another interface (trusted-network posture: no auth — everything that can reach it can drive the browsers; remote boxes: SSH-tunnel). Raw VNC ports stay loopback-only.
 
 ### Capture every flow
 

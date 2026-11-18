@@ -15,8 +15,12 @@ _Avoid_: server instance, odda server, daemon
 ## Storage locations
 
 **Data dir**:
-`.odda/` under the MCP process's working directory — holds persisted project state: `flows/`, `requests/`, `browsers/`. Created lazily on the first state-producing call (browser open, request clone, etc.), not when the session starts. Absent until odda is actually used; read-only calls (`version`, `proxy_url`) never create it.
+`.odda/` under the MCP process's working directory — holds persisted project state: `flows/`, `requests/`, `browsers/`, plus the operator-written project `config.toml` (one level of session configuration). Created lazily on the first state-producing call (browser open, request clone, etc.), not when the session starts; the operator may place `config.toml` beforehand. Absent until odda is actually used; read-only calls (`version`, `proxy_url`) never create it.
 _Avoid_: project dir, state dir, .odda dir
+
+**Config home**:
+The machine-global state root of odda: `~/.config/odda`, unless the `ODDA_CONFIG_HOME` environment variable redirects it. Holds the Base profile, the Global rules dir, and the global `config.toml` (the machine-wide level of session configuration) — shared by every project and MCP session on the machine.
+_Avoid_: config dir, odda home, global dir
 
 **Flow**:
 One captured HTTP exchange — a request, its response (or network error, including a failed CONNECT tunnel whose upstream resolution or connection failed) — recorded as a read-only directory under the Data dir (named by the flow id) plus one line in the flows index (`flows.jsonl`). Written exactly once, when the exchange completes; attributed to the Browser whose proxy credentials carried it, when it rode one. A 101 WebSocket handshake is a Flow too: its index line carries `"ws": true` and the socket's messages stream into its WebSocket sidecar.
@@ -51,6 +55,10 @@ _Avoid_: hidden display, VNC display, screen, headless display
 **Viewport**:
 Launch-time behavior of every browser: the page sizes to the Chrome window and reflows on resize, with no fixed viewport override; the window is pinned to the virtual display's 1440×900 geometry, so screenshots and coordinates stay deterministic. See ADR-0039 and ADR-0040.
 _Avoid_: responsive mode, window-fit layout
+
+**Stale close**:
+The automatic closure of an open Browser that no tool call has targeted for the configured `stale_browser_timeout` (off by default). Only targeted calls count as interaction — `browser_list` and unfiltered `tabs_list` probe without touching, and page-side traffic is not the agent's attention. Like any close, the Browser record survives and can be reopened.
+_Avoid_: idle kill, janitor sweep, timeout close
 
 ## Page interaction
 

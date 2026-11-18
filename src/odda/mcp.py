@@ -46,6 +46,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
 from odda.browser import BrowserManager, BrowserOperationError
+from odda.config import CONFIG_FILE_NAME, load_config
 from odda.paths import global_rules_dir
 from odda.proxy import ProxyServer
 from odda.request import (
@@ -130,6 +131,23 @@ def resolve_data_dir() -> Path:
     return Path(".odda").resolve()
 
 
+# `odda mcp` CLI flags ride the lifespan through this holder: the CLI
+# process sets it once before run() (one process, one invocation). The
+# in-process sessions of the e2e harness never set it and boot from the
+# config files alone.
+_config_overrides: dict[str, Any] = {}
+
+
+def set_config_overrides(overrides: dict[str, Any]) -> None:
+    """Install the CLI flag overrides for the session boot.
+
+    The lifespan merges these over the config files (see
+    ``odda mcp --help``). Mutates the holder in place, never rebinds it.
+    """
+    _config_overrides.clear()
+    _config_overrides.update(overrides)
+
+
 @asynccontextmanager
 async def odda_lifespan(
     server: MCPServer[OddaState],  # noqa: ARG001 — SDK lifespan signature
@@ -152,8 +170,12 @@ async def odda_lifespan(
     """
     data_dir = resolve_data_dir()
     flowstore.set_data_dir(data_dir)
+    # Session settings (ADR-0042): defaults < global config.toml <
+    # project config.toml < `odda mcp` CLI flags. A bad file or flag
+    # value fails the boot here.
+    config = load_config(_config_overrides, project_path=data_dir / CONFIG_FILE_NAME)
     proxy = ProxyServer()
-    browser = BrowserManager(proxy=proxy)
+    browser = BrowserManager(proxy=proxy, config=config)
     # After BrowserManager, mirroring OddaServer.run's order: after
     # set_data_dir so the manager sees the right .odda path, after
     # ProxyServer so the DumpMaster addon chain is ready. A failing
@@ -184,9 +206,21 @@ async def odda_lifespan(
     rules.restore_on_boot()
     flowstore.get_writer().set_observer(scanner.observe)
     scanner_task = asyncio.create_task(scanner.run())
+    # The stale-browser sweep (ADR-0042) rides the same lifecycle: task
+    # only when the timeout is on, cancelled before the browsers are so
+    # a sweep never races the shutdown close_all.
+    stale_task: asyncio.Task[None] | None = None
+    if config.stale_browser_timeout > 0:
+        stale_task = asyncio.create_task(
+            browser.run_stale_reaper(config.stale_browser_timeout)
+        )
     try:
         yield OddaState(proxy=proxy, browser=browser, rules=rules)
     finally:
+        if stale_task is not None:
+            stale_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stale_task
         scanner_task.cancel()
         with suppress(asyncio.CancelledError):
             await scanner_task

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import inspect
 import logging
 import os
 import re
@@ -36,6 +37,7 @@ from odda import (
     wrap as wrap_mod,
 )
 from odda.chrome_args import build_chrome_args
+from odda.config import OddaConfig
 from odda.paths import base_profile_dir
 from odda.proxy import AUTH_CANARY_URL, PROXY_AUTH_PASSWORD
 from odda.vdisplay import (
@@ -624,6 +626,18 @@ class BrowserInstance:
         self.browser_id = browser_id
         self.context = context
         self.display = display
+        # Staleness (ADR-0042): when a tool call last targeted this
+        # browser, refreshed by BrowserManager._require_instance at
+        # dispatch and by the per-resolve wrapper at completion.
+        # Monotonic and runtime-only — records on disk carry no such
+        # state.
+        self.last_used = time.monotonic()
+        # Targeted tool calls in flight on this browser (ADR-0042):
+        # begin/end bracketed by the per-resolve wrapper. The reaper
+        # spares the browser while this is positive — one long call
+        # (navigate, wait_for) holds the browser for its whole
+        # duration, not just its dispatch instant.
+        self._in_flight: int = 0
         self._next_tab_id: int = 1
         self._tabs: dict[int, Page] = {}
         self._cdp_sessions: dict[int, CDPSession] = {}
@@ -670,6 +684,19 @@ class BrowserInstance:
         self.context.on("page", self._on_context_page)
 
     # --- tab lifecycle -------------------------------------------------
+
+    @property
+    def in_flight(self) -> int:
+        """Targeted tool calls currently executing on this browser."""
+        return self._in_flight
+
+    def begin_in_flight(self) -> None:
+        """Open one in-flight bracket (paired by ``end_in_flight``)."""
+        self._in_flight += 1
+
+    def end_in_flight(self) -> None:
+        """Close one in-flight bracket opened by ``begin_in_flight``."""
+        self._in_flight -= 1
 
     def _on_context_page(self, page: Page) -> None:
         """Register a page created by context.new_page() or window.open.
@@ -2124,17 +2151,60 @@ async def _driver() -> Playwright:
     return driver
 
 
+class _TargetedInstance:
+    """One targeted resolve of a :class:`BrowserInstance`.
+
+    Returned by ``BrowserManager._require_instance``. The manager's
+    targeted methods drive the browser through this view: every awaited
+    instance method brackets an in-flight window — the counter rises
+    when the method starts and falls when it settles (result, error, or
+    cancellation) — and the method's completion refreshes the browser's
+    staleness clock. Sync attributes pass through untouched. The
+    bracket lives in the call itself, not in task identity, so it holds
+    on every transport: the in-process client runs handlers in the
+    caller's task, stdio spawns one task per request — no task outlives
+    the call in either.
+    """
+
+    __slots__ = ("_inst",)
+
+    def __init__(self, inst: BrowserInstance) -> None:
+        self._inst = inst
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inst, name)
+        if not inspect.iscoroutinefunction(attr):
+            return attr
+
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            self._inst.begin_in_flight()
+            try:
+                return await attr(*args, **kwargs)
+            finally:
+                self._inst.end_in_flight()
+                self._inst.last_used = time.monotonic()
+
+        return call
+
+
 class BrowserManager:
     """Manages multiple Chrome browser instances via patchright."""
 
-    def __init__(self, proxy=None):
+    def __init__(self, proxy=None, config: OddaConfig | None = None):
         """Initialize browser manager.
 
         Args:
             proxy: Proxy server instance to share across browsers.
+            config: The session's resolved settings (defaults when omitted).
         """
         self._instances: dict[str, BrowserInstance] = {}
         self.proxy = proxy
+        self.config = config if config is not None else OddaConfig()
+        # Serializes the open path: the max_browsers check and the
+        # _instances registration must not interleave across concurrent
+        # opens (the Chrome launch awaits in between). Reopens and the
+        # token mint ride the same lock.
+        self._open_lock = asyncio.Lock()
 
     def _new_browser_id(self) -> str:
         """Generate a fresh browser identifier token (ADR-0030).
@@ -2211,8 +2281,40 @@ class BrowserManager:
             *(self.close_instance(bid) for bid in list(self._instances))
         )
 
-    def _require_instance(self, browser_id: str) -> BrowserInstance:
-        """Return the BrowserInstance for browser_id or raise.
+    async def run_stale_reaper(self, timeout_s: int) -> None:
+        """Auto-close browsers no tool call has targeted for ``timeout_s``.
+
+        The stale-browser sweep (ADR-0042), run as the lifespan's task:
+        ticks at half the timeout (clamped to 1-30 s), so a browser
+        closes within one tick of going stale. A browser with a
+        targeted call in flight is never swept — one long call holds it
+        for its whole duration. Closes ride the normal close path — the
+        record stays reopenable like a manually closed one, and
+        ``browser_list`` shows the closure. ``browser_list`` and
+        unfiltered ``tabs_list`` probe without touching, so they never
+        reset the clock; only browser-targeted calls do.
+        """
+        tick = min(30.0, max(1.0, timeout_s / 2))
+        while True:
+            await asyncio.sleep(tick)
+            cutoff = time.monotonic() - timeout_s
+            for browser_id in list(self._instances):
+                inst = self._instances.get(browser_id)
+                if inst is None or inst.in_flight > 0 or inst.last_used >= cutoff:
+                    continue
+                # Survived close: logged, retried on the next tick, and
+                # visible as an open record in browser_list.
+                try:
+                    await self.close_instance(browser_id)
+                except Exception:
+                    logger.warning(
+                        "stale close of browser %s failed; retrying next tick",
+                        browser_id,
+                        exc_info=True,
+                    )
+
+    def _require_instance(self, browser_id: str) -> _TargetedInstance:
+        """Return the targeted view of the browser for browser_id or raise.
 
         Input is case-insensitive (ADR-0030): tokens are stored and
         emitted lowercase, and uppercased spellings resolve to the same
@@ -2226,7 +2328,12 @@ class BrowserManager:
             if _record_profile_dir(bid).is_dir():
                 raise BrowserOperationError(f"Browser {browser_id} is not open.")
             raise BrowserOperationError(f"Browser {browser_id} not found.")
-        return inst
+        # Every targeted tool call refreshes the browser's staleness
+        # timestamp at dispatch (ADR-0042) — and its completion
+        # refreshes it again through the returned targeted view, which
+        # also brackets the in-flight window the reaper spares.
+        inst.last_used = time.monotonic()
+        return _TargetedInstance(inst)
 
     @staticmethod
     async def _seed_proxy_auth(initial_page: Page) -> None:
@@ -2284,7 +2391,9 @@ class BrowserManager:
         # Headed Chrome on an odda-owned virtual display (ADR-0040):
         # never headless, never the user's desktop. Started before Chrome
         # (Chrome needs a DISPLAY) and torn down together with the browser.
-        display = await start_virtual_display(SCREEN_WIDTH, SCREEN_HEIGHT)
+        display = await start_virtual_display(
+            SCREEN_WIDTH, SCREEN_HEIGHT, self.config.vnc_bind
+        )
         try:
             playwright = await _driver()
             context = await playwright.chromium.launch_persistent_context(
@@ -2367,15 +2476,29 @@ class BrowserManager:
             browser's virtual display endpoints (ADR-0040).
         """
         bid = browser_id.lower() if browser_id is not None else None
-        try:
-            if bid is None:
-                instance = await self._create_instance()
-            else:
-                instance = await self._reopen_instance(bid)
-        except BrowserOperationError:
-            raise
-        except Exception as e:
-            raise BrowserOperationError(f"Failed to open browser: {e!s}") from e
+        async with self._open_lock:
+            # Already-open diagnoses before the limit: the precise
+            # error, regardless of how many browsers are open.
+            if bid is not None and bid in self._instances:
+                raise BrowserOperationError(f"Browser {browser_id} is already open.")
+            # max_browsers counts browsers open in this session; 0 is
+            # unlimited. Reopens of closed records count like fresh
+            # opens — the record's Chrome is what the limit caps.
+            limit = self.config.max_browsers
+            if limit and len(self._instances) >= limit:
+                raise BrowserOperationError(
+                    f"Browser limit reached ({limit} open). Close a browser "
+                    "before opening another, or raise max_browsers."
+                )
+            try:
+                if bid is None:
+                    instance = await self._create_instance()
+                else:
+                    instance = await self._reopen_instance(bid)
+            except BrowserOperationError:
+                raise
+            except Exception as e:
+                raise BrowserOperationError(f"Failed to open browser: {e!s}") from e
         initial_tab_id = next(iter(instance._tabs))  # noqa: SLF001
         return {
             "browser_id": instance.browser_id,
@@ -2390,13 +2513,12 @@ class BrowserManager:
         """Relaunch a closed record on its own profile (ADR-0032).
 
         The record boundary is its ``profile/`` dir: a directory without
-        one is not a record. Openness comes from Chrome's SingletonLock
-        — a live Chrome on this profile dir, here or in another session,
-        is refused; a stale lock (dead pid) is Chrome's to reclaim at
-        launch.
+        one is not a record. The caller (``open``) has already refused
+        ids open in this session. Openness comes from Chrome's
+        SingletonLock — a live Chrome on this profile dir in another
+        session is refused; a stale lock (dead pid) is Chrome's to
+        reclaim at launch.
         """
-        if browser_id in self._instances:
-            raise BrowserOperationError(f"Browser {browser_id} is already open.")
         profile_dir = _record_profile_dir(browser_id)
         if not profile_dir.is_dir():
             raise BrowserOperationError(f"Browser {browser_id} not found.")

@@ -10,8 +10,8 @@ window into exactly that browser — the mapping from browser id to screen
 is the port, so nothing in the page needs to mark it.
 
 Binding (ADR-0040, trusted-network posture): the noVNC endpoint binds
-the operator-configured address (``ODDA_VNC_BIND`` env, set from
-``odda mcp --vnc-bind``; default loopback); the raw RFB port is
+the operator-configured address (session config's ``vnc_bind``, set
+from ``odda mcp --vnc-bind``; default loopback); the raw RFB port is
 loopback-only always. No authentication anywhere — every device that
 can reach the bound address can view and drive any open browser.
 """
@@ -35,8 +35,6 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-BIND_ENV = "ODDA_VNC_BIND"
-_DEFAULT_BIND = "127.0.0.1"
 _NOVNC_DIR = Path(__file__).parent / "novnc"
 
 # The virtual display's pinned geometry: matched by Chrome's
@@ -213,11 +211,6 @@ class VirtualDisplay:
                 await asyncio.to_thread(process.wait, _STOP_TIMEOUT_S)
 
 
-def bind_address() -> str:
-    """The address noVNC endpoints bind: ``ODDA_VNC_BIND`` or loopback."""
-    return os.environ.get(BIND_ENV) or _DEFAULT_BIND
-
-
 def _bind_host(bind: str) -> str:
     """The host to report in URLs.
 
@@ -366,13 +359,15 @@ def _terminate(*processes: subprocess.Popen[Any]) -> None:
             process.wait(_STOP_TIMEOUT_S)
 
 
-async def start_virtual_display(width: int, height: int) -> VirtualDisplay:
+async def start_virtual_display(width: int, height: int, bind: str) -> VirtualDisplay:
     """Start one display at ``width x height``: Xvnc + websockify/noVNC.
 
-    Tries several display numbers (another process may own one), waits
-    until the X socket accepts, the RFB port speaks its banner, and the
-    noVNC port accepts, and raises :class:`VirtualDisplayError` when a
-    required binary is missing or a display never comes up.
+    ``bind`` is the address the noVNC endpoint binds (session config's
+    ``vnc_bind``; raw VNC ports stay loopback-only). Tries several
+    display numbers (another process may own one), waits until the X
+    socket accepts, the RFB port speaks its banner, and the noVNC port
+    accepts, and raises :class:`VirtualDisplayError` when a required
+    binary is missing or a display never comes up.
 
     Must run on the main thread: parent-death teardown keys on the
     death of the spawning *thread* (PR_SET_PDEATHSIG semantics), and
@@ -386,7 +381,6 @@ async def start_virtual_display(width: int, height: int) -> VirtualDisplay:
             "parent-death teardown keys on the spawning thread, and only "
             "the main thread is guaranteed to outlive the process"
         )
-    bind = bind_address()
     xvnc_err: Any = None
     ws_err: Any = None
     for display_num in random.sample(list(_DISPLAY_RANGE), _DISPLAY_TRIES):
