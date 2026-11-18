@@ -39,7 +39,10 @@ The suite runs on the host (Chrome on `PATH` is required — the same requiremen
 ## Conventions
 
 Code standards live in `CODING_STANDARDS.md` (thin-CLI architecture, tool
-results/errors, release consistency, self-contained agent-facing surfaces). The
+results/errors, release consistency, self-contained agent-facing surfaces,
+code-is-source-of-truth: no prose comments or docstrings in first-party Python —
+bare ADR/CONTEXT.md pointer comments and tool-handler docstrings are the only
+exceptions). The
 patchright pin's drift-audit *procedure* stays here: on a bump, audit
 `src/odda/chrome_args.py` against the new `chromiumSwitches` block in the installed
 driver's `coreBundle.js` (search `init_chromiumSwitches`): diff `_DISABLED_FEATURES`

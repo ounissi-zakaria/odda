@@ -28,6 +28,28 @@ errors can only repeat the file shape at the point of failure, and no
 rule can be authored without them. Everything that fails this test goes
 to the four surfaces, where it belongs.
 
+## Code is the only source of truth
+
+Internal code carries no prose: no comments, no docstrings. Behavior is
+stated by the code itself — names, types, structure — or by the ADR it
+points to, never paraphrased beside it: a paraphrase drifts while the
+code moves on, and the doc becomes the lie. The only comments allowed:
+
+- a bare pointer, one line, never rationale in its own words:
+  `# See ADR-0022.` / `# See ADR-0003, ADR-0004.` / `# See CONTEXT.md`;
+- tool directives, their same-line reason included (it is part of the
+  directive): `# noqa: ...`, `# type: ignore[...]`, shebang,
+  `-*- coding -*-`.
+
+Docstrings exist only where an agent consumes them verbatim: the
+`@mcp_server.tool()` handler descriptions (above). CLI help lives in
+argparse `help=` strings, never docstrings. A docstring that only cites
+an ADR becomes a pointer comment. Scope: all first-party Python under
+`src/` and `tests/` (vendored `src/odda/novnc/` exempt, as are config
+files). Reviewers: flag any comment that is neither a citation nor a
+directive, and any docstring outside a tool handler — the fix is code
+that says it, or an ADR it points to.
+
 ## Architecture: thin surface, deep library
 
 The CLI stays thin; automation logic belongs in library modules (`browser.py`,

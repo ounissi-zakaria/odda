@@ -94,8 +94,15 @@ select = [
     "FAST",
 ]
 ignore = [
+    # Docstrings exist only where an agent consumes them (tool descriptions);
+    # see CODING_STANDARDS.md "Code is the only source of truth".
     "D100",
+    "D101",
+    "D102",
+    "D103",
     "D104",
+    "D105",
+    "D107",
     "COM812",
     "ISC001",
     "T201",
