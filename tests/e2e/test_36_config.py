@@ -116,6 +116,11 @@ def test_cli_override_error_names_the_flag(tmp_path: Path) -> None:
     assert "--vnc-bind" in str(ei.value)
 
 
+def test_none_override_contributes_nothing() -> None:
+    """A None-valued override (an unset flag) contributes nothing."""
+    assert load_config({"max_browsers": None, "vnc_bind": None}) == OddaConfig()
+
+
 async def test_max_browsers_blocks_and_recovers(tmp_path: Path, odda_session) -> None:
     """The over-limit open errors; closing frees a slot again."""
     _seed_config(tmp_path, "max_browsers = 1\n")

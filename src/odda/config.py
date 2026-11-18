@@ -20,13 +20,13 @@ from __future__ import annotations
 import ipaddress
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from odda.paths import config_home
+from odda.paths import config_home, project_data_dir
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from pathlib import Path
 
 #: The config file's name at both levels (config home and data dir).
 CONFIG_FILE_NAME = "config.toml"
@@ -114,11 +114,13 @@ def load_config(
     if global_path is None:
         global_path = config_home() / CONFIG_FILE_NAME
     if project_path is None:
-        project_path = Path(".odda").resolve() / CONFIG_FILE_NAME
+        project_path = project_data_dir() / CONFIG_FILE_NAME
     for path in (global_path, project_path):
         for key, value in _read_toml(path).items():
             values[key] = _setting(key, value, str(path))
     for key, value in (cli_overrides or {}).items():
+        if value is None:
+            continue
         source = f"command line flag --{key.replace('_', '-')}"
         values[key] = _setting(key, value, source)
     return OddaConfig(**values)

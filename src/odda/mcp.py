@@ -47,7 +47,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
 from odda.browser import BrowserManager, BrowserOperationError
 from odda.config import CONFIG_FILE_NAME, load_config
-from odda.paths import global_rules_dir
+from odda.paths import global_rules_dir, project_data_dir
 from odda.proxy import ProxyServer
 from odda.request import (
     clone as clone_request,
@@ -121,16 +121,6 @@ class OddaState:
     rules: RuleManager
 
 
-def resolve_data_dir() -> Path:
-    """Resolve the data dir for this MCP process.
-
-    ``.odda/`` under the current working directory (ADR 0017: the
-    directory is remembered, not created — it appears lazily on first
-    state write).
-    """
-    return Path(".odda").resolve()
-
-
 # `odda mcp` CLI flags ride the lifespan through this holder: the CLI
 # process sets it once before run() (one process, one invocation). The
 # in-process sessions of the e2e harness never set it and boot from the
@@ -168,7 +158,7 @@ async def odda_lifespan(
     restore runs to completion inside the synchronous startup block,
     before the first frame is even read.
     """
-    data_dir = resolve_data_dir()
+    data_dir = project_data_dir()
     flowstore.set_data_dir(data_dir)
     # Session settings (ADR-0042): defaults < global config.toml <
     # project config.toml < `odda mcp` CLI flags. A bad file or flag

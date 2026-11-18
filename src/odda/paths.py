@@ -45,3 +45,18 @@ def base_profile_dir() -> Path:
 def global_rules_dir() -> Path:
     """Return the global rule-slot dir under the config home."""
     return config_home() / RULES_DIR_NAME
+
+
+#: The per-project data dir's name under the process's working dir.
+DATA_DIR_NAME = ".odda"
+
+
+def project_data_dir() -> Path:
+    """Return the per-project data dir (remembered, not created here).
+
+    ``.odda`` under the current working directory, resolved (ADR 0017:
+    the directory appears lazily on first state write). The MCP
+    session boots with its data dir here, and the session config's
+    project file lives under it.
+    """
+    return Path(DATA_DIR_NAME).resolve()

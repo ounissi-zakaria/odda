@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-import inspect
 import logging
 import os
 import re
@@ -15,7 +14,7 @@ import subprocess
 import tempfile
 import time
 import weakref
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,7 +47,7 @@ from odda.vdisplay import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -627,17 +626,21 @@ class BrowserInstance:
         self.context = context
         self.display = display
         # Staleness (ADR-0042): when a tool call last targeted this
-        # browser, refreshed by BrowserManager._require_instance at
-        # dispatch and by the per-resolve wrapper at completion.
-        # Monotonic and runtime-only — records on disk carry no such
-        # state.
+        # browser, refreshed by BrowserManager._targeted when a
+        # targeted call starts and again when it settles. Monotonic
+        # and runtime-only — records on disk carry no such state.
         self.last_used = time.monotonic()
-        # Targeted tool calls in flight on this browser (ADR-0042):
-        # begin/end bracketed by the per-resolve wrapper. The reaper
-        # spares the browser while this is positive — one long call
-        # (navigate, wait_for) holds the browser for its whole
-        # duration, not just its dispatch instant.
-        self._in_flight: int = 0
+        # Targeted tool calls currently executing on this browser
+        # (ADR-0042): BrowserManager._targeted owns the count, and the
+        # stale-close sweep spares the browser while it is positive —
+        # one long call (navigate, wait_for) holds the browser for its
+        # whole duration, not just its start.
+        self.in_flight: int = 0
+        # Set synchronously the moment a close of this browser starts,
+        # before the first teardown await: a targeted call arriving
+        # inside the close window is refused at resolve instead of
+        # dying against a half-closed context.
+        self.closing: bool = False
         self._next_tab_id: int = 1
         self._tabs: dict[int, Page] = {}
         self._cdp_sessions: dict[int, CDPSession] = {}
@@ -684,19 +687,6 @@ class BrowserInstance:
         self.context.on("page", self._on_context_page)
 
     # --- tab lifecycle -------------------------------------------------
-
-    @property
-    def in_flight(self) -> int:
-        """Targeted tool calls currently executing on this browser."""
-        return self._in_flight
-
-    def begin_in_flight(self) -> None:
-        """Open one in-flight bracket (paired by ``end_in_flight``)."""
-        self._in_flight += 1
-
-    def end_in_flight(self) -> None:
-        """Close one in-flight bracket opened by ``begin_in_flight``."""
-        self._in_flight -= 1
 
     def _on_context_page(self, page: Page) -> None:
         """Register a page created by context.new_page() or window.open.
@@ -2151,42 +2141,6 @@ async def _driver() -> Playwright:
     return driver
 
 
-class _TargetedInstance:
-    """One targeted resolve of a :class:`BrowserInstance`.
-
-    Returned by ``BrowserManager._require_instance``. The manager's
-    targeted methods drive the browser through this view: every awaited
-    instance method brackets an in-flight window — the counter rises
-    when the method starts and falls when it settles (result, error, or
-    cancellation) — and the method's completion refreshes the browser's
-    staleness clock. Sync attributes pass through untouched. The
-    bracket lives in the call itself, not in task identity, so it holds
-    on every transport: the in-process client runs handlers in the
-    caller's task, stdio spawns one task per request — no task outlives
-    the call in either.
-    """
-
-    __slots__ = ("_inst",)
-
-    def __init__(self, inst: BrowserInstance) -> None:
-        self._inst = inst
-
-    def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._inst, name)
-        if not inspect.iscoroutinefunction(attr):
-            return attr
-
-        async def call(*args: Any, **kwargs: Any) -> Any:
-            self._inst.begin_in_flight()
-            try:
-                return await attr(*args, **kwargs)
-            finally:
-                self._inst.end_in_flight()
-                self._inst.last_used = time.monotonic()
-
-        return call
-
-
 class BrowserManager:
     """Manages multiple Chrome browser instances via patchright."""
 
@@ -2200,19 +2154,21 @@ class BrowserManager:
         self._instances: dict[str, BrowserInstance] = {}
         self.proxy = proxy
         self.config = config if config is not None else OddaConfig()
-        # Serializes the open path: the max_browsers check and the
-        # _instances registration must not interleave across concurrent
-        # opens (the Chrome launch awaits in between). Reopens and the
-        # token mint ride the same lock.
-        self._open_lock = asyncio.Lock()
+        # Ids with an open in flight (ADR-0042): the limit and
+        # already-open checks count these, so concurrent opens can
+        # neither exceed max_browsers nor double-launch one id.
+        # Reserved and released with no await in between — on one
+        # event loop, synchronous transitions are the whole lock, and
+        # the launches themselves still overlap.
+        self._opening: set[str] = set()
 
     def _new_browser_id(self) -> str:
         """Generate a fresh browser identifier token (ADR-0030).
 
         Five lowercase letters, unique for the data dir's lifetime:
-        checked against live instances *and* against on-disk
-        ``.odda/browsers/<token>/`` dirs, which persist across sessions
-        and must never be re-attached to a new browser.
+        checked against live instances, opens in flight, *and* against
+        on-disk ``.odda/browsers/<token>/`` dirs, which persist across
+        sessions and must never be re-attached to a new browser.
 
         Returns:
             A ``^[a-z]{5}$`` token no live or past browser has used.
@@ -2220,7 +2176,11 @@ class BrowserManager:
         browsers_root = userscript_mod.browsers_root()
         while True:
             token = "".join(secrets.choice(string.ascii_lowercase) for _ in range(5))
-            if token in self._instances or (browsers_root / token).exists():
+            if (
+                token in self._instances
+                or token in self._opening
+                or (browsers_root / token).exists()
+            ):
                 continue
             return token
 
@@ -2284,43 +2244,64 @@ class BrowserManager:
     async def run_stale_reaper(self, timeout_s: int) -> None:
         """Auto-close browsers no tool call has targeted for ``timeout_s``.
 
-        The stale-browser sweep (ADR-0042), run as the lifespan's task:
-        ticks at half the timeout (clamped to 1-30 s), so a browser
-        closes within one tick of going stale. A browser with a
-        targeted call in flight is never swept — one long call holds it
-        for its whole duration. Closes ride the normal close path — the
-        record stays reopenable like a manually closed one, and
-        ``browser_list`` shows the closure. ``browser_list`` and
-        unfiltered ``tabs_list`` probe without touching, so they never
-        reset the clock; only browser-targeted calls do.
+        The stale-close sweep (ADR-0042), run as the lifespan's task.
+        Deadline-driven, not tick-driven: it sleeps exactly until the
+        earliest moment a browser can go stale (``last_used +
+        timeout_s``) and closes each browser at its deadline — no
+        polling wake, no close slop. A browser with a targeted call in
+        flight is never swept — one long call holds it for its whole
+        duration. Closes ride the normal close path — the record stays
+        reopenable like a manually closed one, and ``browser_list``
+        shows the closure. ``browser_list`` and unfiltered
+        ``tabs_list`` probe without touching, so they never reset the
+        clock; only browser-targeted calls do.
         """
-        tick = min(30.0, max(1.0, timeout_s / 2))
         while True:
-            await asyncio.sleep(tick)
-            cutoff = time.monotonic() - timeout_s
+            now = time.monotonic()
             for browser_id in list(self._instances):
                 inst = self._instances.get(browser_id)
-                if inst is None or inst.in_flight > 0 or inst.last_used >= cutoff:
+                if (
+                    inst is None
+                    or inst.closing
+                    or inst.in_flight > 0
+                    or inst.last_used + timeout_s > now
+                ):
                     continue
-                # Survived close: logged, retried on the next tick, and
-                # visible as an open record in browser_list.
+                # Survived close: logged, retried on the next sweep,
+                # and visible as an open record in browser_list.
                 try:
                     await self.close_instance(browser_id)
                 except Exception:
                     logger.warning(
-                        "stale close of browser %s failed; retrying next tick",
+                        "stale close of browser %s failed; retrying next sweep",
                         browser_id,
                         exc_info=True,
                     )
+            # Sleep until the earliest deadline among sweepable
+            # browsers. With none, a bounded nap: a browser opened
+            # during it carries its full timeout from construction
+            # time, so the next wake still lands on its deadline.
+            deadlines = [
+                inst.last_used + timeout_s
+                for inst in self._instances.values()
+                if not inst.closing and inst.in_flight == 0
+            ]
+            delay = (
+                max(0.0, min(deadlines) - time.monotonic())
+                if deadlines
+                else float(timeout_s)
+            )
+            await asyncio.sleep(delay)
 
-    def _require_instance(self, browser_id: str) -> _TargetedInstance:
-        """Return the targeted view of the browser for browser_id or raise.
+    def _require_instance(self, browser_id: str) -> BrowserInstance:
+        """Return the BrowserInstance for browser_id or raise.
 
         Input is case-insensitive (ADR-0030): tokens are stored and
         emitted lowercase, and uppercased spellings resolve to the same
-        browser. A closed record raises "is not open" — the browser
-        exists (it lists, it can be reopened), it just is not running;
-        an unknown id raises "not found".
+        browser. A browser whose close has started raises "is closing"
+        — the teardown is under way; a closed record raises "is not
+        open" — the browser exists (it lists, it can be reopened), it
+        just is not running; an unknown id raises "not found".
         """
         bid = browser_id.lower()
         inst = self._instances.get(bid)
@@ -2328,12 +2309,31 @@ class BrowserManager:
             if _record_profile_dir(bid).is_dir():
                 raise BrowserOperationError(f"Browser {browser_id} is not open.")
             raise BrowserOperationError(f"Browser {browser_id} not found.")
-        # Every targeted tool call refreshes the browser's staleness
-        # timestamp at dispatch (ADR-0042) — and its completion
-        # refreshes it again through the returned targeted view, which
-        # also brackets the in-flight window the reaper spares.
+        if inst.closing:
+            raise BrowserOperationError(f"Browser {browser_id} is closing.")
+        return inst
+
+    @asynccontextmanager
+    async def _targeted(self, browser_id: str) -> AsyncIterator[BrowserInstance]:
+        """Bracket one browser-targeted tool call (ADR-0042).
+
+        Resolves the browser, refreshes its staleness clock, and holds
+        an in-flight seat for the call's whole body — every await
+        inside it, not just the first — so the stale-close sweep
+        spares the browser until the call settles, when the clock
+        refreshes again. Targeted manager methods wrap their body in
+        ``async with self._targeted(...)``; closes and unfiltered
+        probes deliberately don't (a close is not a use, a probe must
+        not touch).
+        """
+        inst = self._require_instance(browser_id)
         inst.last_used = time.monotonic()
-        return _TargetedInstance(inst)
+        inst.in_flight += 1
+        try:
+            yield inst
+        finally:
+            inst.in_flight -= 1
+            inst.last_used = time.monotonic()
 
     @staticmethod
     async def _seed_proxy_auth(initial_page: Page) -> None:
@@ -2357,20 +2357,17 @@ class BrowserManager:
                 15,
             )
 
-    async def _create_instance(
-        self, *, browser_id: str | None = None
-    ) -> BrowserInstance:
+    async def _create_instance(self, browser_id: str) -> BrowserInstance:
         """Create and register a new BrowserInstance.
 
-        With ``browser_id`` given, reopens that closed record on its own
-        profile dir (ADR-0032); without, mints a fresh token and creates
-        its record, seeded from the Base profile. Registers the initial
-        page (the one Chrome creates at launch) and returns the instance
-        with at least one tab_id assigned.
+        ``browser_id`` is the resolved token — a fresh mint for a new
+        browser (its record seeded from the Base profile) or the
+        record's own id on a reopen (ADR-0032). ``open`` resolves and
+        reserves the id before launching, so concurrent opens can
+        never collide on one. Registers the initial page (the one
+        Chrome creates at launch) and returns the instance with at
+        least one tab_id assigned.
         """
-        if browser_id is None:
-            browser_id = self._new_browser_id()
-
         # Proxy credentials whose username is the browser's identifier
         # token: the proxy's auth addon stamps them onto flow metadata
         # for flows.jsonl attribution (ADR-0031). The proxy *address* and
@@ -2475,31 +2472,40 @@ class BrowserManager:
             Dict with browser_id, the initial tab_id, a status, and the
             browser's virtual display endpoints (ADR-0040).
         """
-        bid = browser_id.lower() if browser_id is not None else None
-        async with self._open_lock:
-            # Already-open diagnoses before the limit: the precise
-            # error, regardless of how many browsers are open. `bid` is
-            # the normalized token — errors emit lowercase (ADR-0030).
-            if bid is not None and bid in self._instances:
-                raise BrowserOperationError(f"Browser {bid} is already open.")
-            # max_browsers counts browsers open in this session; 0 is
-            # unlimited. Reopens of closed records count like fresh
-            # opens — the record's Chrome is what the limit caps.
-            limit = self.config.max_browsers
-            if limit and len(self._instances) >= limit:
-                raise BrowserOperationError(
-                    f"Browser limit reached ({limit} open). Close a browser "
-                    "before opening another, or raise max_browsers."
-                )
+        bid = browser_id.lower() if browser_id is not None else self._new_browser_id()
+        # Reserve synchronously — no await between these checks and
+        # the set add — so concurrent opens can neither exceed the
+        # limit nor double-launch one id, while the launches
+        # themselves still overlap: two Chrome starts run like two
+        # tabs loading, not like a queue. `bid` is the normalized
+        # token — errors emit lowercase (ADR-0030).
+        if bid in self._instances:
+            raise BrowserOperationError(f"Browser {bid} is already open.")
+        if bid in self._opening:
+            raise BrowserOperationError(f"Browser {bid} is already opening.")
+        # max_browsers counts browsers open in this session, opens in
+        # flight included; 0 is unlimited. Reopens of closed records
+        # count like fresh opens — the record's Chrome is what the
+        # limit caps.
+        limit = self.config.max_browsers
+        if limit and len(self._instances) + len(self._opening) >= limit:
+            raise BrowserOperationError(
+                f"Browser limit reached ({limit} open). "
+                "Close a browser before opening another."
+            )
+        self._opening.add(bid)
+        try:
             try:
-                if bid is None:
-                    instance = await self._create_instance()
+                if browser_id is None:
+                    instance = await self._create_instance(bid)
                 else:
                     instance = await self._reopen_instance(bid)
             except BrowserOperationError:
                 raise
             except Exception as e:
                 raise BrowserOperationError(f"Failed to open browser: {e!s}") from e
+        finally:
+            self._opening.discard(bid)
         initial_tab_id = next(iter(instance._tabs))  # noqa: SLF001
         return {
             "browser_id": instance.browser_id,
@@ -2515,7 +2521,7 @@ class BrowserManager:
 
         The record boundary is its ``profile/`` dir: a directory without
         one is not a record. The caller (``open``) has already refused
-        ids open in this session. Openness comes from Chrome's
+        ids open or opening in this session. Openness comes from Chrome's
         SingletonLock — a live Chrome on this profile dir in another
         session is refused; a stale lock (dead pid) is Chrome's to
         reclaim at launch.
@@ -2532,10 +2538,17 @@ class BrowserManager:
     async def close_instance(self, browser_id: str) -> dict[str, Any]:
         """Close a browser instance by ID.
 
+        The close is marked synchronously before the first teardown
+        await, so targeted calls arriving inside the close window are
+        refused at resolve ("is closing") instead of racing the
+        teardown; the instance leaves the registry only after the
+        teardown has settled.
+
         Returns:
             Dict with browser_id and status.
         """
         inst = self._require_instance(browser_id)
+        inst.closing = True
         await inst._close()  # noqa: SLF001
         del self._instances[inst.browser_id]
         return {"browser_id": inst.browser_id, "status": "closed"}
@@ -2550,13 +2563,15 @@ class BrowserManager:
             BrowserOperationError: If browser_id is given and not found.
         """
         if browser_id is not None:
-            inst = self._require_instance(browser_id)
-            return [
-                {
-                    "browser_id": inst.browser_id,
-                    "tabs": await inst.list_tabs(),
-                }
-            ]
+            # A filtered listing targets one browser — a touch
+            # (ADR-0042); the unfiltered sweep below probes instead.
+            async with self._targeted(browser_id) as inst:
+                return [
+                    {
+                        "browser_id": inst.browser_id,
+                        "tabs": await inst.list_tabs(),
+                    }
+                ]
         result = []
         for bid, inst in self._instances.items():
             result.append(
@@ -2579,11 +2594,11 @@ class BrowserManager:
             Dict with browser_id, the new tab_id, and status — or
             with the open dialog's details.
         """
-        inst = self._require_instance(browser_id)
-        result = await inst.open_tab(url)
-        if isinstance(result, dict):
-            return {"browser_id": inst.browser_id, **result}
-        return {"browser_id": inst.browser_id, "tab_id": result, "status": "opened"}
+        async with self._targeted(browser_id) as inst:
+            result = await inst.open_tab(url)
+            if isinstance(result, dict):
+                return {"browser_id": inst.browser_id, **result}
+            return {"browser_id": inst.browser_id, "tab_id": result, "status": "opened"}
 
     async def page_snapshot(
         self,
@@ -2595,8 +2610,8 @@ class BrowserManager:
         diff: bool = False,
     ) -> str:
         """Return the page's accessibility tree as agent-readable text."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_snapshot(tab_id, depth=depth, boxes=boxes, diff=diff)
+        async with self._targeted(browser_id) as inst:
+            return await inst.page_snapshot(tab_id, depth=depth, boxes=boxes, diff=diff)
 
     async def page_find(
         self,
@@ -2607,8 +2622,8 @@ class BrowserManager:
         boxes: bool = False,
     ) -> str:
         """Return matching snapshot regions for a regex, not the tree."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_find(tab_id, pattern, boxes=boxes)
+        async with self._targeted(browser_id) as inst:
+            return await inst.page_find(tab_id, pattern, boxes=boxes)
 
     async def close_tab(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Close a tab in a specific browser.
@@ -2625,33 +2640,34 @@ class BrowserManager:
             ``closed_dialog`` when a dialog was open, and
             ``browser_closed`` when this was the last tab.
         """
-        inst = self._require_instance(browser_id)
-        tab_dialog = next(
-            (d for d in inst.open_dialogs() if d["tab_id"] == tab_id), None
-        )
-        closed_dialog = (
-            {"type": tab_dialog["type"], "message": tab_dialog["message"]}
-            if tab_dialog is not None
-            else None
-        )
-        # Closing its last tab kills headed Chrome (the last window
-        # closes and the process exits — ADR-0040), so odda closes the
-        # whole browser with it: the record, the context, and the
-        # display go the way of the process. The result says so.
-        last_tab = len(inst._tabs) == 1  # noqa: SLF001
-        await inst.close_tab(tab_id)
-        result: dict[str, Any] = {
-            "browser_id": browser_id,
-            "tab_id": tab_id,
-            "status": "closed",
-        }
-        if closed_dialog is not None:
-            result["closed_dialog"] = closed_dialog
-        if last_tab:
-            await inst._close()  # noqa: SLF001
-            del self._instances[inst.browser_id]
-            result["browser_closed"] = True
-        return result
+        async with self._targeted(browser_id) as inst:
+            tab_dialog = next(
+                (d for d in inst.open_dialogs() if d["tab_id"] == tab_id), None
+            )
+            closed_dialog = (
+                {"type": tab_dialog["type"], "message": tab_dialog["message"]}
+                if tab_dialog is not None
+                else None
+            )
+            # Closing its last tab kills headed Chrome (the last window
+            # closes and the process exits — ADR-0040), so odda closes the
+            # whole browser with it: the record, the context, and the
+            # display go the way of the process. The result says so.
+            last_tab = len(inst._tabs) == 1  # noqa: SLF001
+            await inst.close_tab(tab_id)
+            result: dict[str, Any] = {
+                "browser_id": browser_id,
+                "tab_id": tab_id,
+                "status": "closed",
+            }
+            if closed_dialog is not None:
+                result["closed_dialog"] = closed_dialog
+            if last_tab:
+                # One marked close path: close_instance refuses new
+                # targeted calls for the teardown's duration.
+                await self.close_instance(inst.browser_id)
+                result["browser_closed"] = True
+            return result
 
     async def navigate(
         self,
@@ -2671,22 +2687,22 @@ class BrowserManager:
         Returns:
             Dict with status, or with dialog details.
         """
-        inst = self._require_instance(browser_id)
-        return await inst.navigate(
-            tab_id, url, timeout_ms=timeout_ms, wait_until=wait_until
-        )
+        async with self._targeted(browser_id) as inst:
+            return await inst.navigate(
+                tab_id, url, timeout_ms=timeout_ms, wait_until=wait_until
+            )
 
     async def eval_js(self, browser_id: str, tab_id: int, js_code: str) -> Any:
         """Execute JavaScript in the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.eval_js(tab_id, js_code)
+        async with self._targeted(browser_id) as inst:
+            return await inst.eval_js(tab_id, js_code)
 
     async def wait_for(
         self, browser_id: str, tab_id: int, expression: str, *, timeout_ms: float
     ) -> Any:
         """Poll a JS expression until truthy or timeout in the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.wait_for(tab_id, expression, timeout_ms=timeout_ms)
+        async with self._targeted(browser_id) as inst:
+            return await inst.wait_for(tab_id, expression, timeout_ms=timeout_ms)
 
     async def screenshot(
         self,
@@ -2697,29 +2713,29 @@ class BrowserManager:
         annotate: bool = False,
     ) -> tuple[str, str | None]:
         """Capture a screenshot of the target tab's viewport."""
-        inst = self._require_instance(browser_id)
-        return await inst.screenshot(tab_id, output_path, annotate=annotate)
+        async with self._targeted(browser_id) as inst:
+            return await inst.screenshot(tab_id, output_path, annotate=annotate)
 
     async def page_click(
         self, browser_id: str, tab_id: int, ref: str, *, timeout_ms: float
     ) -> dict[str, Any]:
         """Click the element identified by ``ref`` in the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_click(tab_id, ref, timeout_ms=timeout_ms)
+        async with self._targeted(browser_id) as inst:
+            return await inst.page_click(tab_id, ref, timeout_ms=timeout_ms)
 
     async def page_click_coords(
         self, browser_id: str, tab_id: int, *, x: float, y: float
     ) -> dict[str, Any]:
         """Click at viewport coordinates in the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_click_coords(tab_id, x=x, y=y)
+        async with self._targeted(browser_id) as inst:
+            return await inst.page_click_coords(tab_id, x=x, y=y)
 
     async def page_hover_coords(
         self, browser_id: str, tab_id: int, *, x: float, y: float
     ) -> dict[str, Any]:
         """Hover at viewport coordinates in the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_hover_coords(tab_id, x=x, y=y)
+        async with self._targeted(browser_id) as inst:
+            return await inst.page_hover_coords(tab_id, x=x, y=y)
 
     async def page_fill(
         self,
@@ -2731,15 +2747,15 @@ class BrowserManager:
         timeout_ms: float,
     ) -> dict[str, Any]:
         """Fill the element identified by ``ref`` with ``value``."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_fill(tab_id, ref, value, timeout_ms=timeout_ms)
+        async with self._targeted(browser_id) as inst:
+            return await inst.page_fill(tab_id, ref, value, timeout_ms=timeout_ms)
 
     async def page_hover(
         self, browser_id: str, tab_id: int, ref: str, *, timeout_ms: float
     ) -> dict[str, Any]:
         """Hover the element identified by ``ref`` in the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_hover(tab_id, ref, timeout_ms=timeout_ms)
+        async with self._targeted(browser_id) as inst:
+            return await inst.page_hover(tab_id, ref, timeout_ms=timeout_ms)
 
     async def page_upload(
         self,
@@ -2751,20 +2767,20 @@ class BrowserManager:
         timeout_ms: float,
     ) -> dict[str, Any]:
         """Set files on a file input identified by ``ref``."""
-        inst = self._require_instance(browser_id)
-        return await inst.page_upload(tab_id, ref, files, timeout_ms=timeout_ms)
+        async with self._targeted(browser_id) as inst:
+            return await inst.page_upload(tab_id, ref, files, timeout_ms=timeout_ms)
 
     async def list_event_listeners(self, browser_id: str, tab_id: int) -> list[dict]:
         """List JS event listeners in the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.list_event_listeners(tab_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.list_event_listeners(tab_id)
 
     async def cookies_list(
         self, browser_id: str, url: str | None = None
     ) -> list[dict[str, Any]]:
         """Return the browser's cookie jar (httpOnly cookies included)."""
-        inst = self._require_instance(browser_id)
-        return await inst.cookies_list(url)
+        async with self._targeted(browser_id) as inst:
+            return await inst.cookies_list(url)
 
     async def cookies_clear(
         self,
@@ -2774,46 +2790,46 @@ class BrowserManager:
         path: str | None = None,
     ) -> dict[str, Any]:
         """Delete cookies from the browser's jar; filters are exact-match."""
-        inst = self._require_instance(browser_id)
-        return await inst.cookies_clear(name, domain, path)
+        async with self._targeted(browser_id) as inst:
+            return await inst.cookies_clear(name, domain, path)
 
     async def cookies_set(
         self, browser_id: str, cookies: list[dict[str, Any]]
     ) -> dict[str, Any]:
         """Plant cookies into the browser's jar (httpOnly allowed)."""
-        inst = self._require_instance(browser_id)
-        return await inst.cookies_set(cookies)
+        async with self._targeted(browser_id) as inst:
+            return await inst.cookies_set(cookies)
 
     async def coverage_start(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Enable precise block-level coverage on the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.coverage_start(tab_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.coverage_start(tab_id)
 
     async def coverage_snapshot(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Read per-block hit counts on the target tab without stopping."""
-        inst = self._require_instance(browser_id)
-        return await inst.coverage_snapshot(tab_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.coverage_snapshot(tab_id)
 
     async def coverage_stop(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Take a final coverage snapshot and stop recording on the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.coverage_stop(tab_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.coverage_stop(tab_id)
 
     async def install_userscript(
         self, browser_id: str, name: str, source: str
     ) -> dict[str, Any]:
         """Install a userscript into the given browser's scope and reload."""
-        inst = self._require_instance(browser_id)
-        result = userscript_mod.install(inst.browser_id, name, source)
-        result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
-        return result
+        async with self._targeted(browser_id) as inst:
+            result = userscript_mod.install(inst.browser_id, name, source)
+            result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
+            return result
 
     async def remove_userscript(self, browser_id: str, name: str) -> dict[str, Any]:
         """Remove a userscript from the given browser's scope and reload."""
-        inst = self._require_instance(browser_id)
-        result = userscript_mod.remove(inst.browser_id, name)
-        result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
-        return result
+        async with self._targeted(browser_id) as inst:
+            result = userscript_mod.remove(inst.browser_id, name)
+            result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
+            return result
 
     def list_userscripts(self, browser_id: str) -> list[dict[str, Any]]:
         """List installed userscripts for one browser from disk.
@@ -2848,10 +2864,10 @@ class BrowserManager:
         Returns:
             The install result from the wrap module.
         """
-        inst = self._require_instance(browser_id)
-        result = install_fn(inst.browser_id, name, expr)
-        result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
-        return result
+        async with self._targeted(browser_id) as inst:
+            result = install_fn(inst.browser_id, name, expr)
+            result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
+            return result
 
     async def wrap_calls_add(
         self, browser_id: str, name: str, expr: str
@@ -2894,8 +2910,8 @@ class BrowserManager:
         Returns:
             A list of ``{name, type, expr}`` dicts.
         """
-        inst = self._require_instance(browser_id)
-        return wrap_mod.list_wraps(inst.browser_id)
+        async with self._targeted(browser_id) as inst:
+            return wrap_mod.list_wraps(inst.browser_id)
 
     async def wrap_remove(self, browser_id: str, name: str) -> dict[str, Any]:
         """Remove a wrap from the given browser's scope and reload its extension.
@@ -2909,25 +2925,25 @@ class BrowserManager:
         Returns:
             The remove result from the wrap module.
         """
-        inst = self._require_instance(browser_id)
-        try:
-            result = wrap_mod.remove(inst.browser_id, name)
-        except ValueError as exc:
-            raise BrowserOperationError(str(exc)) from exc
-        result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
-        return result
+        async with self._targeted(browser_id) as inst:
+            try:
+                result = wrap_mod.remove(inst.browser_id, name)
+            except ValueError as exc:
+                raise BrowserOperationError(str(exc)) from exc
+            result["extension_id"] = await inst._reload_userscript_extension()  # noqa: SLF001
+            return result
 
     async def wrap_dump(
         self, browser_id: str, tab_id: int, name: str | None = None
     ) -> list[dict[str, Any]]:
         """Read the per-tab wrap record array, optionally filtered to one wrap."""
-        inst = self._require_instance(browser_id)
-        return await inst.wrap_dump(tab_id, name)
+        async with self._targeted(browser_id) as inst:
+            return await inst.wrap_dump(tab_id, name)
 
     async def wrap_clear(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Zero the per-tab wrap record array without navigating."""
-        inst = self._require_instance(browser_id)
-        return await inst.wrap_clear(tab_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.wrap_clear(tab_id)
 
     # --- logpoint ------------------------------------------------------
 
@@ -2941,30 +2957,30 @@ class BrowserManager:
         expr: str,
     ) -> dict[str, Any]:
         """Plant a non-pausing logpoint on the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.logpoint_add(tab_id, url, line, col, expr)
+        async with self._targeted(browser_id) as inst:
+            return await inst.logpoint_add(tab_id, url, line, col, expr)
 
     async def logpoint_list(self, browser_id: str, tab_id: int) -> list[dict[str, Any]]:
         """List planted logpoints on the target tab."""
-        inst = self._require_instance(browser_id)
-        return await inst.logpoint_list(tab_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.logpoint_list(tab_id)
 
     async def logpoint_dump(self, browser_id: str, tab_id: int) -> list[dict[str, Any]]:
         """Read the per-tab logpoint record array."""
-        inst = self._require_instance(browser_id)
-        return await inst.logpoint_dump(tab_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.logpoint_dump(tab_id)
 
     async def logpoint_clear(self, browser_id: str, tab_id: int) -> dict[str, Any]:
         """Zero the per-tab logpoint record array without navigating."""
-        inst = self._require_instance(browser_id)
-        return await inst.logpoint_clear(tab_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.logpoint_clear(tab_id)
 
     async def logpoint_remove(
         self, browser_id: str, tab_id: int, lp_id: str
     ) -> dict[str, Any]:
         """Remove a logpoint's CDP breakpoint and registry entry."""
-        inst = self._require_instance(browser_id)
-        return await inst.logpoint_remove(tab_id, lp_id)
+        async with self._targeted(browser_id) as inst:
+            return await inst.logpoint_remove(tab_id, lp_id)
 
     async def handle_dialog(
         self,
@@ -2974,5 +2990,5 @@ class BrowserManager:
         prompt_text: str | None = None,
     ) -> dict[str, Any]:
         """Accept or dismiss the tab's open dialog."""
-        inst = self._require_instance(browser_id)
-        return await inst.handle_dialog(tab_id, action, prompt_text)
+        async with self._targeted(browser_id) as inst:
+            return await inst.handle_dialog(tab_id, action, prompt_text)

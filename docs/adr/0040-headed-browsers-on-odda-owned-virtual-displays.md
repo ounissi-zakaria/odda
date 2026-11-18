@@ -42,8 +42,9 @@ reported endpoint *is* the browser, so no in-page marker is needed.
   fails fast naming the package when missing); `websockify` is a pip
   dependency; noVNC's static assets are vendored under
   `src/odda/novnc/`.
-- The noVNC endpoint binds the operator-configured address (`odda mcp
-  --vnc-bind` or `ODDA_VNC_BIND`, flag wins, default `127.0.0.1`) —
+- The noVNC endpoint binds the operator-configured address (the
+  session config's `vnc_bind` — `odda mcp --vnc-bind` or a config.toml,
+  per ADR-0042; default `127.0.0.1`) —
   operator-only by design; no tool parameter can expose a browser. The
   raw RFB port is loopback-only always, so the only network-exposed
   surface is the noVNC HTTP+WebSocket endpoint.

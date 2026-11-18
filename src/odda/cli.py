@@ -116,13 +116,12 @@ def _cmd_mcp(args: argparse.Namespace) -> None:
     # lifespan loads the same merge again at boot (idempotent; the files
     # are read once per load).
     overrides = {
+        # Config keys are the flags' argparse dests (dashes become
+        # underscores), so the parser already knows them; unset flags
+        # contribute nothing.
         key: value
-        for key, value in (
-            ("max_browsers", args.max_browsers),
-            ("stale_browser_timeout", args.stale_browser_timeout),
-            ("vnc_bind", args.vnc_bind),
-        )
-        if value is not None
+        for key in ("max_browsers", "stale_browser_timeout", "vnc_bind")
+        if (value := getattr(args, key)) is not None
     }
     try:
         load_config(overrides)

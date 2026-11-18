@@ -9,7 +9,7 @@ Maps the scrut suite's per-document model onto pytest:
   the task that entered them, so pytest fixtures can't outlive the
   test). One session = one data dir = one browser set: every test is
   self-contained, no inter-test state coupling.
-- **Data-dir isolation via cwd.** ``odda.mcp.resolve_data_dir`` is
+- **Data-dir isolation via cwd.** ``odda.paths.project_data_dir`` is
   cwd-``.odda``-relative and the lifespan calls
   ``flowstore.set_data_dir`` at session start, so the session factory
   chdirs into a per-test tmp dir for the session's lifetime. xdist
@@ -559,8 +559,8 @@ def odda_session(tmp_path: Path, config_home: Path) -> Iterator[object]:
     A sync fixture returning an async context manager: the session is
     entered and exited inside the test's own task (the SDK's pattern —
     anyio cancel scopes cannot cross tasks), with cwd moved into the
-    test's tmp dir for the session's lifetime so ``resolve_data_dir``
-    isolates this test's ``.odda``.
+    test's tmp dir for the session's lifetime so the data-dir
+    resolution isolates this test's ``.odda``.
     """
     import odda.mcp as odda_mcp
     from odda import flowstore
