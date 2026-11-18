@@ -2119,26 +2119,71 @@ class BrowserInstance:
 
 
 # One patchright driver per event loop, per process. Starting a driver
-# spawns a Node process and handshakes with it (~0.3 s of every
-# browser_open); a driver serves any number of Chrome contexts, so it is
-# kept for the loop's lifetime instead of being stopped with the browser
-# that happened to start it. Keyed weakly by loop: a driver's connection
-# belongs to the loop that started it, and a finished loop's driver goes
-# with it (the Node process exits once the process holding its pipes
-# does).
+# spawns a Node process and handshakes with it (~1.7 s measured, the
+# biggest single slice of a cold browser_open); a driver serves any
+# number of Chrome contexts, so it is kept for the loop's lifetime
+# instead of being stopped with the browser that happened to start it.
+# Keyed weakly by loop: a driver's connection belongs to the loop that
+# started it, and a finished loop's driver goes with it (the Node
+# process exits once the process holding its pipes does).
 _DRIVERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Playwright] = (
     weakref.WeakKeyDictionary()
 )
+# In-flight starts, same keying: concurrent _driver() callers — an
+# open racing the lifespan's warm_driver — share one start instead of
+# double-spawning Node. A failed start is dropped from the map so the
+# next caller retries; a cancelled caller's shield leaves a running
+# start in place for the others.
+_DRIVER_STARTS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Task[Playwright]
+] = weakref.WeakKeyDictionary()
+
+# Strong refs for background warm tasks: the event loop does not keep
+# create_task results alive by itself.
+_WARM_REFS: set[asyncio.Task[Playwright]] = set()
+
+
+async def _start_driver() -> Playwright:
+    driver = await async_playwright().start()
+    _DRIVERS[asyncio.get_running_loop()] = driver
+    return driver
 
 
 async def _driver() -> Playwright:
     """Return this event loop's patchright driver, starting it on first use."""
     loop = asyncio.get_running_loop()
     driver = _DRIVERS.get(loop)
-    if driver is None:
-        driver = await async_playwright().start()
-        _DRIVERS[loop] = driver
-    return driver
+    if driver is not None:
+        return driver
+    task = _DRIVER_STARTS.get(loop)
+    if task is None:
+        task = asyncio.create_task(_start_driver())
+        _DRIVER_STARTS[loop] = task
+    try:
+        return await asyncio.shield(task)
+    except Exception:
+        if _DRIVER_STARTS.get(loop) is task:
+            _DRIVER_STARTS.pop(loop)
+        raise
+
+
+def _warm_done(task: asyncio.Task[Playwright]) -> None:
+    _WARM_REFS.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("Driver warm-up failed: %s", task.exception())
+
+
+def warm_driver() -> None:
+    """Start this event loop's patchright driver in the background.
+
+    The MCP lifespan calls this at boot so the Node handshake overlaps
+    proxy/scanner startup and the client's connect preamble, instead of
+    charging its ~1.7 s to the first browser_open. Failure is logged,
+    never raised — _driver() retries on next use.
+    """
+    task = asyncio.create_task(_driver())
+    _WARM_REFS.add(task)
+    task.add_done_callback(_warm_done)
 
 
 class BrowserManager:
@@ -2382,17 +2427,35 @@ class BrowserManager:
                 "password": PROXY_AUTH_PASSWORD,
             }
 
-        user_data_dir = _prepare_record_profile(browser_id)
         chrome_executable = _find_chrome_executable()
 
-        # Headed Chrome on an odda-owned virtual display (ADR-0040):
-        # never headless, never the user's desktop. Started before Chrome
-        # (Chrome needs a DISPLAY) and torn down together with the browser.
-        display = await start_virtual_display(
-            SCREEN_WIDTH, SCREEN_HEIGHT, self.config.vnc_bind
+        # The three independent launch prerequisites — record profile
+        # seeded from the base profile, the browser's virtual display
+        # (ADR-0040), and the patchright driver — overlap instead of
+        # queueing: the open's critical path is the slowest of them,
+        # not their sum. The seed also leaves the event loop (copytree
+        # of the slimmed base profile is real disk I/O). Display start
+        # stays on the loop's (main) thread — PR_SET_PDEATHSIG keys on
+        # the spawning thread.
+        display_task = asyncio.create_task(
+            start_virtual_display(SCREEN_WIDTH, SCREEN_HEIGHT, self.config.vnc_bind)
         )
         try:
-            playwright = await _driver()
+            user_data_dir, playwright = await asyncio.gather(
+                asyncio.to_thread(_prepare_record_profile, browser_id),
+                _driver(),
+            )
+        except BaseException:
+            display_task.cancel()
+            try:
+                started = await display_task
+            except BaseException:
+                started = None
+            if started is not None:
+                await started.close()
+            raise
+        display = await display_task
+        try:
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 executable_path=chrome_executable,

@@ -45,7 +45,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from odda import NAVIGATE_WAIT_UNTIL_EVENTS, __version__, flowstore, proxyscript
-from odda.browser import BrowserManager, BrowserOperationError
+from odda.browser import BrowserManager, BrowserOperationError, warm_driver
 from odda.config import CONFIG_FILE_NAME, load_config
 from odda.paths import global_rules_dir, project_data_dir
 from odda.proxy import ProxyServer
@@ -166,6 +166,12 @@ async def odda_lifespan(
     config = load_config(_config_overrides, project_path=data_dir / CONFIG_FILE_NAME)
     proxy = ProxyServer()
     browser = BrowserManager(proxy=proxy, config=config)
+    # The patchright driver's Node handshake (~1.7 s) warms in the
+    # background: it overlaps the proxy/scanner boot below and the
+    # client's connect preamble instead of charging the first
+    # browser_open. Fire-and-forget — a failure logs and _driver()
+    # retries on first use.
+    warm_driver()
     # After BrowserManager, mirroring OddaServer.run's order: after
     # set_data_dir so the manager sees the right .odda path, after
     # ProxyServer so the DumpMaster addon chain is ready. A failing
