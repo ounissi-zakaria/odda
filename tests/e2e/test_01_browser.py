@@ -125,7 +125,7 @@ def test_hard_killed_session_cannot_leak_its_display(sig) -> None:
     child = (
         "import asyncio, json, os, signal\n"
         "from odda.vdisplay import start_virtual_display\n"
-        "d = asyncio.run(start_virtual_display(640, 480))\n"
+        "d = asyncio.run(start_virtual_display(640, 480, '127.0.0.1'))\n"
         "print(json.dumps({'display': d.display, 'rfb': d.rfb_port,"
         " 'http': d.http_port}), flush=True)\n"
         f"os.kill(os.getpid(), {int(sig)})\n"

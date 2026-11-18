@@ -2478,9 +2478,10 @@ class BrowserManager:
         bid = browser_id.lower() if browser_id is not None else None
         async with self._open_lock:
             # Already-open diagnoses before the limit: the precise
-            # error, regardless of how many browsers are open.
+            # error, regardless of how many browsers are open. `bid` is
+            # the normalized token — errors emit lowercase (ADR-0030).
             if bid is not None and bid in self._instances:
-                raise BrowserOperationError(f"Browser {browser_id} is already open.")
+                raise BrowserOperationError(f"Browser {bid} is already open.")
             # max_browsers counts browsers open in this session; 0 is
             # unlimited. Reopens of closed records count like fresh
             # opens — the record's Chrome is what the limit caps.
