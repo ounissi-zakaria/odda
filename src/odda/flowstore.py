@@ -1,11 +1,3 @@
-"""File-based storage for mitmproxy flows.
-
-Captured flows are reconstructed into HTTP/1.x-shaped text files. mitmproxy
-normalizes H2/H3 traffic into its H1-shaped object model before the addon
-sees it, so files for H2/H3 traffic carry the original version string but
-are readable rather than wire-replayable.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -22,7 +14,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Content types to exclude from response body storage
 EXCLUDED_CONTENT_TYPES: tuple[str, ...] = (
     "font/",
     "video/",
@@ -30,7 +21,6 @@ EXCLUDED_CONTENT_TYPES: tuple[str, ...] = (
     "image/",
 )
 
-# Map MIME types to file extensions
 _MIME_TO_EXT: dict[str, str] = {
     "application/json": ".json",
     "application/javascript": ".js",
@@ -111,67 +101,27 @@ DATA_DIR: Path = Path.cwd() / ".odda"
 
 _READ_ONLY = 0o444
 
-# flow.metadata key the browser-auth addon (proxy.py) stamps with the parsed
-# proxy credentials: (username, password). The username is the browser's
-# browser_id token (ADR-0031).
+# See ADR-0031.
 PROXYAUTH_METADATA_KEY = "proxyauth"
 
-# flow.metadata key marking flows the auth addon synthesized itself (the
-# canary seeding challenge and its acknowledgment). FlowFileAddon skips
-# tagged flows entirely: no flow id, no directory, no jsonl line.
 AUTH_CHALLENGE_TAG = "odda_auth_challenge"
 
 
 def set_data_dir(path: Path | str) -> None:
-    """Set the directory used for flow storage.
-
-    The directory is *remembered* but not created; it (and its parents)
-    appear lazily on the first state write (flows, requests, browsers,
-    userscripts), each of which mkdirs its own target path. This keeps
-    the data dir absent until odda is actually used.
-
-    Args:
-        path: Directory path.
-    """
     global DATA_DIR, _writer
     DATA_DIR = Path(path)
-    # The writer snapshots the flows dir at creation; a new data dir
-    # invalidates it (the MCP surface can host many sessions in one
-    # process — each lifespan re-points the data dir). It re-creates on
-    # next use, re-seeding the flow id counter from the new location.
     _writer = None
 
 
 def _flows_dir() -> Path:
-    """Path to the directory holding flows.jsonl and per-flow directories.
-
-    Returns the path without creating it; the directory (and its parents)
-    appears lazily on the first flow write.
-    """
     return DATA_DIR / "flows"
 
 
 def should_store_body(content_type: str | None) -> bool:
-    """Check if body should be stored based on content type.
-
-    Args:
-        content_type: MIME type of the content.
-
-    Returns:
-        True if body should be stored, False otherwise.
-    """
     return not content_type or not content_type.startswith(EXCLUDED_CONTENT_TYPES)
 
 
 def _mime_to_ext(content_type: str | None) -> str:
-    """Map a MIME type to a file extension.
-
-    Args:
-        content_type: MIME type string (e.g. ``application/json``).
-
-    Returns:
-        File extension including leading dot, or ``.bin`` for unknown types.
-    """
     if not content_type:
         return ".bin"
     mime = content_type.split(";")[0].strip().lower()
@@ -179,34 +129,9 @@ def _mime_to_ext(content_type: str | None) -> str:
 
 
 def _build_request_bytes(flow) -> bytes:
-    """Reconstruct a raw HTTP request from a mitmproxy flow.
-
-    Args:
-        flow: mitmproxy flow object.
-
-    Returns:
-        Bytes forming a complete HTTP request: request line, headers, blank
-        line, then body. Uses CRLF line endings. Body is the decoded content
-        from mitmproxy (``flow.request.content``). The HTTP version is taken
-        from ``flow.request.http_version``.
-
-    Iterates ``headers.items(multi=True)`` so each duplicate header is emitted
-    on its own line, rather than the folding ``headers.items()`` which joins
-    same-name headers with ``", "`` (RFC 7230 §3.2.2). The captured file
-    faithfully records what the client sent: two ``cookie`` fragments (from a
-    non-conformant H1 UA, a hand-built request, or an HTTP/2 client splitting
-    cookie pairs per RFC 7540 §8.1.2.5) appear as two ``cookie:`` lines, not a
-    joined or ``, "``-folded form. Splitting duplicates is always legal in
-    HTTP/1.1 and is the safer default than folding, which is wrong for headers
-    whose values contain commas (see :func:`_build_response_headers_bytes` for
-    ``Set-Cookie``). See ADR-0013 and REQUEST.md ("the ``request`` file is
-    origin-form and goes on the wire verbatim").
-    """
+    # See ADR-0013.
     request = flow.request
     if request.method == "CONNECT":
-        # Authority form: the CONNECT target is host:port (the path is
-        # empty for tunnel requests), so the request line stays on-wire
-        # faithful: ``CONNECT host:port HTTP/1.1``.
         target = request.authority or f"{request.host}:{request.port}"
     else:
         target = request.path
@@ -222,26 +147,7 @@ def _build_request_bytes(flow) -> bytes:
 
 
 def _build_response_headers_bytes(flow) -> bytes:
-    """Reconstruct raw HTTP response headers from a mitmproxy flow.
-
-    Args:
-        flow: mitmproxy flow object with a response.
-
-    Returns:
-        Bytes forming the status line, headers, and a trailing blank line,
-        using CRLF line endings. No body is included. The HTTP version is
-        taken from ``flow.response.http_version``.
-
-    Iterates ``headers.items(multi=True)`` so each duplicate header is emitted
-    on its own line, rather than the folding ``headers.items()`` which joins
-    same-name headers with ``", "`` (RFC 7230 §3.2.2). This is required for
-    ``Set-Cookie``: RFC 6265 §5.3 forbids folding because attribute values
-    (e.g. ``Expires=Wed, 09 Jun 2021 ...``) contain commas, so a folded
-    ``set-cookie: a=1, b=2`` is unparseable. Splitting duplicates is also the
-    safer default for any other duplicated response header whose values may
-    contain commas. See :func:`_build_request_bytes` — both sides now use
-    ``items(multi=True)`` uniformly (ADR-0013).
-    """
+    # See ADR-0013.
     response = flow.response
     lines = [
         f"{response.http_version} {response.status_code} {response.reason}".encode(
@@ -256,26 +162,12 @@ def _build_response_headers_bytes(flow) -> bytes:
 
 
 def _write_readonly(path: Path, data: bytes) -> None:
-    """Write bytes to a file then make it read-only.
-
-    Args:
-        path: Destination file path.
-        data: Bytes to write.
-    """
     path.write_bytes(data)
     with contextlib.suppress(OSError):
         path.chmod(_READ_ONLY)
 
 
 def _scan_max_flow_id(flows_dir: Path) -> int:
-    """Find the highest zero-padded flow id present on disk.
-
-    Args:
-        flows_dir: Directory containing per-flow subdirectories.
-
-    Returns:
-        The max numeric id found, or 0 if the directory is absent or empty.
-    """
     max_id = 0
     if not flows_dir.exists():
         return max_id
@@ -290,47 +182,17 @@ def _scan_max_flow_id(flows_dir: Path) -> int:
 
 
 class FlowRecordWriter:
-    """Shared flow-record writer for mitmproxy addons and the request sender.
-
-    Owns a single monotonic counter so concurrent flow allocation (mitmproxy
-    capture vs ``request_send``) avoids racing on already-claimed ids.
-    Uniqueness is still guaranteed by ``mkdir``; the counter only minimizes
-    retries.
-    """
-
     def __init__(self) -> None:
-        """Initialize the writer and seed the flow id counter from disk.
-
-        Remembers the flows dir path but does not create it; the directory
-        (and the data dir) appear lazily on the first flow allocation.
-        """
         self._flows_dir = _flows_dir()
         self._counter = itertools.count(_scan_max_flow_id(self._flows_dir) + 1)
         self._jsonl_path = self._flows_dir / "flows.jsonl"
-        # Post-append observer (the scanner's enqueue-only hook,
-        # ADR-0034); None until a session registers one.
+        # See ADR-0034.
         self._observer: Callable[[dict[str, Any]], None] | None = None
 
     def _ensure_flows_dir(self) -> None:
-        """Create the flows directory (and parents) if missing.
-
-        Called on the first flow allocation so the data dir appears lazily
-        on first use, not at server boot.
-        """
         self._flows_dir.mkdir(parents=True, exist_ok=True)
 
     def alloc_flow_id(self) -> str:
-        """Allocate a unique zero-padded flow id by atomically creating its dir.
-
-        Uses ``mkdir`` as the uniqueness primitive so multiple processes can
-        allocate concurrently without a lock: the filesystem picks one winner
-        per id, and losers bump the counter and retry. Ids are unique but not
-        contiguous under contention (acceptable — sortability matters, not
-        density).
-
-        Returns:
-            A zero-padded flow id string matching the created directory name.
-        """
         self._ensure_flows_dir()
         while True:
             flow_id = f"{next(self._counter):05d}"
@@ -341,27 +203,9 @@ class FlowRecordWriter:
             return flow_id
 
     def write_request(self, flow_id: str, request_bytes: bytes) -> None:
-        """Write the raw request bytes for a flow as a read-only file.
-
-        Args:
-            flow_id: Flow id from :meth:`alloc_flow_id`.
-            request_bytes: Raw HTTP request bytes (request line + headers +
-                blank line + body), CRLF-terminated.
-        """
         _write_readonly(self._flows_dir / flow_id / "request", request_bytes)
 
     def write_meta(self, flow_id: str, *, scheme: str, host: str, port: int) -> None:
-        """Write a read-only ``meta.json`` sidecar into a flow directory.
-
-        Holds the connection-level scheme/host/port so ``request clone`` can
-        copy it in O(1) instead of scanning ``flows.jsonl``.
-
-        Args:
-            flow_id: Flow id.
-            scheme: Request scheme (``http``/``https``).
-            host: Request host (without port).
-            port: Request port.
-        """
         data = json.dumps(
             {"scheme": scheme, "host": host, "port": port},
             ensure_ascii=False,
@@ -382,36 +226,7 @@ class FlowRecordWriter:
         browser_id: str | None = None,
         ws: bool = False,
     ) -> dict[str, Any]:
-        """Write response files and append the jsonl line for a completed flow.
-
-        Args:
-            flow_id: Flow id.
-            meta: Request metadata (method, scheme, host, port, path).
-            status_code: HTTP status code.
-            response_headers_bytes: Reconstructed response headers (status
-                line + headers + blank line), CRLF-terminated, no body.
-            body_bytes: Decoded response body, or ``None`` to skip.
-            content_type: ``Content-Type`` header value, used to pick the
-                body file extension and decide whether to store the body.
-            total_duration_ms: Total request+response duration in
-                milliseconds, or ``None``.
-            keep_body: If True, store the body even when ``content_type`` is
-                in the excluded set (images/video/audio/fonts). Used by
-                ``request_send`` (which always passes True) where the
-                body is the payload the caller asked for; the
-                browser-capture addon path never sets this.
-            browser_id: Browser identifier token when the flow rode a
-                browser's proxy credentials (ADR-0031); ``None`` for
-                non-browser traffic and records written before this
-                field existed.
-            ws: True when the 101 response upgraded to a WebSocket and
-                messages will append to the flow's ``ws.jsonl`` sidecar
-                (ADR-0041); the flag is omitted entirely for non-WS
-                flows so existing record shapes stay byte-identical.
-
-        Returns:
-            The flows.jsonl record that was appended.
-        """
+        # See ADR-0031, ADR-0041.
         flow_dir = self._flows_dir / flow_id
 
         body_file: str | None = None
@@ -449,19 +264,7 @@ class FlowRecordWriter:
         error_msg: str,
         browser_id: str | None = None,
     ) -> dict[str, Any]:
-        """Write an error file and append the jsonl line for a failed flow.
-
-        Args:
-            flow_id: Flow id.
-            meta: Request metadata.
-            error_msg: Error message describing the failure.
-            browser_id: Browser identifier token when the flow rode a
-                browser's proxy credentials (ADR-0031); ``None``
-                otherwise.
-
-        Returns:
-            The flows.jsonl record that was appended.
-        """
+        # See ADR-0031.
         flow_dir = self._flows_dir / flow_id
         _write_readonly(flow_dir / "error", error_msg.encode("utf-8"))
         record = {
@@ -489,24 +292,7 @@ class FlowRecordWriter:
         content: str,
         ts: float,
     ) -> None:
-        """Append one WebSocket message record to the flow's ws.jsonl sidecar.
-
-        The sidecar is created lazily by this append and stays writable
-        until :meth:`write_ws_close` seals it — sockets stream messages
-        over their whole lifetime. Records are ``{"from", "opcode",
-        "content", "ts"}`` (ADR-0041): text frames carry raw UTF-8;
-        binary frames carry ``bytes.decode("latin-1")``, a bijective
-        byte↔code-point mapping so every byte round-trips via
-        ``content.encode("latin-1")`` and printable ASCII embedded in
-        binary payloads stays greppable like every other stored byte.
-
-        Args:
-            flow_id: The parent handshake flow's id (its directory).
-            direction: ``"client"`` or ``"server"``; stored as ``from``.
-            opcode: ``"text"`` or ``"binary"`` — how to read ``content``.
-            content: The decoded payload (already escaped per opcode).
-            ts: Proxy-side receipt timestamp.
-        """
+        # See ADR-0041.
         self._append_sidecar(
             flow_id,
             {"from": direction, "opcode": opcode, "content": content, "ts": ts},
@@ -520,21 +306,6 @@ class FlowRecordWriter:
         reason: str | None,
         closed_by_client: bool,
     ) -> None:
-        """Append the terminal close record and seal ws.jsonl read-only.
-
-        Written on ``websocket_end`` — clean or abnormal, so a finished
-        socket is always self-describing (``code`` ``None`` on the
-        abnormal shapes). Also runs for sockets that exchanged zero
-        messages: the close code is the signal. Sealing with the same
-        ``_READ_ONLY`` mode as every other stored file marks the
-        sidecar complete.
-
-        Args:
-            flow_id: The parent handshake flow's id (its directory).
-            code: WebSocket close code, ``None`` when none was exchanged.
-            reason: Close reason string, ``None`` when absent.
-            closed_by_client: ``True`` when the client sent the close.
-        """
         self._append_sidecar(
             flow_id,
             {
@@ -547,19 +318,12 @@ class FlowRecordWriter:
         (self._flows_dir / flow_id / "ws.jsonl").chmod(_READ_ONLY)
 
     def _append_sidecar(self, flow_id: str, record: dict[str, Any]) -> None:
-        """Append one JSON line to a flow's ws.jsonl sidecar."""
         line = json.dumps(record, ensure_ascii=False) + "\n"
         with (self._flows_dir / flow_id / "ws.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(line)
 
     def _append_jsonl(self, record: dict[str, Any]) -> None:
-        """Append one record to flows.jsonl atomically (O_APPEND).
-
-        Fires the post-append observer (the scanner's enqueue-only
-        hook) once the line has landed — by then the per-flow files
-        are all durable. Observer failures are contained here; the
-        write path is never touched (ADR-0034).
-        """
+        # See ADR-0034.
         line = json.dumps(record, ensure_ascii=False) + "\n"
         with self._jsonl_path.open("a", encoding="utf-8") as fh:
             fh.write(line)
@@ -571,27 +335,11 @@ class FlowRecordWriter:
                 logger.exception("flow observer failed; write path unaffected")
 
     def set_observer(self, observer: Callable[[dict[str, Any]], None] | None) -> None:
-        """Register (or clear) the post-append observer.
-
-        Args:
-            observer: Called with each record right after its
-                flows.jsonl line lands, on the writer's own thread
-                (the mitmproxy addon thread for browser capture,
-                the event-loop thread for request_send). It must
-                only enqueue — inline scanning could stall proxy
-                traffic. ``None`` unregisters.
-        """
         self._observer = observer
 
 
 @dataclass(frozen=True, slots=True)
 class RequestMeta:
-    """Metadata describing the request side of a flow.
-
-    Used to bundle request fields when writing flow records so writer methods
-    stay under the argument limit.
-    """
-
     method: str
     scheme: str
     host: str
@@ -600,19 +348,7 @@ class RequestMeta:
 
 
 def _flow_browser_id(flow) -> str | None:
-    """Return the browser id a flow is attributed to, if any.
-
-    The auth addon (proxy.py) stamps the parsed proxy credentials —
-    (username, password), the username being the browser's browser_id
-    token (ADR-0031) — into flow metadata; flows that rode no
-    browser's credentials have no attribution.
-
-    Args:
-        flow: mitmproxy flow object.
-
-    Returns:
-        The browser id token, or ``None`` for unattributed flows.
-    """
+    # See ADR-0031.
     auth = flow.metadata.get(PROXYAUTH_METADATA_KEY)
     return auth[0] if auth else None
 
@@ -620,19 +356,6 @@ def _flow_browser_id(flow) -> str | None:
 def _request_meta(
     flow, *, scheme: str | None = None, path: str | None = None
 ) -> RequestMeta:
-    """Build the :class:`RequestMeta` for a flow from its request side.
-
-    Both overrides exist for CONNECT flows, whose request side is the
-    tunnel attempt rather than an inner request.
-
-    Args:
-        flow: mitmproxy flow object.
-        scheme: Scheme override; defaults to ``flow.request.scheme``.
-        path: Path override; defaults to ``flow.request.path``.
-
-    Returns:
-        The populated request metadata.
-    """
     request = flow.request
     return RequestMeta(
         method=request.method,
@@ -647,7 +370,6 @@ _writer: FlowRecordWriter | None = None
 
 
 def get_writer() -> FlowRecordWriter:
-    """Return the shared :class:`FlowRecordWriter`, creating it on first use."""
     global _writer
     if _writer is None:
         _writer = FlowRecordWriter()
@@ -655,34 +377,14 @@ def get_writer() -> FlowRecordWriter:
 
 
 class FlowFileAddon:
-    """Mitmproxy addon that stores flows as read-only files on disk."""
-
     def __init__(self) -> None:
-        """Initialize the addon and bind to the shared flow record writer."""
         self._writer = get_writer()
-        # flow.id -> (flow_id, browser_id token or None). The token comes
-        # from the auth addon's proxyauth metadata stamp (ADR-0031).
+        # See ADR-0031.
         self._pending_flows: dict[int, tuple[str, str | None]] = {}
-        # flow.id -> odda flow_id for sockets still streaming: WebSocket
-        # message/end hooks fire after `response` popped the pending
-        # entry, so the handshake mapping moves here and lives until the
-        # socket closes (ADR-0041).
+        # See ADR-0041.
         self._ws_flows: dict[int, str] = {}
 
     def request(self, flow) -> None:
-        """Handle request - create flow dir and write the request + meta files.
-
-        The flow dir, request file, and meta.json sidecar are durable
-        immediately, even if no response ever arrives. The flows.jsonl line
-        is appended only when the flow completes (response or error).
-
-        Flows tagged ``AUTH_CHALLENGE_TAG`` are the auth addon's own canary
-        seeding exchanges (proxy.py) — plumbing, not target traffic — and
-        are dropped before anything is allocated.
-
-        Args:
-            flow: mitmproxy flow object.
-        """
         if flow.metadata.get(AUTH_CHALLENGE_TAG):
             return
         browser_id = _flow_browser_id(flow)
@@ -697,11 +399,6 @@ class FlowFileAddon:
         self._pending_flows[flow.id] = (flow_id, browser_id)
 
     def response(self, flow) -> None:
-        """Handle response - write response files and append the jsonl line.
-
-        Args:
-            flow: mitmproxy flow object.
-        """
         pending = self._pending_flows.pop(flow.id, None)
         if pending is None:
             return
@@ -710,10 +407,7 @@ class FlowFileAddon:
         response = flow.response
         request = flow.request
 
-        # A 101 upgrade means a socket is following: keep the handshake
-        # mapping alive for the message/end hooks and flag the index
-        # record so agents can discover the sidecar (ADR-0041). mitmproxy
-        # sets flow.websocket before this hook fires.
+        # See ADR-0041.
         ws = flow.websocket is not None
         if ws:
             self._ws_flows[flow.id] = flow_id
@@ -740,18 +434,7 @@ class FlowFileAddon:
         )
 
     def websocket_message(self, flow) -> None:
-        """Handle one WebSocket message - append it to the flow's ws.jsonl.
-
-        The message arrives assembled (mitmproxy coalesces fragments and
-        negotiates permessage-deflate, so ``content`` is always the
-        decoded payload). Text frames store raw UTF-8; binary frames
-        store the latin-1 bijective escape (ADR-0041). No index line:
-        the message rides no flows.jsonl append, so the scanner never
-        sees it — WS capture is invisible to rules by design.
-
-        Args:
-            flow: The mitmproxy flow with ``flow.websocket`` populated.
-        """
+        # See ADR-0041.
         flow_id = self._ws_flows.get(flow.id)
         if flow_id is None:
             return
@@ -771,17 +454,6 @@ class FlowFileAddon:
         )
 
     def websocket_end(self, flow) -> None:
-        """Handle socket close - append the close record and seal ws.jsonl.
-
-        Fires on every socket ending, clean (1000/1001) or abnormal
-        (no close frame exchanged — ``code`` then arrives as None/
-        1005-shaped data from mitmproxy). The close record is the last
-        line; the sidecar is sealed read-only after it.
-
-        Args:
-            flow: The mitmproxy flow whose ``flow.websocket`` carries
-                the close state.
-        """
         flow_id = self._ws_flows.pop(flow.id, None)
         if flow_id is None:
             return
@@ -794,11 +466,6 @@ class FlowFileAddon:
         )
 
     def error(self, flow) -> None:
-        """Handle flow errors - write an error file and append the jsonl line.
-
-        Args:
-            flow: mitmproxy flow object with ``flow.error`` populated.
-        """
         pending = self._pending_flows.pop(flow.id, None)
         if pending is None:
             return
@@ -811,29 +478,6 @@ class FlowFileAddon:
         )
 
     def http_connect_error(self, flow) -> None:
-        """Handle failed CONNECTs - write an error flow for the tunnel.
-
-        An ``https://`` request to a dead host never has an inner
-        request: the browser sends ``CONNECT host:443``, upstream
-        resolution fails inside mitmproxy's connect layer, and the
-        ``request`` hook never fires. This hook (fired by mitmproxy on
-        the non-2xx CONNECT response) writes the Flow model's error
-        shape for the tunnel attempt itself: flow dir + request +
-        meta.json + error file + ``flows.jsonl`` line, scheme ``https``
-        (the CONNECT targets a TLS tunnel), the authority form as the
-        path, and browser attribution from the CONNECT's proxy
-        credentials (the auth addon stamped them at ``http_connect``
-        time). Request-side rules see it exactly like a cleartext-http
-        error flow.
-
-        Successful CONNECTs never reach this hook (the tunnel's inner
-        flows capture that traffic), and benign client cancels — the
-        client walked away before the tunnel existed — are dropped so
-        they do not spam the flow store.
-
-        Args:
-            flow: The CONNECT mitmproxy flow with the failure response.
-        """
         if flow.metadata.get(AUTH_CHALLENGE_TAG):
             return
         msg = _connect_failure_message(flow)
@@ -842,10 +486,6 @@ class FlowFileAddon:
         browser_id = _flow_browser_id(flow)
         flow_id = self._writer.alloc_flow_id()
         self._writer.write_request(flow_id, _build_request_bytes(flow))
-        # Tunnel attempts are labeled https by convention: browsers
-        # CONNECT because they want a TLS tunnel — the target port does
-        # not determine the scheme. Capture is deliberately
-        # port-agnostic, so dangling-host detection works on any port.
         self._writer.write_meta(
             flow_id,
             scheme="https",
@@ -860,36 +500,12 @@ class FlowFileAddon:
         )
 
 
-# Client-side cancellation texts seen on failed CONNECTs (mitmproxy's
-# kill message and its client-gone wording). These are the benign
-# shapes — the client walked away before the tunnel existed — and must
-# not produce flows. Everything else (DNS failures, refused, timeouts)
-# is an upstream failure worth capturing. Wording audited against
-# mitmproxy 12.2.3 (the version pinned in .venv).
 _CLIENT_CANCEL_MESSAGES = ("client disconnected", "connection killed")
 
-# Eager CONNECT failures surface as a mitmproxy-synthesized 502 whose
-# body carries the upstream error verbatim:
-# ``Cannot connect to <host>:<port>: <err> If you plan to ...``
-# Wording audited against mitmproxy 12.2.3 (the version pinned in .venv);
-# the pinning tests in test_34 guard it against upstream drift.
 _CONNECT_502 = re.compile(r"^Cannot connect to .*?: (.*?)(?: If you plan|$)", re.DOTALL)
 
 
 def _connect_failure_message(flow) -> str | None:
-    """Extract the upstream failure text from a failed CONNECT flow.
-
-    Prefers ``flow.error`` (set on some failure paths); otherwise parses
-    the synthesized 502 body. Returns ``None`` when no upstream failure
-    text exists or the failure is a benign client-side cancellation.
-
-    Args:
-        flow: The CONNECT mitmproxy flow at ``http_connect_error`` time.
-
-    Returns:
-        The error message (e.g. ``[Errno -2] Name or service not
-        known``), or ``None`` for benign cancels.
-    """
     if flow.error is not None and flow.error.msg:
         msg: str = flow.error.msg
     else:

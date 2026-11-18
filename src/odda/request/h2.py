@@ -1,5 +1,3 @@
-"""HTTP/2 raw socket sender using the ``h2`` library."""
-
 from __future__ import annotations
 
 import asyncio
@@ -29,11 +27,6 @@ async def _open_h2(
     deadline: float,
     insecure: bool,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """Open an HTTP/2 connection (TLS for https, ALPN h2).
-
-    Raises ``TimeoutError`` if the deadline passes before the connection
-    opens, ``RuntimeError`` if the server does not negotiate h2.
-    """
     ssl_ctx = ssl.create_default_context()
     if insecure:
         ssl_ctx.check_hostname = False
@@ -69,14 +62,6 @@ def _build_h2_response(
     response_headers: list[tuple[str, str]],
     body: bytes,
 ) -> RawResponse:
-    """Reconstruct an H2 response into the H1-shaped ``RawResponse`` form.
-
-    Extracts ``Content-Type`` and ``Content-Encoding`` from the
-    pseudo-headers / headers and rebuilds an H1-shaped headers block
-    (``HTTP/2 <code> <reason>`` + non-pseudo headers, CRLF-terminated)
-    so the rest of odda (flow storage, body decoding) can treat H2
-    responses uniformly with H1.
-    """
     reason = status_reason(status_code)
     content_type: str | None = None
     content_encoding: str | None = None
@@ -111,7 +96,6 @@ async def send_h2(
     timeout: float,
     insecure: bool,
 ) -> RawResponse:
-    """Send an HTTP/2 request with ALPN negotiation and h2 frame exchange."""
     deadline = time.monotonic() + timeout
 
     reader, writer = await _open_h2(host, port, deadline=deadline, insecure=insecure)
@@ -170,8 +154,6 @@ async def send_h2(
                 isinstance(event, h2.events.ResponseReceived)
                 and event.stream_id == stream_id
             ):
-                # h2 returns str tuples when header_encoding="utf-8" is set,
-                # but the stubs always type headers as tuple[bytes, bytes].
                 response_headers = cast("list[tuple[str, str]]", event.headers)
                 for hname, hvalue in response_headers:
                     if hname == ":status":
@@ -208,17 +190,7 @@ async def send_h2(
 
 
 class ConcurrentConnectionError(Exception):
-    """A connection-level failure aborting a concurrent H2 send.
-
-    Carries the per-stream results gathered so far (``results``) and the
-    error message. Streams that completed before the connection dropped
-    have a :class:`RawResponse` in their slot; streams that did not get a
-    complete response have a :class:`StreamError`. The caller (the API
-    layer) writes one flow record per slot.
-    """
-
     def __init__(self, results: list[ConcurrentResult], error_msg: str) -> None:
-        """Set the partial results and the connection-level error message."""
         self.results = results
         super().__init__(error_msg)
 
@@ -232,41 +204,7 @@ async def send_h2_concurrent(
     timeout: float,
     insecure: bool,
 ) -> list[ConcurrentResult]:
-    """Send N requests concurrently on one HTTP/2 connection.
-
-    Uses the last-byte single-packet technique (ADR-0020): all N
-    streams' HEADERS frames go out in one TLS record so the requests
-    arrive at the server near-simultaneously — the single-packet attack
-    that makes race / limit-overrun reliable. For bodies >= 1 byte the
-    last byte of each body is held back and flushed together as the
-    final flush, so all requests complete (send end_stream) at the same
-    instant.
-
-    Per-stream errors (RST_STREAM) are isolated: that stream gets a
-    :class:`StreamError`, the others continue. A connection-level error
-    (GOAWAY, TLS drop) raises :class:`ConcurrentConnectionError` carrying
-    the partial results (completed streams keep their responses;
-    incomplete streams get a connection-error ``StreamError``).
-
-    Args:
-        host: TCP destination host.
-        port: TCP destination port.
-        scheme: ``http`` or ``https``.
-        parsed_requests: N parsed requests (one per stream).
-        timeout: Total timeout for connect + all sends + all reads.
-        insecure: Skip TLS certificate verification.
-
-    Returns:
-        A list of ``ConcurrentResult`` (one per input request, in send
-        order): a :class:`RawResponse` for a completed stream, or a
-        :class:`StreamError` for a per-stream failure.
-
-    Raises:
-        ConcurrentConnectionError: On a connection-level failure. The
-            ``results`` attribute holds the per-stream outcomes
-            (responses for completed streams, errors for the rest).
-        TimeoutError: On overall timeout before any response.
-    """
+    # See ADR-0020.
     deadline = time.monotonic() + timeout
 
     reader, writer = await _open_h2(host, port, deadline=deadline, insecure=insecure)
@@ -277,15 +215,11 @@ async def send_h2_concurrent(
 
     n = len(parsed_requests)
     results: list[ConcurrentResult | None] = [None] * n
-    # Per-stream accumulator state, keyed by stream_id.
     stream_headers: dict[int, list[tuple[str, str]]] = {}
     stream_bodies: dict[int, bytearray] = {}
     stream_done: set[int] = set()
-    stream_index: dict[int, int] = {}  # stream_id -> send-order index
+    stream_index: dict[int, int] = {}
 
-    # Phase 1: send all HEADERS frames (no drain between -> one TLS
-    # record carries them all). Empty-body streams end here; body streams
-    # stay open for the last-byte phase.
     has_body_streams: list[tuple[int, bytes]] = []
     for i, parsed in enumerate(parsed_requests):
         authority = parsed.host_from_header or host
@@ -308,16 +242,11 @@ async def send_h2_concurrent(
         if parsed.body:
             has_body_streams.append((stream_id, parsed.body))
 
-    # Flush the HEADERS (and the connection preface) as one write.
     outgoing = conn.data_to_send()
     if outgoing:
         writer.write(outgoing)
         await writer.drain()
 
-    # Phase 2 (only if any body streams): last-byte single-packet. Send
-    # all-but-last byte of each body with end_stream=False (no drain
-    # between), then send the last byte of ALL bodies with end_stream=True
-    # in one final flush. All requests complete at the same instant.
     if has_body_streams:
         for stream_id, body in has_body_streams:
             if len(body) > 1:
@@ -334,10 +263,7 @@ async def send_h2_concurrent(
             writer.write(outgoing)
             await writer.drain()
 
-    # Phase 3: read all responses. One read loop dispatching events to
-    # per-stream accumulators. Per-stream RST is isolated; connection
-    # termination / EOF / timeout is a connection-level failure (raises
-    # ConcurrentConnectionError carrying the partial results, ADR-0020).
+    # See ADR-0020.
     conn_error: str | None = None
     try:
         while len(stream_done) < n and conn_error is None:
@@ -355,8 +281,6 @@ async def send_h2_concurrent(
                 break
 
             if not data:
-                # Clean EOF before all streams done: connection-level
-                # failure.
                 conn_error = "connection closed before response complete"
                 break
 
@@ -392,7 +316,6 @@ async def send_h2_concurrent(
                         )
                         stream_done.add(sid)
                 elif isinstance(event, h2.events.StreamReset):
-                    # Per-stream error: isolated. Other streams continue.
                     sid = event.stream_id
                     if sid in stream_index and sid not in stream_done:
                         idx = stream_index[sid]
@@ -401,7 +324,6 @@ async def send_h2_concurrent(
                         )
                         stream_done.add(sid)
                 elif isinstance(event, h2.events.ConnectionTerminated):
-                    # Connection-level: abort all incomplete streams.
                     conn_error = (
                         f"connection terminated by server "
                         f"(error code {event.error_code})"
@@ -417,8 +339,6 @@ async def send_h2_concurrent(
         with contextlib.suppress(Exception):
             await writer.wait_closed()
 
-    # Fill any remaining None slots (per-stream isolation left them, or a
-    # connection error aborted them).
     final: list[ConcurrentResult] = []
     for r in results:
         if r is None:

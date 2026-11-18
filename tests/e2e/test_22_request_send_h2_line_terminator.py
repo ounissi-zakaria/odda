@@ -1,14 +1,4 @@
-"""e2e port of scrut 22-request-send-h2-line-terminator.md.
-
-H2 request files are frame-source: odda parses the file into header
-values and builds H2 frames, splitting header lines on the line
-terminator (default ``\\r\\n``). For H2→H1 downgrade smuggling a literal
-CRLF must live inside ``:path``; a custom terminator (``\\x00``) makes
-the parser split on null bytes so the CRLF survives into the frame
-(ADR-0021). H1 request files are wire-faithful — the terminator is
-ignored for them.
-"""
-
+# See ADR-0021.
 from __future__ import annotations
 
 import json
@@ -17,7 +7,6 @@ from tests.e2e.conftest import dyn_server, odda_session, script_server, self_sig
 
 
 async def test_default_terminator_crlf_in_path_rejected(odda_session, tmp_path) -> None:
-    """Default \\r\\n terminator: CRLF in :path splits the parse → tool error."""
     key, cert = self_signed_cert(tmp_path)
     async with (
         odda_session() as h,
@@ -47,7 +36,6 @@ async def test_default_terminator_crlf_in_path_rejected(odda_session, tmp_path) 
 async def test_custom_terminator_preserves_crlf_into_h2_frame(
     odda_session, tmp_path
 ) -> None:
-    """line_terminator=[0]: \\x00 splits lines, CRLF survives into :path."""
     key, cert = self_signed_cert(tmp_path)
     async with (
         odda_session() as h,
@@ -63,13 +51,11 @@ async def test_custom_terminator_preserves_crlf_into_h2_frame(
                 "force": True,
             },
         )
-        # meta.json carries the terminator as a list of byte ints
         meta = json.loads(
             (h.data_dir / "requests" / "h2smuggle" / "meta.json").read_text()
         )
         assert meta["line_terminator"] == [0]
 
-        # \x00 as line terminator; the :path contains \r\nX-Evil:yes
         h.write_request(
             "h2smuggle",
             (
@@ -80,15 +66,12 @@ async def test_custom_terminator_preserves_crlf_into_h2_frame(
             "request_send", {"name": "h2smuggle", "insecure": True, "timeout": 10}
         )
         assert rec["status_code"] == 200
-        # the structured record's path carries the CRLF verbatim
         assert rec["path"] == "/foo\r\nX-Evil:yes"
-        # the echo server returned the :path as the body — CRLF on the wire
         body = (h.data_dir / "flows" / rec["id"] / "response_body.txt").read_bytes()
         assert b"/foo\r\nX-Evil:yes" in body
 
 
 async def test_h1_ignores_custom_terminator(odda_session, tmp_path) -> None:
-    """An H1 request line ignores the \\x00 terminator in meta.json."""
     async with odda_session() as h, dyn_server() as dyn:
         await h.call(
             "request_new",

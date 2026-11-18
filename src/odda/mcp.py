@@ -1,27 +1,4 @@
-"""MCP server: stdio surface exposing odda's tools.
-
-``odda mcp`` boots this module's :data:`mcp_server` as the *only* odda
-process — the MCP lifespan replaces ``OddaServer`` as the owner of the
-proxy, the browser manager, and the flowstore data dir. Tool handlers
-are ports of today's ``OddaServer.method_*`` bodies; the result/error
-contract is the one pinned in ticket #03 (``.scratch/odda-mcp/issues/
-03-targeting-result-error-contract.md``):
-
-- explicit required ``browser_id`` / ``tab_id`` params (no positional);
-- natural return types, wire-carried-once — every tool returns its
-  declared type; the SDK derives
-  the structured channel from the annotation (``dict`` passes through
-  as itself, str/list/union values arrive as ``{"result": <value>}``)
-  and omp ≥18.20.0 dedupes it against the text blocks (raw-string,
-  ``{"result"}``-unwrap, and per-element list match; binary-verified
-  2026-11-13). ``screenshot`` still passes ``structured_output=False``
-  — its default result is rich blocks, not a JSON value (ADR 0027);
-- one ``@odda_tool`` decorator converts ``BrowserOperationError``,
-  ``ToolParamError``, and the request/userscript/proxy-script
-  libraries' ``ValueError``s to ``ToolError`` (message verbatim);
-  anything else stays an SDK crash logged to stderr.
-"""
-
+# See ADR-0027.
 from __future__ import annotations
 
 import asyncio
@@ -33,12 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-# Context must be imported at runtime: the SDK resolves tool
-# annotations via get_type_hints at add_tool time, so a
-# TYPE_CHECKING-only import breaks Context-kwarg detection. TC002
-# survives ``flake8-type-checking.runtime-evaluated-decorators`` here
-# because ruff ignores that setting under PEP 563
-# (``from __future__ import annotations``); verified against ruff 0.15.17.
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context  # noqa: TC002
 from mcp.server.mcpserver.exceptions import ToolError
@@ -60,24 +31,13 @@ from odda.scanner.engine import Scanner
 from odda.scanner.guide import load_rule_guide
 from odda.scanner.userrules import RuleManager
 
-# Two or more names selects the multi-name pipeline mode (ADR-0019);
-# repeat >= 2 selects the concurrent-send mode (ADR-0020) — the same
-# arity thresholds the CLI's flag combination enforced.
+# See ADR-0019, ADR-0020.
 _PIPELINE_MIN_NAMES = 2
 _REPEAT_MIN = 2
 
 
 class ToolParamError(Exception):
-    """Handler-level validation error (a bad tool argument combination).
-
-    The successor of the JSON-RPC layer's INVALID_PARAMS: the tool
-    itself is the surface now, so handler-side validation raises this
-    instead of ``rpc.JsonRpcError``. :func:`odda_tool` converts it to
-    the SDK's ``ToolError`` with the message verbatim.
-    """
-
     def __init__(self, message: str) -> None:
-        """Initialize with a short human-readable message."""
         super().__init__(message)
         self.message = message
 
@@ -87,20 +47,6 @@ if TYPE_CHECKING:
 
 
 def odda_tool(fn):
-    """Convert odda's anticipated errors to SDK ``ToolError``.
-
-    ``BrowserOperationError`` (library messages: tab not found, ref did
-    not resolve, closed during …), ``ToolParamError`` (handler
-    validation: source is empty, ref-or-coords conflicts), and
-    ``ValueError`` (the request/userscript/proxy-script libraries'
-    anticipated validation: name collisions, not-found, empty request
-    file, pre-emptive pipeline/repeat rejections — messages the old
-    JSON-RPC dispatch surfaced via its catch-all) all become
-    ``ToolError`` with the message verbatim — without this the model
-    sees a content-free crash and loses every self-correction message.
-    Everything else stays a crash: the SDK's ``UnexpectedToolError``
-    path, traceback to stderr, per the map's log decision.
-    """
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
@@ -114,26 +60,15 @@ def odda_tool(fn):
 
 @dataclass
 class OddaState:
-    """What the MCP lifespan owns: proxy, browser manager, rules."""
-
     proxy: ProxyServer
     browser: BrowserManager
     rules: RuleManager
 
 
-# `odda mcp` CLI flags ride the lifespan through this holder: the CLI
-# process sets it once before run() (one process, one invocation). The
-# in-process sessions of the e2e harness never set it and boot from the
-# config files alone.
 _config_overrides: dict[str, Any] = {}
 
 
 def set_config_overrides(overrides: dict[str, Any]) -> None:
-    """Install the CLI flag overrides for the session boot.
-
-    The lifespan merges these over the config files (see
-    ``odda mcp --help``). Mutates the holder in place, never rebinds it.
-    """
     _config_overrides.clear()
     _config_overrides.update(overrides)
 
@@ -142,56 +77,15 @@ def set_config_overrides(overrides: dict[str, Any]) -> None:
 async def odda_lifespan(
     server: MCPServer[OddaState],  # noqa: ARG001 — SDK lifespan signature
 ) -> AsyncIterator[OddaState]:
-    """Boot odda with the MCP process; tear down when the client leaves.
-
-    Process start *is* server boot (ticket #02's verified seam): the
-    same ownership order ``OddaServer.run`` uses — ``set_data_dir`` →
-    ``ProxyServer()`` → ``BrowserManager(proxy=…)`` — minus the Unix
-    socket, signal handlers, and parent watch that die with the CLI.
-    Proxy-scripts are restored from disk before the yield (ticket #12):
-    the yield is the boot barrier — ``Server.run`` enters the lifespan
-    before driving the message loop (mcp 2.1.1 lowlevel server.py:
-    ``async with self.lifespan(...)`` precedes ``serve_dual_era_loop``),
-    and the in-process ``Client(server)`` path enters the lifespan the
-    same way before its dispatcher exists (mcp/client/client.py
-    ``_connect_inproc``). So no ``tools/call`` can arrive mid-restore:
-    restore runs to completion inside the synchronous startup block,
-    before the first frame is even read.
-    """
     data_dir = project_data_dir()
     flowstore.set_data_dir(data_dir)
-    # Session settings (ADR-0042): defaults < global config.toml <
-    # project config.toml < `odda mcp` CLI flags. A bad file or flag
-    # value fails the boot here.
+    # See ADR-0042.
     config = load_config(_config_overrides, project_path=data_dir / CONFIG_FILE_NAME)
     proxy = ProxyServer()
     browser = BrowserManager(proxy=proxy, config=config)
-    # The patchright driver's Node handshake (~1.7 s) warms in the
-    # background: it overlaps the proxy/scanner boot below and the
-    # client's connect preamble instead of charging the first
-    # browser_open. Fire-and-forget — a failure logs and _driver()
-    # retries on first use.
     warm_driver()
-    # After BrowserManager, mirroring OddaServer.run's order: after
-    # set_data_dir so the manager sees the right .odda path, after
-    # ProxyServer so the DumpMaster addon chain is ready. A failing
-    # proxy-script is logged and skipped, never blocking boot.
     proxy.restore_scripts_on_boot()
-    # The passive scanner (ADR-0034): the writer's post-append hook
-    # only enqueues, and the drain task started here scans. Both come
-    # before the yield so no tools/call can produce a flow before
-    # observation is live; teardown cancels the drain before the proxy
-    # stops, so scanning never outlives the session that captured.
-    # The ruleset boots empty (ADR-0036): no rules ship with odda —
-    # every rule arrives as a slot in one of two scopes. Project slots
-    # (.odda/rules/, what rule_install/rule_remove manage) sit in the
-    # data dir next to the proxy-scripts; global slots live in the
-    # config home's rules dir, hand-managed and shared across every
-    # project on the machine (ODDA_CONFIG_HOME redirects them). Both
-    # scopes restore here, minus the project's persisted disable
-    # entries (.odda/scanner/disabled/), so the session's first flow
-    # is scanned against the full active ruleset; a failing slot is
-    # logged and skipped, never blocking boot.
+    # See ADR-0034, ADR-0036.
     scanner = Scanner(data_dir)
     rules = RuleManager(
         scanner,
@@ -202,9 +96,7 @@ async def odda_lifespan(
     rules.restore_on_boot()
     flowstore.get_writer().set_observer(scanner.observe)
     scanner_task = asyncio.create_task(scanner.run())
-    # The stale-browser sweep (ADR-0042) rides the same lifecycle: task
-    # only when the timeout is on, cancelled before the browsers are so
-    # a sweep never races the shutdown close_all.
+    # See ADR-0042.
     stale_task: asyncio.Task[None] | None = None
     if config.stale_browser_timeout > 0:
         stale_task = asyncio.create_task(
@@ -228,9 +120,6 @@ async def odda_lifespan(
 mcp_server = MCPServer[OddaState](
     "odda",
     version=__version__,
-    # description → serverInfo block in the initialize result: the
-    # short "what is this server" label. instructions →
-    # initialize.instructions: the detailed orientation brief.
     description="Browser automation and HTTP traffic capture for agents.",
     lifespan=odda_lifespan,
     instructions=(
@@ -250,9 +139,6 @@ mcp_server = MCPServer[OddaState](
         "the session are never scanned."
     ),
 )
-
-
-# --- browser lifecycle ---
 
 
 @mcp_server.tool()
@@ -283,9 +169,6 @@ async def browser_list(
 ) -> list[dict[str, Any]]:
     """List every browser record in the data dir, alphabetically."""
     return ctx.request_context.lifespan_context.browser.list_instances()
-
-
-# --- tab lifecycle ---
 
 
 @mcp_server.tool()
@@ -336,9 +219,6 @@ async def dialog_handle(
     )
 
 
-# --- page control ---
-
-
 @mcp_server.tool()
 @odda_tool
 async def navigate(
@@ -366,11 +246,6 @@ async def navigate(
 
 
 def _read_payload_file(file: str) -> str:
-    """Read a literal-vs-file payload: validate existence, read as UTF-8.
-
-    The exclusivity/required check lives in the caller (its param names
-    differ per tool); this is just the shared file leg.
-    """
     path = Path(file)
     if not path.is_file():
         raise ToolParamError(f"File not found: {file}")
@@ -448,9 +323,6 @@ async def screenshot(
     if len(blocks) == 1:
         return path
     return CallToolResult(content=blocks)
-
-
-# --- page interaction (snapshot + ref-driven actions) ---
 
 
 @mcp_server.tool()
@@ -585,9 +457,6 @@ async def page_upload(
     )
 
 
-# --- introspection ---
-
-
 @mcp_server.tool()
 @odda_tool
 async def event_listeners(
@@ -656,9 +525,6 @@ async def cookies_set(
 async def version() -> dict[str, Any]:
     """Return the odda version."""
     return {"version": __version__}
-
-
-# --- request crafting (raw HTTP) ---
 
 
 @mcp_server.tool()
@@ -802,9 +668,6 @@ async def proxy_upstream_get(*, ctx: Context[OddaState]) -> dict[str, Any]:
     return ctx.request_context.lifespan_context.proxy.upstream_state()
 
 
-# --- dynamic analysis: coverage ---
-
-
 @mcp_server.tool()
 @odda_tool
 async def coverage_start(
@@ -836,9 +699,6 @@ async def coverage_stop(
     return await ctx.request_context.lifespan_context.browser.coverage_stop(
         browser_id, tab_id
     )
-
-
-# --- dynamic analysis: wraps ---
 
 
 @mcp_server.tool()
@@ -909,9 +769,6 @@ async def wrap_clear(
     )
 
 
-# --- dynamic analysis: logpoints ---
-
-
 @mcp_server.tool()
 @odda_tool
 async def logpoint_add(  # noqa: PLR0913 — targeting + url/line/col/expr is the tool's contract
@@ -974,15 +831,7 @@ async def logpoint_clear(
     )
 
 
-# --- dynamic analysis: userscripts ---
-
-
 def _read_install_source(file: str | None, source: str | None, what: str) -> str:
-    """Resolve an install payload's source: file xor inline, both validated.
-
-    The CLI's flag checks move here — the tool is the surface now and
-    a missing file must read as odda's message, not an SDK crash.
-    """
     if file is not None and source is not None:
         raise ToolParamError("Provide either file or source, not both")
     if file is None and source is None:
@@ -1031,9 +880,6 @@ async def userscript_remove(
     )
 
 
-# --- dynamic analysis: proxy-scripts ---
-
-
 @mcp_server.tool()
 @odda_tool
 async def proxy_script_install(
@@ -1069,15 +915,7 @@ async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str
     return ctx.request_context.lifespan_context.proxy.remove_script(name)
 
 
-# --- passive scanner: user rules ---
-
-
-# The install surface's one docs resource (ADR-0038): the full
-# authoring guide — rule fields, FlowView, worked examples — which no
-# tool surface can carry and no author can proceed without. Its
-# rule-file section is spliced, at serve time, from the same
-# RULE_FILE_SKELETON every load-failure rejection shows, so guide and
-# errors cannot drift.
+# See ADR-0038.
 @mcp_server.resource(
     "odda://scanner/rule-guide",
     name="rule-guide",
@@ -1090,14 +928,9 @@ async def proxy_script_remove(name: str, *, ctx: Context[OddaState]) -> dict[str
     mime_type="text/markdown",
 )
 def scanner_rule_guide() -> str:
-    """Serve the rule guide payload (single-sourced skeleton)."""
     return load_rule_guide()
 
 
-# The description carries the install contract plus the one-line
-# pointer to the guide resource; the rule-file skeleton itself lives in
-# the guide and in every load-failure rejection — one constant, so the
-# surfaces cannot drift.
 _RULE_INSTALL_DOC = (
     "Install a passive-scanner rule slot from file or source into this "
     "project's rules dir (.odda/rules/). Installed rules scan flows "
@@ -1145,9 +978,6 @@ async def rule_remove(name: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
     return await ctx.request_context.lifespan_context.rules.remove(name)
 
 
-# The descriptions carry what an agent cannot infer — what a disable
-# leaves in place and the arrival-time effect; the param constraint
-# lives in the error that fires, with the fix (CODING_STANDARDS).
 _RULE_DISABLE_DOC = (
     "Disable an installed rule for this project — a slot name disables "
     "every rule in the slot, a rule id disables that one rule. Disabled "
@@ -1161,7 +991,6 @@ _RULE_ENABLE_DOC = (
 
 
 def _rule_target(name: str | None, rule_id: str | None) -> tuple[str, str]:
-    """Resolve the disable/enable target kind and value (XOR params)."""
     if (name is None) == (rule_id is None):
         raise ToolParamError("Pass exactly one of name or id")
     return ("name", name) if name is not None else ("id", rule_id)
@@ -1194,7 +1023,6 @@ async def rule_enable(
 
 
 def main() -> None:
-    """``odda mcp`` entrypoint: serve stdio JSON-RPC."""
     mcp_server.run()
 
 

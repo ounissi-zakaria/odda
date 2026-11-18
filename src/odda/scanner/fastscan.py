@@ -1,60 +1,4 @@
-r"""Multi-pattern find-all seam over the Vectorscan-backed engine.
-
-One :class:`FastScan` holds a compiled multi-pattern database built from
-many :class:`re.Pattern` objects and answers, per input pattern, the match
-spans over any decoded body text — character offsets, leftmost-first,
-non-overlapping, byte-identical to ``re.Pattern.finditer`` over the exact
-text the Scanner scans (``FlowView.body``: leniently UTF-8-decoded str).
-
-Engine design
-=============
-
-The engine (``hyperscan``, Vectorscan-backed; a hard dependency — there is
-no fallback engine) reports, per end offset, the match with the leftmost
-start — not the full match relation Python iterates. So each pattern is
-serialized in *reversed* form (anchors swapped, quantifier order flipped)
-and scanned against the reversed body: one reversed-scan pass then yields
-every true match start. The spans themselves are selected by anchored
-stdlib matches at those candidate starts, which makes the output equal to
-``finditer`` by construction — candidates are a superset of true starts,
-and the anchored match reproduces Python's leftmost-first preference
-(greedy/lazy/alternation order) exactly. The GIL is released around the
-engine's scan calls; the anchored Python work only ever touches actual
-matches.
-
-Divergence guards
-=================
-
-The engine's Unicode tables are not Python's:
-
-- ``\w``/``\d``/``\s`` classes (and negations) diverge from Python's on a
-  few thousand non-ASCII code points. Such patterns compile without UCP
-  (ASCII flavor) and are routed through the stdlib path whenever the body
-  is not pure ASCII; on ASCII bodies both engines agree exactly.
-- Case-insensitive folding diverges only on the Turkish dotted I
-  (U+0130/U+0131). Caseless patterns compiled with UCP take the stdlib
-  path when the body contains either.
-
-Prefilters
-==========
-
-Patterns the engine refuses — backreferences, lookarounds, ``\b``/``\B``,
-possessive/atomic repeats, and patterns over the engine's size budget —
-compile into the same pass as *approximate prefilters* (the engine's
-prefilter mode: they may over-report, never under-report).
-:meth:`FastScan.prefiltered` reports which input indices run approximated.
-Their spans come back *confirmed* (ADR-0037): the true stdlib pattern
-runs — and only on bodies whose approximation hit — and its find-iterator's
-spans replace the approximation's, so parity with ``finditer`` holds for
-them exactly as for engine-exact patterns, and a body no approximation
-hits never pays a stdlib scan. Patterns the engine can neither scan nor
-approximate — above all patterns that can match the empty string, where
-``finditer`` emits zero-width spans no engine run could reproduce — are
-refused at build with a ``ValueError`` naming the pattern; callers run
-those on the stdlib path outright.
-
-"""
-
+# See ADR-0037.
 from __future__ import annotations
 
 import contextlib
@@ -71,10 +15,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-# Anchor translation for the reversed expression. ``$`` becomes ``^`` (and
-# forces MULTILINE, whose "after any newline" is a superset of the reversed
-# image of Python's trailing-newline ``$``); ``^`` becomes ``$``; the buffer
-# anchors swap; ``\b``/``\B`` have no engine equivalent under UCP.
 _AT_REVERSED = {
     sre_constants.AT_BEGINNING: "$",
     sre_constants.AT_BEGINNING_STRING: r"\z",
@@ -91,9 +31,6 @@ _CATEGORY = {
     sre_constants.CATEGORY_WORD: r"\w",
     sre_constants.CATEGORY_NOT_WORD: r"\W",
 }
-# Anchors for the straight (non-reversed) prefilter emission. Emitted
-# faithfully: zero-width constructs carry no widening risk of their own —
-# the engine's prefilter mode approximates what it cannot honor exactly.
 _AT_STRAIGHT = {
     sre_constants.AT_BEGINNING: "^",
     sre_constants.AT_BEGINNING_STRING: r"\A",
@@ -103,20 +40,10 @@ _AT_STRAIGHT = {
     sre_constants.AT_NON_BOUNDARY: r"\B",
 }
 
-# Bounded repeats whose upper bound reaches this ceiling are widened to
-# unbounded form in the prefilter source only (see _prefilter_repeat):
-# vectorscan's bounded-repeat compilation explodes superlinearly with the
-# bound (the S3-rule NoSuchBucket shape, `.{0,500}?` under (?s), costs
-# ~42 s to compile for one expression) while an unbounded quantifier
-# compiles in microseconds.
 _PREFILTER_REPEAT_CEILING = 64
 
 _UNI_CLASS_CATEGORIES = frozenset(_CATEGORY)
-# Characters where the engine's simple case folding differs from Python's
-# full folding (U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE, U+0131 DOTLESS
-# SMALL I) — verified by sweep over the BMP and the astral cased scripts.
 _FOLD_DIVERGENT = "\u0130\u0131"
-# PCRE metacharacters that must be escaped when re-emitting literals.
 _META_OUTSIDE = set("\\^$.|?*+()[]{}")
 _META_IN_CLASS = set("\\]^-")
 _ASCII_CTRL = 0x20
@@ -128,11 +55,10 @@ _RE_LEADING_GLOBAL_FLAGS = re.compile(r"^\(\?[aiLmsux]+\)")
 
 
 class _UnsupportedError(Exception):
-    """The pattern uses a construct the exact path cannot serialize."""
+    pass
 
 
 def _escape(ch: str, *, in_class: bool = False) -> str:
-    """Emit one literal character as engine-safe source."""
     code = ord(ch)
     if code < _ASCII_CTRL or code == _ASCII_DEL:
         return f"\\x{code:02x}"
@@ -164,7 +90,6 @@ def _class_source(items: Sequence) -> str:
 
 
 def _min_length(tree) -> int:
-    """Minimum match length in characters; 0 means it can match empty."""
     total = 0
     for op, av in tree:
         if op in (
@@ -183,18 +108,11 @@ def _min_length(tree) -> int:
         elif op is sre_constants.AT:
             continue
         else:
-            # Lookarounds, backreferences, conditionals, possessive and
-            # atomic repeats: the exact path does not serialize them.
             raise _UnsupportedError(f"construct {op}")
     return total
 
 
 def _reversed_repeat(av) -> str:
-    """Reversed source for a repeat node.
-
-    Laziness does not change the set of match starts, so both quantifier
-    flavors emit greedy.
-    """
     mn, mx, sub = av
     body, atom = _reversed_single(sub)
     if not atom:
@@ -213,11 +131,6 @@ def _reversed_repeat(av) -> str:
 
 
 def _reversed_item(node) -> tuple[str, bool]:
-    """Reversed source for one sequence item.
-
-    Returns the source and whether it is a single atom (safe to quantify
-    without grouping).
-    """
     op, av = node
     if op is sre_constants.LITERAL:
         return _escape(chr(av)), True
@@ -243,7 +156,6 @@ def _reversed_item(node) -> tuple[str, bool]:
 
 
 def _reversed_single(tree) -> tuple[str, bool]:
-    """Reversed source of a whole subexpression treated as one unit."""
     items = list(tree)
     if len(items) == 1:
         return _reversed_item(items[0])
@@ -256,17 +168,7 @@ def _reversed_source(tree) -> str:
 
 
 def _prefilter_repeat(av) -> str:
-    """Straight source for one repeat node, wide bounds widened.
-
-    A bounded repeat ``X{mn,mx}`` with ``mx`` at or above
-    :data:`_PREFILTER_REPEAT_CEILING` becomes the unbounded ``X{mn,}``:
-    every match of the original is a match of the widened form, so the
-    approximation can only over-report — the same license
-    ``HS_FLAG_PREFILTER`` already grants, and over-reports cost only a
-    stdlib confirmation that was already the design's answer to them
-    (ADR-0037). Laziness and possessiveness change backtracking, not
-    the match language, so every flavor emits greedy plain.
-    """
+    # See ADR-0037.
     mn, mx, sub = av
     body, atom = _prefilter_single(sub)
     if not atom:
@@ -285,7 +187,6 @@ def _prefilter_repeat(av) -> str:
 
 
 def _scoped_flags_source(add: int, del_: int) -> str:
-    """Emit the letters of a scoped flag group, ``ism``-shaped only."""
     letters = {
         re.IGNORECASE: "i",
         re.DOTALL: "s",
@@ -303,7 +204,6 @@ def _scoped_flags_source(add: int, del_: int) -> str:
 
 
 def _prefilter_atom(node) -> tuple[str, bool]:
-    """Straight source for the atom shapes: literals, classes, backrefs."""
     op, av = node
     if op is sre_constants.LITERAL:
         return _escape(chr(av)), True
@@ -313,17 +213,10 @@ def _prefilter_atom(node) -> tuple[str, bool]:
         return ".", True
     if op is sre_constants.NOT_LITERAL:
         return f"[^{_escape(chr(av), in_class=True)}]", True
-    return f"\\{av}", True  # GROUPREF: numbering survives faithful emission
+    return f"\\{av}", True
 
 
 def _prefilter_grouping(node) -> tuple[str, bool]:
-    """Straight source for groups and lookarounds.
-
-    Atomic groups emit their plain body: atomicity restricts
-    backtracking, not the match language, so the plain form is a
-    superset. Lookarounds emit faithfully — a wrong arrow is not a
-    widening but a different language.
-    """
     op, av = node
     if op is sre_constants.SUBPATTERN:
         group, add_flags, del_flags, sub = av
@@ -332,25 +225,17 @@ def _prefilter_grouping(node) -> tuple[str, bool]:
             letters = _scoped_flags_source(add_flags, del_flags)
             return f"(?{letters}:{body})", True
         if group is not None:
-            # Numbered groups stay capturing: backreferences may follow.
             return f"({body})", True
         return f"(?:{body})", True
     if op is sre_constants.ATOMIC_GROUP:
         return f"(?:{_prefilter_source(av)})", True
-    direction, sub = av  # ASSERT / ASSERT_NOT
+    direction, sub = av
     kind = "=" if op is sre_constants.ASSERT else "!"
     arrow = "<" if direction < 0 else ""
     return f"(?{arrow}{kind}{_prefilter_source(sub)})", True
 
 
 def _prefilter_item(node) -> tuple[str, bool]:
-    """Straight source for one sequence item (faithful except widening).
-
-    Returns the source and whether it is a single atom (safe to quantify
-    without grouping). Anything the emitter cannot serialize faithfully
-    raises :class:`_UnsupportedError` and the caller keeps the pattern's
-    raw source instead — never a silent mis-approximation.
-    """
     op, av = node
     if op in (
         sre_constants.LITERAL,
@@ -385,7 +270,6 @@ def _prefilter_item(node) -> tuple[str, bool]:
 
 
 def _prefilter_single(tree) -> tuple[str, bool]:
-    """Straight source of a whole subexpression treated as one unit."""
     items = list(tree)
     if len(items) == 1:
         return _prefilter_item(items[0])
@@ -393,12 +277,10 @@ def _prefilter_single(tree) -> tuple[str, bool]:
 
 
 def _prefilter_source(tree) -> str:
-    """Straight source for a whole parsed tree."""
     return "".join(_prefilter_item(node)[0] for node in tree)
 
 
 def _has_wide_repeat(tree) -> bool:
-    """Whether any bounded repeat's upper bound hits the widening ceiling."""
     found = False
 
     def check(node) -> None:
@@ -420,7 +302,6 @@ def _has_wide_repeat(tree) -> bool:
 
 
 def _walk_tree(tree, fn) -> None:
-    """Visit every node of a parsed tree, parents before children."""
     for node in tree:
         fn(node)
         op, av = node
@@ -482,12 +363,6 @@ def _uses_unicode_class(tree) -> bool:
 
 
 def _reverse_expression(pattern: re.Pattern) -> tuple[str, int, bool, bool]:
-    """Build the engine expression for one pattern.
-
-    Returns the reversed source, the engine flags, whether the classes were
-    compiled ASCII-flavored (valid only for ASCII bodies), and whether
-    case folding can diverge on the Turkish dotted I.
-    """
     flags = pattern.flags
     tree = sre_parse(pattern.pattern, flags)
     if _min_length(tree) == 0:
@@ -511,18 +386,6 @@ def _reverse_expression(pattern: re.Pattern) -> tuple[str, int, bool, bool]:
 
 
 def _prefilter_expression(pattern: re.Pattern) -> tuple[str, int]:
-    """Build the approximate-prefilter compile for one pattern.
-
-    The source is the original pattern (global inline flags folded away —
-    the engine rejects bare ``(?u)``), except when a bounded repeat's
-    upper bound reaches :data:`_PREFILTER_REPEAT_CEILING`: those compile
-    superlinearly in vectorscan (the S3 NoSuchBucket shape costs ~42 s
-    per expression, paid twice — once at the individual probe, once in
-    the batch), so the tree is re-emitted with the wide repeats widened
-    to unbounded form, a strict superset the prefilter license covers.
-    Constructs the straight emitter cannot serialize faithfully fall
-    back to the raw source — today's behavior — never a guess.
-    """
     flags = pattern.flags
     source = _RE_LEADING_GLOBAL_FLAGS.sub("", pattern.pattern, count=1)
     tree = sre_parse(pattern.pattern, flags)
@@ -557,10 +420,6 @@ _CONTINUATION = bytes(
 
 
 def _char_ends(data: bytes, byte_ends: Sequence[int]) -> list[int]:
-    """Translate byte end-offsets of UTF-8 ``data`` to character offsets.
-
-    One sweep of the body serves any number of hits.
-    """
     out: list[int] = []
     byte_at = 0
     chars_at = 0
@@ -573,24 +432,11 @@ def _char_ends(data: bytes, byte_ends: Sequence[int]) -> list[int]:
 
 
 def _reversed_utf8(text: str) -> bytes | bytearray:
-    """UTF-8 bytes of the reversed text, in GIL-yielding slices.
-
-    Byte-identical to ``text[::-1].encode()``: slices are character-
-    wise, so no code point is ever split, and the reversed image of a
-    concatenation is the concatenation of the reversed images in
-    reverse order. Large texts assemble into one preallocated buffer,
-    slice by slice with the GIL offered between writes — the engine
-    scans any bytes-like buffer, so no final whole-body join copy is
-    ever materialized.
-    """
     if len(text) <= GIL_CHUNK:
         return text[::-1].encode()
     parts = [part[::-1].encode() for part in chunked(text)]
     data = bytearray(sum(len(part) for part in parts))
     pos = 0
-    # Assembly walks the parts back to front, one part per step
-    # (chunk 1 yields one-element slices), the shared GIL cadence
-    # between writes.
     for group in chunked(parts[::-1], 1):
         part = group[0]
         data[pos : pos + len(part)] = part
@@ -599,23 +445,11 @@ def _reversed_utf8(text: str) -> bytes | bytearray:
 
 
 def _confirmed_spans(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
-    """Confirm one approximated pattern on a body its approximation hit.
-
-    The true stdlib pattern is the only authority on what the
-    approximation over-reported: its find-iterator's spans replace the
-    approximation's wholesale, so a confirmed prefilter reports exactly
-    the stdlib spans. This runs on the caller's thread — for the
-    scanner, the drain's worker (ticket 10's offload) — and
-    catastrophic backtracking inside a confirmation is the accepted
-    tail (ADR-0037): no match budget, revisited only on a real session
-    wedge.
-    """
+    # See ADR-0037.
     return [match.span() for match in pattern.finditer(text)]
 
 
 class _Exact:
-    """One engine-exact pattern: reversed expression plus divergence tags."""
-
     __slots__ = ("fold_sensitive", "index", "pattern", "unicode_classes")
 
     def __init__(
@@ -633,8 +467,6 @@ class _Exact:
 
 
 class _Pre:
-    """One approximate-prefilter pattern."""
-
     __slots__ = ("index", "pattern")
 
     def __init__(self, index: int, pattern: re.Pattern) -> None:
@@ -643,17 +475,6 @@ class _Pre:
 
 
 class _Fate(NamedTuple):
-    """One pattern's build classification (exactly one arm populated).
-
-    Fields:
-        exact: The engine-exact spec, when the reversed expression
-            compiles (with its source and flags).
-        prefilter: The approximate-prefilter spec, when only the
-            approximation compiles (with its source and flags).
-        refusal: The error naming the pattern when neither stands —
-            the caller refuses it.
-    """
-
     exact: _Exact | None
     exact_source: str | None
     exact_flags: int
@@ -664,7 +485,6 @@ class _Fate(NamedTuple):
 
 
 def _classify_pattern(index: int, pattern: re.Pattern) -> _Fate:
-    """One pattern's fate: exact, prefiltered, or the refusal error."""
     try:
         source, hs_flags, unicode_classes, fold = _reverse_expression(pattern)
     except _UnsupportedError:
@@ -709,14 +529,7 @@ def _classify_pattern(index: int, pattern: re.Pattern) -> _Fate:
 
 
 class FastScan:
-    """Multi-pattern find-all: patterns in, per-pattern spans out.
-
-    Every span list is identical to the stdlib find-iterator's — for
-    engine-exact patterns by construction, for approximate prefilters
-    by confirmation on the approximation's hits (ADR-0037). Build one
-    per ruleset (compile once, scan many); the engine releases the GIL
-    around its scan calls.
-    """
+    # See ADR-0037.
 
     __slots__ = (
         "_exact",
@@ -736,7 +549,6 @@ class FastScan:
         prefilter_db: hyperscan.Database | None,
         refused: frozenset[int] = frozenset(),
     ) -> None:
-        """Assemble a scanner from build() results."""
         self._patterns = patterns
         self._exact = exact
         self._exact_db = exact_db
@@ -746,34 +558,6 @@ class FastScan:
 
     @classmethod
     def build(cls, patterns: Sequence[re.Pattern]) -> FastScan:
-        """Compile patterns into one fast-scan database, classifying fate.
-
-        Every input pattern's fate is classified here, once: exact
-        (the reversed-expression compile stands), prefiltered (the
-        engine can only approximate it — backreferences, lookarounds
-        — and the true pattern confirms on every approximation hit;
-        reported by :attr:`prefiltered`), or refused
-        (:attr:`refused`; zero-width-matching constructs above all,
-        which no approximation can stand in for). Refused patterns
-        never ride a database — their ``find_all`` span list is
-        always empty — so the caller reads the fate and scans them
-        its own way. A build in which every pattern was refused
-        raises ``ValueError`` naming the first; a combined compile
-        that fails after every individual probe passed refuses the
-        whole batch instead of raising — the patterns are
-        individually scannable, only the batch is not.
-
-        Args:
-            patterns: compiled patterns, in input order.
-
-        Returns:
-            A ready-to-scan :class:`FastScan`.
-
-        Raises:
-            TypeError: an item is not a compiled pattern.
-            ValueError: every pattern can be neither scanned nor
-                approximated.
-        """
         checked = tuple(patterns)
         for pattern in checked:
             if not isinstance(pattern, re.Pattern):
@@ -812,9 +596,6 @@ class FastScan:
                 else None
             )
         except hyperscan.error:
-            # Individually scannable, jointly not: refuse the batch
-            # rather than raise — the caller's residual path is the
-            # correct answer for every pattern in it.
             logger.exception("fast-scan combined compile failed; every pattern refused")
             return cls(checked, (), None, (), None, frozenset(range(len(checked))))
         return cls(
@@ -828,35 +609,17 @@ class FastScan:
 
     @property
     def patterns(self) -> tuple[re.Pattern, ...]:
-        """The input patterns, in order."""
         return self._patterns
 
     @property
     def prefiltered(self) -> frozenset[int]:
-        """Indices of patterns running as approximate prefilters."""
         return frozenset(spec.index for spec in self._prefilters)
 
     @property
     def refused(self) -> frozenset[int]:
-        """Indices of patterns the engine refused — never scanned here."""
         return self._refused
 
     def find_all(self, text: str) -> list[list[tuple[int, int]]]:
-        """All matches of all patterns against ``text``.
-
-        Args:
-            text: the decoded body text the Scanner scans (character
-                offsets in the results index into this exact string).
-
-        Returns:
-            One span list per input pattern, in input order. For
-            engine-exact patterns every span equals the stdlib
-            find-iterator's. For prefiltered patterns the spans are
-            confirmed: the true pattern ran on this body (its
-            approximation hit), so its find-iterator's spans stand —
-            a body no approximation hits reports an empty list without
-            a stdlib scan.
-        """
         results: list[list[tuple[int, int]]] = [[] for _ in self._patterns]
         ascii_text = text.isascii()
         if self._prefilter_db is not None:
@@ -883,14 +646,8 @@ class FastScan:
         )
         for slot, spec in enumerate(self._prefilters):
             if ends[slot]:
-                # Approximation hit: the true pattern confirms, and its
-                # spans replace the approximation's over-reports.
                 results[spec.index] = _confirmed_spans(spec.pattern, text)
             elif not ascii_text:
-                # The engine's Unicode tables are not Python's; when the
-                # approximation came back empty on a non-ASCII body, it
-                # can under-report — the true pattern stands in for the
-                # superset guarantee before any no-hit conclusion.
                 confirmed = _confirmed_spans(spec.pattern, text)
                 if confirmed:
                     results[spec.index] = confirmed

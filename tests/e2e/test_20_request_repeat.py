@@ -1,14 +1,4 @@
-"""e2e port of scrut 20-request-repeat.md: concurrent repeat sends.
-
-``request_send(name, repeat=N)`` fires N concurrent copies of one
-request — the race / limit-overrun path (ADR-0020). H2 uses stream
-multiplexing with the last-byte single-packet technique (all N HEADERS
-in one TLS record, observable via the dyn server's ``?race=`` arrival
-timestamps); H1 opens N parallel connections. Multi-name + repeat and
-pipelining + repeat are rejected pre-emptively; fix_content_length +
-repeat is allowed.
-"""
-
+# See ADR-0020.
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,13 +13,11 @@ async def _new(h, name: str, port: int) -> None:
 
 
 def _race_spread_ms(race_file: Path) -> float:
-    """Max-min arrival spread in ms from the dyn server's timestamp file."""
     ts = [int(line) for line in race_file.read_text().splitlines()]
     return (max(ts) - min(ts)) / 1_000_000
 
 
 async def test_repeat_h2_five_concurrent_copies(odda_session, tmp_path) -> None:
-    """H2 repeat 5: 5 records, all 200, distinct ids, tight arrival window."""
     race_dir = tmp_path / "race"
     async with odda_session() as h, dyn_server(race_dir=race_dir) as dyn:
         await _new(h, "h2-race", dyn.port)
@@ -49,7 +37,6 @@ async def test_repeat_h2_five_concurrent_copies(odda_session, tmp_path) -> None:
         assert all(r["status_code"] == 200 for r in recs)
         assert len({r["id"] for r in recs}) == 5
 
-        # single-packet property: clear the file first, send, spread < 50ms
         (race_dir / "h2").unlink(missing_ok=True)
         await h.call(
             "request_send",
@@ -59,7 +46,6 @@ async def test_repeat_h2_five_concurrent_copies(odda_session, tmp_path) -> None:
 
 
 async def test_repeat_h1_parallel_connections(odda_session, tmp_path) -> None:
-    """H1 repeat 5: N parallel connections; validated by 5 records all 200."""
     async with odda_session() as h, dyn_server() as dyn:
         await _new(h, "h1-race", dyn.port)
         h.write_request(
@@ -80,7 +66,6 @@ async def test_repeat_h1_parallel_connections(odda_session, tmp_path) -> None:
 
 
 async def test_repeat_h2_post_body_single_packet(odda_session, tmp_path) -> None:
-    """Last-byte single-packet holds with a POST body: 4 records, tight spread."""
     race_dir = tmp_path / "race"
     async with odda_session() as h, dyn_server(race_dir=race_dir) as dyn:
         await _new(h, "h2-post", dyn.port)
@@ -105,7 +90,6 @@ async def test_repeat_h2_post_body_single_packet(odda_session, tmp_path) -> None
 
 
 async def test_repeat_h2_large_body(odda_session, tmp_path) -> None:
-    """A 4KB body (multi DATA frames) with repeat 3 still completes."""
     async with odda_session() as h, dyn_server() as dyn:
         await _new(h, "h2-big", dyn.port)
         body = b"x" * 4096
@@ -129,7 +113,6 @@ async def test_repeat_h2_large_body(odda_session, tmp_path) -> None:
 
 
 async def test_repeat_fix_content_length_allowed(odda_session, tmp_path) -> None:
-    """fix_content_length + repeat: CL recomputed once, N copies fired."""
     async with odda_session() as h, dyn_server() as dyn:
         await _new(h, "cl-repeat", dyn.port)
         h.write_request(
@@ -158,7 +141,6 @@ async def test_repeat_fix_content_length_allowed(odda_session, tmp_path) -> None
 
 
 async def test_repeat_combo_rejections(odda_session, tmp_path) -> None:
-    """repeat + names and repeat + pipelining are rejected pre-emptively."""
     async with odda_session() as h, dyn_server() as dyn:
         for n in ("h2-race", "h1-race"):
             await _new(h, n, dyn.port)
@@ -188,7 +170,6 @@ async def test_repeat_combo_rejections(odda_session, tmp_path) -> None:
 
 
 async def test_repeat_one_is_single_shot(odda_session, tmp_path) -> None:
-    """repeat=1 (default) keeps the frozen single-name contract: one dict."""
     async with odda_session() as h, dyn_server() as dyn:
         await _new(h, "h2-race", dyn.port)
         h.write_request(

@@ -1,15 +1,3 @@
-"""Scoped rules end-to-end: two scopes, disables, strict semantics.
-
-Project slots (``.odda/rules/``) and global slots (the config home's
-rules dir, placed by hand in these tests the way a maintainer would)
-load together; disables suppress without uninstalling. External
-behavior only, the ``test_30`` habit: traffic in via curl through
-proxy_url, findings out via a bounded poll of the index. Negative
-assertions settle deterministically: the shared body carries a
-Traceback banner, so a seeded disclosure finding on the same flow
-proves the drain processed it before the absence is asserted.
-"""
-
 import asyncio
 import shutil
 from pathlib import Path
@@ -46,8 +34,6 @@ RULES = [
 ]
 '''
 
-# Two rules over the same body: a name disable must take the pair, an
-# id disable exactly one of them.
 _RULE_PAIR = f'''from odda.scanner import Rule, Severity
 
 RULES = [
@@ -68,8 +54,6 @@ RULES = [
 
 
 def _place_global(config_home: Path, name: str, source: str) -> None:
-    """Hand-place a global slot the maintainer's way: files in the
-    config home's rules dir, no tool involved."""
     slot = config_home / "rules" / name
     slot.mkdir(parents=True, exist_ok=True)
     (slot / "rule.py").write_text(source, encoding="utf-8")
@@ -82,7 +66,6 @@ async def _drive(h, fx, marker: str) -> dict:
 
 
 async def _wait_rule_finding(h, flow_id: str, rule_id: str) -> dict:
-    """Bounded poll for one flow's finding from one specific rule."""
     for _ in range(200):
         for f in h.findings_for(flow_id):
             if f["rule_id"] == rule_id:
@@ -92,8 +75,6 @@ async def _wait_rule_finding(h, flow_id: str, rule_id: str) -> dict:
 
 
 async def _assert_no_finding(h, flow_id: str, rule_id: str) -> None:
-    """Settle via the disclosure finding on the same flow (the drain is
-    FIFO, one flow at a time), then assert the rule never matched."""
     await _wait_rule_finding(h, flow_id, "disclosure.stack-trace")
     assert all(f["rule_id"] != rule_id for f in h.findings_for(flow_id)), (
         f"unexpected {rule_id!r} finding for flow {flow_id!r}"
@@ -107,9 +88,6 @@ async def _rows(h) -> dict[tuple[str, str], dict]:
 async def test_disable_by_name_suppresses_future_only_and_enable_restores(
     odda_session,
 ) -> None:
-    """A name disable takes the slot's rules out of the live set from
-    arrival: findings already recorded stay, later flows never match,
-    the row stays listed as disabled, and enable restores matching."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await _seed_slot(h, "disclosure")
         await h.call("rule_install", {"name": "canary", "source": _RULE_CANARY})
@@ -145,8 +123,6 @@ async def test_disable_by_name_suppresses_future_only_and_enable_restores(
 
 
 async def test_disable_by_id_takes_one_rule_of_a_slot(odda_session) -> None:
-    """An id disable suppresses exactly the named rule; the sibling in
-    the same slot keeps firing, and the listing shows the split."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await _seed_slot(h, "disclosure")
         await h.call("rule_install", {"name": "pair", "source": _RULE_PAIR})
@@ -169,9 +145,6 @@ async def test_disable_by_id_takes_one_rule_of_a_slot(odda_session) -> None:
 
 
 async def test_disable_and_enable_are_strict_everywhere(odda_session) -> None:
-    """The XOR param contract, unknown targets, double disables, an id
-    under a name-disabled slot, and enabling with the wrong kind all
-    error verbatim with nothing changed."""
     async with odda_session() as h:
         await h.call("rule_install", {"name": "canary", "source": _RULE_CANARY})
 
@@ -206,9 +179,6 @@ async def test_disable_and_enable_are_strict_everywhere(odda_session) -> None:
 async def test_removing_a_global_name_errors_and_disable_covers_globals(
     odda_session, config_home
 ) -> None:
-    """rule_remove refuses a global-only name, saying it is global and
-    naming rule_disable; the global tree stays untouched, and disabling
-    the global slot in this project stops its future findings."""
     _place_global(config_home, "curated", _RULE_ALT)
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await _seed_slot(h, "disclosure")
@@ -233,9 +203,6 @@ async def test_removing_a_global_name_errors_and_disable_covers_globals(
 async def test_remove_clears_its_disable_entries_reinstall_starts_active(
     odda_session,
 ) -> None:
-    """Removing a project slot takes its disable entries with it — the
-    entry dir empties, and a fresh install of the same name starts
-    active rather than silently disabled."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await _seed_slot(h, "disclosure")
         await h.call("rule_install", {"name": "byname", "source": _RULE_CANARY})
@@ -257,9 +224,6 @@ async def test_remove_clears_its_disable_entries_reinstall_starts_active(
 
 
 async def test_force_reinstall_keeps_the_name_disable(odda_session) -> None:
-    """A force overwrite keeps a slot's name-keyed disable across the
-    swap: the swapped-in rule stays suppressed, and enabling the name
-    lets it fire."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await _seed_slot(h, "disclosure")
         await h.call("rule_install", {"name": "swap", "source": _RULE_CANARY})
@@ -278,9 +242,6 @@ async def test_force_reinstall_keeps_the_name_disable(odda_session) -> None:
 
 
 async def test_disables_persist_across_boots(odda_session) -> None:
-    """A disable is data-dir state: the next session's boot restores
-    it (the rule stays suppressed from the very first flow) and the
-    entry stays enableable."""
     async with odda_session() as h:
         await h.call("rule_install", {"name": "canary", "source": _RULE_CANARY})
         await h.call("rule_disable", {"id": "user.ticket06-canary"})
@@ -301,9 +262,6 @@ async def test_disables_persist_across_boots(odda_session) -> None:
 async def test_stale_disable_entry_renders_target_missing_and_clears(
     odda_session, config_home
 ) -> None:
-    """An entry whose target vanished out-of-band (the global slot was
-    hand-removed) renders as a target-missing row — visible, not silent
-    — and rule_enable clears it."""
     _place_global(config_home, "gone", _RULE_CANARY)
     async with odda_session() as h:
         await h.call("rule_disable", {"name": "gone"})
@@ -328,9 +286,6 @@ async def test_stale_disable_entry_renders_target_missing_and_clears(
 async def test_cross_scope_id_collision_rejected_at_install(
     odda_session, config_home
 ) -> None:
-    """Ids are unique across both scopes: an install whose id a global
-    slot already holds is rejected naming the global slot, and nothing
-    reaches the project tree."""
     _place_global(config_home, "curated", _RULE_ALT)
     async with odda_session() as h:
         err = await h.call_error("rule_install", {"name": "clash", "source": _RULE_ALT})
@@ -345,9 +300,6 @@ async def test_cross_scope_id_collision_rejected_at_install(
 async def test_name_disable_covers_both_scopes_twin_names(
     odda_session, config_home
 ) -> None:
-    """A slot name may exist in both trees, and a name disable covers
-    every slot of that name — both scopes' rows go disabled, neither
-    fires, and enable brings both back."""
     _place_global(config_home, "twin", _RULE_ALT)
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await _seed_slot(h, "disclosure")

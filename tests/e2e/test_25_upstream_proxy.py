@@ -1,15 +1,3 @@
-"""e2e coverage for the upstream proxy: proxy_upstream_set / clear / get.
-
-The proxy is chained through a local forward-proxy fixture
-(``fixtures/forward_proxy.py``). Tests pin the tool contract (state
-shape, validation errors for SOCKS/userinfo URLs), that real traffic
-(curl absolute-form and a browser CONNECT tunnel) actually traverses
-the upstream and is still captured to ``.odda/flows/``, Basic auth
-(the upstream's 407 on the absolute-form path is relayed to the
-client), and that ``proxy_upstream_clear`` restores direct egress with
-no further upstream log entries.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -36,7 +24,6 @@ from tests.e2e.conftest import (
 async def upstream_proxy(
     log_path: Path, require_auth: str | None = None
 ) -> AsyncIterator[ServerHandle]:
-    """Run the forward-proxy fixture; log_path records what it saw."""
     args = ["--log", str(log_path)]
     if require_auth:
         args += ["--require-auth", require_auth]
@@ -45,23 +32,18 @@ async def upstream_proxy(
 
 
 def log_lines(log_path: Path) -> list[dict]:
-    """Parse the fixture's JSONL log (empty when nothing was logged yet)."""
     if not log_path.is_file():
         return []
     return [json.loads(line) for line in log_path.read_text().splitlines()]
 
 
 async def test_upstream_state_initially_direct(odda_session) -> None:
-    """A fresh session has no upstream: get reports (None, auth_set=False)."""
     async with odda_session() as h:
         r = await h.call("proxy_upstream_get", {})
         assert r == {"upstream": None, "auth_set": False}
 
 
 async def test_set_rejects_socks_and_userinfo(odda_session) -> None:
-    """socks5:// and schemeless URLs are rejected (http/https only, explicit
-    scheme required); userinfo in the URL is rejected with a pointer at
-    the auth param; state stays untouched."""
     async with odda_session() as h:
         err = await h.call_error(
             "proxy_upstream_set", {"url": "socks5://127.0.0.1:1080"}
@@ -78,8 +60,6 @@ async def test_set_rejects_socks_and_userinfo(odda_session) -> None:
 
 
 async def test_http_traffic_traverses_upstream(odda_session, tmp_path) -> None:
-    """Plain-HTTP curl traffic is forwarded absolute-form through the
-    upstream, the response comes back, and the flow is still captured."""
     log_path = tmp_path / "upstream.jsonl"
     async with (
         odda_session() as h,
@@ -118,8 +98,6 @@ async def test_http_traffic_traverses_upstream(odda_session, tmp_path) -> None:
 
 
 async def test_https_connect_traverses_upstream(odda_session, tmp_path) -> None:
-    """A browser CONNECT tunnel opened BEFORE the flip picks up the upstream
-    on its next connection; the tunneled https flow is still captured."""
     log_path = tmp_path / "upstream.jsonl"
     async with (
         odda_session() as h,
@@ -141,8 +119,6 @@ async def test_https_connect_traverses_upstream(odda_session, tmp_path) -> None:
 
 
 async def test_upstream_auth_407_then_ok(odda_session, tmp_path) -> None:
-    """Without auth the upstream's 407 is relayed (curl sees 407); after
-    setting auth the same chain returns 200."""
     log_path = tmp_path / "upstream.jsonl"
     async with (
         odda_session() as h,
@@ -178,8 +154,6 @@ async def test_upstream_auth_407_then_ok(odda_session, tmp_path) -> None:
 
 
 async def test_clear_restores_direct(odda_session, tmp_path) -> None:
-    """After clear, traffic reaches the origin directly — the upstream log
-    stays frozen — and get reports the direct state."""
     log_path = tmp_path / "upstream.jsonl"
     async with (
         odda_session() as h,
@@ -215,26 +189,19 @@ async def test_clear_restores_direct(odda_session, tmp_path) -> None:
 
 
 async def test_flip_closes_live_pooled_connection(odda_session, tmp_path) -> None:
-    """The tester's scenario: a browser with an established (pooled)
-    connection keeps the old vantage until the connection dies. The
-    flip must close it — deterministic check with a raw client socket
-    held open across proxy_upstream_set."""
     async with odda_session() as h:
         proxy = str(await h.call("proxy_url", {}))
         port = int(proxy.rsplit(":", 1)[1])
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        await asyncio.sleep(0.25)  # let mitmproxy register the handler
+        await asyncio.sleep(0.25)
         r = await h.call("proxy_upstream_set", {"url": "http://127.0.0.1:1"})
         assert r["closed_connections"] >= 1
         data = await asyncio.wait_for(reader.read(), timeout=5)
-        assert data == b""  # our socket was closed by the flip
+        assert data == b""
         writer.close()
 
 
 async def test_flip_applies_to_pooled_browser(odda_session, tmp_path) -> None:
-    """End-to-end form of the tester's scenario: navigate (establishing
-    Chrome's pooled connection), flip, navigate again — the second
-    navigation must traverse the upstream, not the old pooled path."""
     log_path = tmp_path / "upstream.jsonl"
     async with (
         odda_session() as h,
@@ -258,10 +225,6 @@ async def test_flip_applies_to_pooled_browser(odda_session, tmp_path) -> None:
 async def test_reset_without_auth_drops_stale_credentials(
     odda_session, tmp_path
 ) -> None:
-    """Re-setting an upstream without auth must clear the old Basic
-    credentials — otherwise they leak to the new upstream host while
-    auth_set reports false. The auth-requiring fixture answers 407
-    without credentials, so a stale credential would show as 200."""
     log_path = tmp_path / "upstream.jsonl"
     async with (
         odda_session() as h,

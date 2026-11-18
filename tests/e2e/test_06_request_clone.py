@@ -1,14 +1,9 @@
-"""Port of scrut 06-request-clone.md: request_clone copies a captured flow
-into an editable request; a name collision refuses without force."""
-
 from __future__ import annotations
 
 from tests.e2e.conftest import curl, dyn_server
 
 
 async def test_request_clone_writes_request_and_meta(odda_session) -> None:
-    """Cloning a captured curl flow returns the flow's identity and writes a
-    non-empty request + meta.json under the new name."""
     async with odda_session() as h, dyn_server() as dyn:
         proxy = await h.call("proxy_url", {})
         url = (
@@ -35,8 +30,6 @@ async def test_request_clone_writes_request_and_meta(odda_session) -> None:
 
 
 async def test_request_clone_collision_then_force_overwrites(odda_session) -> None:
-    """A second clone on an existing name is a tool error naming the collision;
-    force=True overwrites the existing request."""
     async with odda_session() as h, dyn_server() as dyn:
         proxy = await h.call("proxy_url", {})
         url = (

@@ -1,5 +1,3 @@
-"""Parsing and mutation of raw HTTP request bytes."""
-
 from __future__ import annotations
 
 import re
@@ -8,28 +6,6 @@ from odda.request.types import ParsedRequest
 
 
 def parse_request(data: bytes, line_terminator: bytes = b"\r\n") -> ParsedRequest:
-    r"""Parse raw HTTP request bytes into a :class:`ParsedRequest`.
-
-    The body is everything after the first block terminator (two line
-    terminators). Header lines are split on the line terminator. Header
-    values are parsed by splitting each line at the first ``:``, consuming
-    one optional space after the colon, and taking the rest verbatim — no
-    stripping. This is the HTTP grammar (``name ":" OWS value`` where OWS
-    is one optional space), preserving trailing whitespace and internal
-    bytes the agent may intend for crafting. Header names are matched
-    case-insensitively for feature flags (``Content-Length``,
-    ``Transfer-Encoding``, ``Host``).
-
-    The line terminator defaults to ``\r\n`` (standard HTTP). For HTTP/2
-    request files where an agent needs a literal CRLF inside a header
-    value (H2→H1 downgrade smuggling), set it to ``\n`` so the parser
-    splits on LF, preserving CR inside values. Only honored for HTTP/2
-    request files (H1 is wire-faithful — the file goes on the socket
-    verbatim, so re-framing is meaningless).
-
-    Raises:
-        ValueError: If the request line cannot be parsed.
-    """
     block_terminator = line_terminator * 2
     idx = data.find(block_terminator)
     if idx == -1:
@@ -91,30 +67,6 @@ def parse_request(data: bytes, line_terminator: bytes = b"\r\n") -> ParsedReques
 
 
 def fix_content_length_bytes(data: bytes, line_terminator: bytes = b"\r\n") -> bytes:
-    r"""Fix ``Content-Length`` in raw HTTP request bytes in-place.
-
-    Replaces the value of every ``Content-Length`` header with the actual
-    body length, preserving the original header name casing and the
-    surrounding line terminator. If no ``Content-Length`` header exists
-    and the body is non-empty, one is inserted before the blank line
-    separator. All other bytes are preserved.
-
-    The match targets only the digits of the existing value (not the
-    optional trailing whitespace or the line terminator), so the
-    replacement never drops a byte that terminates the header line.
-
-    The line terminator defaults to ``\r\n`` (standard HTTP). For H2
-    request files with a custom line terminator (H2->H1 downgrade
-    smuggling), pass it so the block terminator (2x line terminator) and
-    the inserted/rewritten lines use it correctly.
-
-    Args:
-        data: Raw HTTP request bytes.
-        line_terminator: Line terminator in effect (default ``\r\n``).
-
-    Returns:
-        New bytes with ``Content-Length`` corrected.
-    """
     block_terminator = line_terminator * 2
     idx = data.find(block_terminator)
     head = data[:idx] if idx != -1 else data

@@ -1,13 +1,3 @@
-"""Captured flows emit duplicate headers per-line, not comma-folded (scrut 16).
-
-Flow serialization writes each duplicate header on its own line,
-faithful to what the client/server sent: two `cookie` fragments (a raw
-h2 client splitting pairs per RFC 7540 §8.1.2.5) appear as two
-`cookie:` lines in the captured `request`; two `Set-Cookie` headers (a
-routine H1 login-response shape) appear as two `set-cookie:` lines in
-the captured `response_headers`. Never the pre-fix `, `-fold.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +8,6 @@ from tests.e2e.conftest import FIXTURES, curl, dyn_server
 
 
 def _count_header_lines(raw: bytes, name: str) -> int:
-    """Count `name:` header lines in raw captured bytes, case-insensitive."""
     lname = name.lower().encode()
     return sum(
         1 for line in raw.split(b"\r\n") if line.lower().startswith(lname + b":")
@@ -26,12 +15,9 @@ def _count_header_lines(raw: bytes, name: str) -> int:
 
 
 async def test_duplicate_cookie_headers_stay_split(odda_session, tmp_path) -> None:
-    """Two cookie fragments in the captured request → two cookie: lines, no fold."""
     async with odda_session() as h, dyn_server() as dyn:
         proxy = await h.call("proxy_url", {})
 
-        # Request side: raw h2 client (curl/Chrome pre-join cookies) sends
-        # `session=abc` and `_lab=val` as two cookie fragments.
         proc = await asyncio.to_thread(
             subprocess.run,  # noqa: S603
             [
@@ -55,13 +41,9 @@ async def test_duplicate_cookie_headers_stay_split(odda_session, tmp_path) -> No
 
 
 async def test_duplicate_set_cookie_headers_stay_split(odda_session, tmp_path) -> None:
-    """Two Set-Cookie response headers → two set-cookie: lines, no fold."""
     async with odda_session() as h, dyn_server() as dyn:
         proxy = await h.call("proxy_url", {})
 
-        # Response side: two ?header=set-cookie: params (URL-encoded so
-        # the `; Path=/` attribute survives the query string) produce two
-        # Set-Cookie response headers on the H1 dyn server.
         url = (
             f"{dyn.tls_base}/?marker=h2-setcookie-split"
             "&header=set-cookie:a%3D1%3B%20Path%3D/"

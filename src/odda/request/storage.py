@@ -1,5 +1,3 @@
-"""Storage helpers for editable request files on disk."""
-
 from __future__ import annotations
 
 import json
@@ -12,14 +10,12 @@ from odda.request.types import META_FILENAME, REQUESTS_DIR_NAME, EditableMeta
 
 
 def requests_dir() -> Path:
-    """Return the editable requests directory, creating it if missing."""
     d = flowstore.DATA_DIR / REQUESTS_DIR_NAME
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def read_meta(req_dir: Path) -> EditableMeta:
-    """Read and parse the ``meta.json`` sidecar."""
     data = json.loads((req_dir / META_FILENAME).read_text(encoding="utf-8"))
     lt = data.get("line_terminator")
     lt = b"\r\n" if lt is None else bytes(lt)
@@ -32,7 +28,6 @@ def read_meta(req_dir: Path) -> EditableMeta:
 
 
 def write_meta(req_dir: Path, meta: EditableMeta) -> None:
-    """Write the ``meta.json`` sidecar."""
     payload: dict[str, Any] = {
         "scheme": meta.scheme,
         "host": meta.host,
@@ -47,11 +42,6 @@ def write_meta(req_dir: Path, meta: EditableMeta) -> None:
 
 
 def resolve_name_dir(name: str, *, force: bool) -> Path:
-    """Return the request directory for ``name``, handling collisions.
-
-    Raises:
-        ValueError: If the name is already taken and ``force`` is False.
-    """
     req_dir = requests_dir() / name
     if req_dir.exists():
         if not force:

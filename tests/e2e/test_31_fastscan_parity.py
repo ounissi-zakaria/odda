@@ -1,15 +1,3 @@
-"""Fast-scan seam parity corpus: engine spans equal stdlib find-iterator spans.
-
-The scanner package's multi-pattern find-all seam (``odda.scanner.fastscan``)
-takes compiled patterns in and returns per-pattern match spans out — character
-offsets, leftmost-first, non-overlapping, identical to ``re.Pattern.finditer``
-over the exact decoded text the Scanner scans. Patterns the engine refuses
-(backreferences, lookarounds, word boundaries) compile as approximate
-prefilters that report themselves as such; their spans come back confirmed —
-the true stdlib pattern runs only on bodies whose approximation hit (ticket
-13), so parity holds for them too and a real match is never suppressed.
-"""
-
 import random
 import re
 
@@ -17,10 +5,7 @@ import pytest
 
 from odda.scanner.fastscan import FastScan
 
-# Engine-compatible patterns: (source, flags). Every one must classify as
-# exact (not prefiltered) and produce finditer-identical spans on every body.
 _EXACT_CORPUS: tuple[tuple[str, int], ...] = (
-    # literals, classes, alternations, repeats
     (r"ab+c", 0),
     (r"a(b|c)d", 0),
     (r"a|ab", 0),
@@ -38,22 +23,17 @@ _EXACT_CORPUS: tuple[tuple[str, int], ...] = (
     (r"[a-c]{3,}", 0),
     (r"[^a]", 0),
     (r"[^\d\s]", 0),
-    # unicode classes (engine-compiles ASCII-flavored; stdlib path on
-    # non-ASCII bodies — both branches must equal finditer)
     (r"\w+", 0),
     (r"\d+", 0),
     (r"\s+", 0),
     (r"\W+", 0),
     (r"\S+", 0),
     (r"\w+-\d+", 0),
-    # zero-width-adjacent matches (the pattern cannot match empty, the
-    # neighbourhood can: empty-adjacent runs, adjacent spans)
     (r"a+", 0),
     (r"(?:foo)+", 0),
     (r"abab", 0),
     (r"aa", 0),
     (r"aba", 0),
-    # line anchors with and without re.MULTILINE, buffer anchors
     (r"^ab", 0),
     (r"ab$", 0),
     (r"^ab$", 0),
@@ -64,23 +44,19 @@ _EXACT_CORPUS: tuple[tuple[str, int], ...] = (
     (r"ab\Z", 0),
     (r"^ab\Z", 0),
     (r"(?m)^err", 0),
-    # case-insensitive patterns (flag and scoped), incl. full-width Latin
     (r"(?i)café", 0),
     (r"café", re.IGNORECASE),
     (r"(?i)K", 0),
     (r"(?i:SET)-cookie", 0),
     (r"(?i)[a-z]+x", 0),
-    # dotall via flag and via scoped group; greedy and lazy quantifiers
     (r"x.y", re.DOTALL),
     (r"(?s)x.y", 0),
     (r"x.*y", 0),
     (r"x.*?y", 0),
-    # multibyte literals and classes
     (r"日本", 0),
     (r"é{2}", 0),
     (r"[éü]", 0),
     (r"[^é]", 0),
-    # real rule shapes (builtin-rule derived, engine-compatible subset)
     (r"Traceback \(most recent call last\):", re.MULTILINE),
     (r"^\s*at [\w$.]+\(\w+\.java:\d+\)", re.MULTILINE),
     (r"\(node:internal/[\w/]+:\d+:\d+\)", re.MULTILINE),
@@ -157,7 +133,6 @@ _LITERAL_SPLICES = (
 
 
 def _corpus_bodies() -> list[str]:
-    """The crafted bodies plus a seeded random corpus of spliced bodies."""
     rng = random.Random(20261106)
     bodies = list(_CRAFTED_BODIES)
     pools = (  # noqa: RUF001 — multibyte splice pools
@@ -180,8 +155,6 @@ def _corpus_bodies() -> list[str]:
 
 
 def test_engine_corpus_spans_match_stdlib_finditer() -> None:
-    """Every engine-compatible pattern across every corpus body produces spans
-    identical to the stdlib find-iterator — one multi-pattern scan for all."""
     compiled = [re.compile(src, flags) for src, flags in _EXACT_CORPUS]
     fs = FastScan.build(compiled)
     assert fs.patterns == tuple(compiled)
@@ -199,9 +172,6 @@ def test_engine_corpus_spans_match_stdlib_finditer() -> None:
 
 
 def test_case_insensitive_patterns_round_trip() -> None:
-    """Case-insensitive matching round-trips identically to the stdlib
-    equivalents, including accented Latin and the fold-divergent Turkish
-    dotted I."""
     cases = [
         (r"(?i)café", 0, "CAFÉ café Cafe CAFÉ"),
         (r"(?i)secret", 0, "SeCrEt SECRET secret"),
@@ -219,8 +189,6 @@ def test_case_insensitive_patterns_round_trip() -> None:
 
 
 def test_multiline_anchors_round_trip() -> None:
-    """Line anchors round-trip identically to stdlib with and without
-    re.MULTILINE, including the trailing-newline forms of ``$``."""
     cases = [
         (r"^ab", 0, ["ab", "\nab", "x\nab", "ab\nab"]),
         (r"^ab", re.MULTILINE, ["ab", "\nab", "x\nab", "ab\nab", "ab\nab\n"]),
@@ -245,13 +213,7 @@ def test_multiline_anchors_round_trip() -> None:
             )
 
 
-# Patterns the engine refuses (backreference, lookarounds, word boundary,
-# possessive/atomic repeats, engine pattern-size limits): each must compile
-# as an approximate prefilter and report itself as prefiltered — the
-# approximation may over-report but never under-report, so the true
-# pattern's confirmation (ticket 13) can never lose a real match.
 _REFUSED_CORPUS: tuple[tuple[str, int, str], ...] = (
-    # (source, flags, body that truly matches)
     (
         r"(?m)^# HELP ((?:prometheus|go|process)_\w+)[^\r\n]*\r?\n# TYPE \1 \w+",
         0,
@@ -279,17 +241,12 @@ _REFUSED_CORPUS: tuple[tuple[str, int, str], ...] = (
         0,
         "Telerik.Web.UI.WebResource.axdblahblahVersion=2013.1",
     ),
-    # An agent-authored quote-pair secret shape (ticket 13's third
-    # refusal family): the same quote must open and close the value —
-    # a backreference the engine cannot scan exactly.
     (
         r"\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*"
         r"([\"'])[A-Za-z0-9+/=_.\-]{8,64}\1",
         0,
         'config = dict(api_key = "sk_live_abcdefghijklmnop")',
     ),
-    # Lookahead-only script-import shape: the src attribute must be
-    # ahead, not consumed — refused, approximated, confirmed.
     (
         r"(?is)<script(?=[^>]{0,200}\ssrc\s*=\s*[\"'])[^>]{0,400}>",
         0,
@@ -300,13 +257,6 @@ _REFUSED_CORPUS: tuple[tuple[str, int, str], ...] = (
 
 
 def test_prefiltered_patterns_confirm_to_stdlib_finditer_spans() -> None:
-    """Engine-refused patterns classify as prefilters and their spans
-    come back confirmed (ticket 13): on every corpus body — the true
-    hit, its surroundings, and seeded randoms spliced with the
-    refusal families' own fragments — find_all reports exactly the
-    stdlib find-iterator's spans per refused pattern. The approximation
-    may over-report, and the confirmation collapses the over-reports;
-    what it can never do is lose a match the true pattern finds."""
     patterns = [re.compile(src, flags) for src, flags, _ in _REFUSED_CORPUS]
     fs = FastScan.build(patterns)
     assert fs.prefiltered == frozenset(range(len(patterns)))
@@ -337,15 +287,6 @@ def test_prefiltered_patterns_confirm_to_stdlib_finditer_spans() -> None:
 
 
 def test_wide_bounded_repeats_widen_in_the_prefilter_source() -> None:
-    """Bounded repeats at or above the widening ceiling re-emit as their
-    unbounded superset in the prefilter source — vectorscan's
-    bounded-repeat compilation explodes superlinearly with the bound
-    (the S3 NoSuchBucket shape cost ~42 s per compile, paid twice per
-    build), and ``X{a,b}`` ⊆ ``X{a,}`` keeps the prefilter's
-    never-under-report guarantee. Everything else re-emits faithfully —
-    above all the lookaround direction: a wrong arrow is not a widening
-    but a different language. A construct the straight emitter cannot
-    serialize falls back to the raw source, never a guess."""
     from odda.scanner.fastscan import _prefilter_expression
 
     wide, _flags = _prefilter_expression(
@@ -357,28 +298,21 @@ def test_wide_bounded_repeats_widen_in_the_prefilter_source() -> None:
     assert ahead.startswith("x(?=")
     assert "(?<=" not in ahead
 
-    # Under the ceiling the bound stays exact: the prefilter keeps its
-    # precision (fewer over-report confirmations to run).
     exact, _flags = _prefilter_expression(re.compile(r"\bAKIA[0-9A-Z]{16}\b"))
     assert exact == r"\bAKIA[0-9A-Z]{16}\b"
 
-    # A conditional the emitter cannot serialize: raw-source passthrough.
     conditional = r"(a)(?(1)b|c)d{0,900}"
     fallback, _flags = _prefilter_expression(re.compile(conditional))
     assert fallback == conditional
 
 
 def test_unapproximable_patterns_are_refused_at_build() -> None:
-    """Patterns the engine can neither scan exactly nor approximate —
-    zero-width-matching constructs above all — are refused at build with
-    the offending pattern named, never silently mis-scanned."""
     for src in [r"a*", r"x?", r"(foo)*", r"a|", r""]:
         with pytest.raises(ValueError, match=re.escape(src) or "pattern 0"):
             FastScan.build([re.compile(src)])
 
 
 def test_empty_pattern_set_scans_nothing() -> None:
-    """Building an empty pattern set is valid and finds nothing."""
     fs = FastScan.build(())
     assert fs.patterns == ()
     assert fs.prefiltered == frozenset()
@@ -386,20 +320,11 @@ def test_empty_pattern_set_scans_nothing() -> None:
 
 
 def test_multichunk_reversal_spans_match_stdlib_finditer() -> None:
-    """Bodies larger than the reversal chunk slice the reverse-encode
-    with GIL drops between slices; spans must stay identical to the
-    stdlib find-iterator across the chunk boundaries — matches placed
-    at, straddling, and around the boundary distance, on ASCII and
-    multibyte bodies alike."""
     from odda.scanner import fastscan
 
-    chunk = fastscan.GIL_CHUNK  # the shared chunk the reversal slices ride
+    chunk = fastscan.GIL_CHUNK
     compiled = [re.compile(src, flags) for src, flags in _EXACT_CORPUS]
     fs = FastScan.build(compiled)
-    # Sparse filler (dots, single multibyte chars): the confirm path
-    # walks every candidate start, so dense word-character filler
-    # makes word-class patterns quadratic in body size — the corpus
-    # exists to check boundary arithmetic, not confirm throughput.
     for body in (
         "." * (chunk - 1) + "ab" + "." * (chunk + 2),
         "." * (chunk - 1) + "a" + "..." + "ab",
@@ -418,10 +343,6 @@ def test_multichunk_reversal_spans_match_stdlib_finditer() -> None:
 
 
 def test_multi_pattern_scan_keeps_patterns_independent() -> None:
-    """One find_all over a body several patterns match returns each
-    pattern's own spans, in input order — including the prefiltered
-    word-boundary pattern, whose confirmed spans ride the same result
-    list as the exact patterns'."""
     fs = FastScan.build(
         [re.compile(p) for p in (r"one", r"\btwo\b", r"three|threex", r"none")]
     )

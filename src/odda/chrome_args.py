@@ -1,19 +1,9 @@
-"""Redeclared Chrome launch flags for odda's per-browser profiles.
-
-Under ``ignore_default_args=True`` Chrome receives *only* these args, so this
-module redeclares patchright's ``chromiumSwitches`` set (plus what
-``_innerDefaultArgs`` adds) with two deliberate omissions and one addition.
-The source of truth is patchright's ``chromiumSwitches`` block in the
-installed driver's ``coreBundle.js``; see ``AGENTS.md`` for the drift audit.
-"""
-
 from __future__ import annotations
 
 import os
 
 from odda.vdisplay import SCREEN_HEIGHT, SCREEN_WIDTH
 
-# patchright's ``disabledFeatures`` array, verbatim (16 names).
 _DISABLED_FEATURES: tuple[str, ...] = (
     "AvoidUnnecessaryBeforeUnloadCheckSync",
     "BoundaryEventDispatchTracksNodeRemoval",
@@ -33,10 +23,6 @@ _DISABLED_FEATURES: tuple[str, ...] = (
     "msEdgeUpdateLaunchServicesPreferredVersion",
 )
 
-# Added on top of patchright's set: the m150 feature names that suppress the
-# on-device GenAI model store (``optimization_guide_model_store``, ~48MB per
-# profile). patchright's ``OptimizationHints`` disables hints downloads, not
-# the model store. Not in patchright — the whole point of the redeclare.
 _MODEL_STORE_FEATURES: tuple[str, ...] = (
     "OptimizationGuide",
     "OptimizationGuideOnDeviceModel",
@@ -51,20 +37,11 @@ def _disable_features_value() -> str:
 
 
 def _enable_features_value() -> str:
-    # Reproduce patchright's PLAYWRIGHT_LEGACY_SCREENSHOT ternary.
     if os.environ.get("PLAYWRIGHT_LEGACY_SCREENSHOT"):
         return ""
     return "--enable-features=CDPScreenshotNewSurface"
 
 
-# patchright's desktop ``chromiumSwitches()`` literals (the driver's
-# ``_innerDefaultArgs`` calls it with no options, so ``--disable-sync`` IS
-# present — its ``android: true`` branch only fires on the Android path).
-#
-# Deliberately OMITTED (odda-specific deviations — do not add back):
-#   --password-store=basic, --use-mock-keychain
-#       odda wants the real system keychain so seeded cookies persist
-#       (the point of init-chrome-profile).
 _CHROMIUM_SWITCHES: tuple[str, ...] = (
     "--disable-field-trial-config",
     "--disable-background-networking",
@@ -89,46 +66,20 @@ _CHROMIUM_SWITCHES: tuple[str, ...] = (
     "--disable-sync",
 )
 
-# Window geometry: pinned to the virtual display's size (vdisplay's
-# SCREEN_WIDTH/SCREEN_HEIGHT — ADR-0040), so with no window manager the
-# Chrome window keeps exactly that size at (0,0).
+# See ADR-0040.
 
 
 def build_chrome_args(
     user_data_dir: str,
     proxy_url: str | None = None,
 ) -> list[str]:
-    """Assemble the complete Chrome ``args=`` list for a persistent context.
-
-    ``about:blank`` is the positional URL and **must be last** (Chrome treats
-    the first non-``--`` token as the URL; anything after it is ignored).
-
-    With a proxy, ``--proxy-server`` / ``--proxy-bypass-list`` are emitted
-    here and MUST stay: ``ignore_default_args=True`` also drops Playwright's
-    option-derived proxy flags, so these are the only ones that reach
-    Chrome. ``--proxy-bypass-list=<-loopback>`` *forces* loopback (127.0.0.1)
-    traffic through the proxy — load-bearing for odda's e2e fixture/dyn
-    servers, whose flows are captured through the proxy. The proxy
-    *credentials* travel separately, via Playwright's ``proxy=`` option
-    (they drive the CDP auth handler, not the command line — ADR-0031).
-
-    Args:
-        user_data_dir: Chrome ``--user-data-dir`` target (temp profile).
-        proxy_url: Optional proxy server URL. When ``None`` no proxy flags
-            are emitted.
-
-    Returns:
-        The complete ``args`` list, with ``about:blank`` last.
-    """
+    # See ADR-0031.
     switches = [*_CHROMIUM_SWITCHES, f"--disable-features={_disable_features_value()}"]
     enabled = _enable_features_value()
     if enabled:
         switches.append(enabled)
-    # Deterministic geometry on the virtual display: no WM, so the
-    # window keeps exactly the display's size at (0,0).
     switches.append("--window-position=0,0")
     switches.append(f"--window-size={SCREEN_WIDTH},{SCREEN_HEIGHT}")
-    # Required in the Docker test container (non-root, restricted namespaces).
     switches.append("--no-sandbox")
     proxy_flags = [f"--proxy-server={proxy_url}"] if proxy_url else []
     if proxy_url:

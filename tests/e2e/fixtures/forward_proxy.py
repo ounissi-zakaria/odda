@@ -1,23 +1,3 @@
-"""Minimal upstream forward-proxy fixture for the upstream-proxy e2e tests.
-
-Accepts both CONNECT (tunnel) and absolute-form (plain HTTP) proxy
-requests on 127.0.0.1:<port>, optionally demanding HTTP Basic
-authentication (``--require-auth USER:PASS``), and appends one JSON line
-per handled request to ``--log PATH`` so tests can assert what the
-upstream actually saw:
-
-    {"kind": "connect" | "request" | "reject", "line": "..."}
-
-CONNECT: replies ``200 Connection established`` (after the auth check),
-then blind-pipes bytes in both directions until EOF — the tunneled
-origin TLS is untouched. Absolute-form: forwards the request head+body
-verbatim to the origin, relays the response back (Content-Length or
-EOF framing, forced ``Connection: close``), then closes the client
-connection.
-
-Run as: python3 forward_proxy.py <port> [--require-auth USER:PASS] --log PATH
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -33,13 +13,11 @@ HEAD_LIMIT = 1 << 20
 
 
 def log_entry(log_path: Path, kind: str, line: str) -> None:
-    """Append one JSON log line; small volume, open-per-write is fine."""
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"kind": kind, "line": line}) + "\n")
 
 
 def header_value(head: bytes, name: bytes) -> bytes | None:
-    """Case-insensitive single-header lookup in a CRLF-joined head."""
     for line in head.split(b"\r\n")[1:]:
         key, _, value = line.partition(b":")
         if key.strip().lower() == name:
@@ -48,7 +26,6 @@ def header_value(head: bytes, name: bytes) -> bytes | None:
 
 
 async def read_head(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
-    r"""Read one request/response head; return (head_with_crlfcrlf, excess)."""
     buf = b""
     while b"\r\n\r\n" not in buf:
         chunk = await reader.read(READ_CHUNK)
@@ -62,7 +39,6 @@ async def read_head(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
 
 
 def force_connection_close(head: bytes) -> bytes:
-    """Rewrite a response head so Connection: close is stated exactly once."""
     lines = head.split(b"\r\n")
     kept = [
         lines[0],
@@ -78,15 +54,11 @@ def force_connection_close(head: bytes) -> bytes:
 
 
 class ForwardProxy:
-    """The asyncio upstream-proxy fixture logic."""
-
     def __init__(self, log_path: Path, expected_b64: bytes | None) -> None:
-        """Bind the log sink and the expected Basic credentials (None = open)."""
         self.log_path = log_path
         self.expected_b64 = expected_b64
 
     def _authorized(self, head: bytes) -> bool:
-        """Check the Proxy-Authorization header against the required credential."""
         if self.expected_b64 is None:
             return True
         return header_value(head, b"proxy-authorization") == (
@@ -94,7 +66,6 @@ class ForwardProxy:
         )
 
     async def _reject_407(self, writer: asyncio.StreamWriter, line: str) -> None:
-        """Log and answer a rejected request with a bare 407."""
         log_entry(self.log_path, "reject", line)
         writer.write(
             b"HTTP/1.1 407 Proxy Authentication Required\r\n"
@@ -106,7 +77,6 @@ class ForwardProxy:
     async def handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """Serve one client connection: CONNECT tunnel or absolute-form forwards."""
         try:
             while True:
                 head, _ = await read_head(reader)
@@ -131,7 +101,6 @@ class ForwardProxy:
         head: bytes,
         request_line: str,
     ) -> None:
-        """Authenticate, ack the CONNECT, then blind-pipe the tunnel to EOF."""
         if not self._authorized(head):
             await self._reject_407(writer, request_line)
             return
@@ -153,7 +122,6 @@ class ForwardProxy:
         head: bytes,
         request_line: str,
     ) -> bool:
-        """Forward one absolute-form request; False when the client is done."""
         if not self._authorized(head):
             await self._reject_407(writer, request_line)
             return False
@@ -167,7 +135,6 @@ class ForwardProxy:
         if content_length:
             body = await reader.readexactly(int(content_length))
 
-        # Origins speak origin-form; the absolute-form URI is proxy-facing.
         origin_uri = parts.path or "/"
         if parts.query:
             origin_uri += f"?{parts.query}"
@@ -204,7 +171,6 @@ class ForwardProxy:
 
 
 async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
-    """Copy src to dst until EOF, tolerating abrupt peer closes."""
     try:
         while chunk := await src.read(READ_CHUNK):
             dst.write(chunk)
@@ -217,7 +183,6 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
 
 
 def main() -> None:
-    """Listen on 127.0.0.1:<port>, serving CONNECT and absolute-form forwards."""
     parser = argparse.ArgumentParser()
     parser.add_argument("port", type=int)
     parser.add_argument("--require-auth")

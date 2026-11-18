@@ -1,16 +1,4 @@
-"""Scanner end-to-end: findings land from seeded rule slots.
-
-A session-live passive scanner observes every flow the session writes
-— the flow record writer's post-append hook enqueues, an asyncio drain
-task owned by the lifespan scans — and appends findings to
-``<data_dir>/scanner/findings.jsonl`` (one line per rule-flow pair,
-evidence aggregated). No rules ship with odda (ADR-0036): every test
-seeds the slots it needs from the test-fixture rules corpus through the
-real rule_install path. External behavior only: traffic in via curl
-through proxy_url or request_send, findings out via a bounded poll of
-the index (the ``wait_flow`` precedent).
-"""
-
+# See ADR-0036.
 import ast
 import asyncio
 import itertools
@@ -45,8 +33,6 @@ _FX = "stack-trace.html"
 
 
 async def test_stack_trace_response_lands_finding(odda_session) -> None:
-    """A stack-trace body driven through the proxy lands one Finding with
-    rule id, flow id, severity high, title, located evidence, and refs."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -73,8 +59,6 @@ async def test_stack_trace_response_lands_finding(odda_session) -> None:
 
 
 async def test_multi_match_aggregates_into_one_finding(odda_session) -> None:
-    """Multiple trace matches inside one flow aggregate into that single
-    Finding's evidence — one Finding per rule-flow pair."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -89,18 +73,12 @@ async def test_multi_match_aggregates_into_one_finding(odda_session) -> None:
         flow = await h.wait_flow(marker)
         finding = await h.wait_finding(flow["id"])
 
-        # The fixture's match inventory: one Python traceback, two Java
-        # frames, a PHP fatal plus two PHP frames, two Node frames, one
-        # .NET frame — nine matches, one finding.
         assert len(finding["evidence"]) == 9
         assert len({e["offset"] for e in finding["evidence"]}) == 9
         assert len(h.findings_for(flow["id"])) == 1
 
 
 async def test_request_send_flow_is_scanned(odda_session) -> None:
-    """The observation hook covers the request sender's write path too —
-    request_send records flow on the event-loop thread, browser capture
-    on the mitmproxy addon thread."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
         await _seed_slot(h, "disclosure")
         await h.call(
@@ -130,9 +108,6 @@ async def test_request_send_flow_is_scanned(odda_session) -> None:
 
 
 async def test_clean_and_error_flows_produce_no_finding(odda_session) -> None:
-    """A clean response and an error flow (no response side) produce no
-    Finding, and the scanner's data-dir subtree appears lazily — absent
-    until the first Finding."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -145,8 +120,6 @@ async def test_clean_and_error_flows_produce_no_finding(odda_session) -> None:
         clean = await h.wait_flow("scan-clean")
         assert clean["error"] is None
 
-        # A flow with no response at all (closed port): recorded as an
-        # error flow, nothing for a response-side rule to match.
         await curl(
             "http://127.0.0.1:9/?marker=scan-err",
             proxy,
@@ -156,8 +129,6 @@ async def test_clean_and_error_flows_produce_no_finding(odda_session) -> None:
         assert err["status_code"] is None
         assert err["error"]
 
-        # Both flows were drained (they precede nothing else, but give
-        # the drain a generous bounded settle before the negative read).
         await asyncio.sleep(0.5)
         assert not (h.data_dir / "scanner").exists(), (
             "scanner dir must appear lazily on the first finding"
@@ -165,9 +136,6 @@ async def test_clean_and_error_flows_produce_no_finding(odda_session) -> None:
 
 
 async def test_scan_failure_never_touches_capture(odda_session) -> None:
-    """A finding that cannot be recorded — the scanner dir is blocked by
-    a plain file — is logged and skipped; the flow still lands fully in
-    the flows index and the session keeps capturing."""
     async with odda_session() as h, fixture_site([_FX]) as fx:
         await _seed_slot(h, "disclosure")
         blocked = h.data_dir / "scanner"
@@ -183,18 +151,14 @@ async def test_scan_failure_never_touches_capture(odda_session) -> None:
         )
         assert r.stdout == "200"
 
-        # The flow lands fully: record complete, body stored.
         flow = await h.wait_flow(marker)
         assert flow["status_code"] == 200
         assert flow["body_file"] is not None
         assert (h.data_dir / flow["body_file"]).is_file()
 
-        # The finding write failed (contained): no findings file, and
-        # the flow write path was never touched.
         await asyncio.sleep(0.5)
         assert not (blocked / "findings.jsonl").exists()
 
-        # Capture still works after the failed scan.
         r2 = await curl(
             f"{fx.base}/?marker=scan-after-block",
             proxy,
@@ -205,8 +169,6 @@ async def test_scan_failure_never_touches_capture(odda_session) -> None:
 
 
 async def test_preboot_flows_are_not_scanned(odda_session, tmp_path) -> None:
-    """Flows recorded before session boot are never scanned (forward-only):
-    a seeded stack-trace flow predating the session produces no finding."""
     flows = tmp_path / ".odda" / "flows"
     seed_dir = flows / "00001"
     seed_dir.mkdir(parents=True)
@@ -246,34 +208,24 @@ async def test_preboot_flows_are_not_scanned(odda_session, tmp_path) -> None:
         await h.wait_flow("scan-postboot")
 
         await asyncio.sleep(0.5)
-        # The seeded stack trace was never scanned: no scanner subtree
-        # at all, and the history line is untouched.
         assert not (h.data_dir / "scanner").exists()
         assert h.flow_count() == 2
         assert h.flow_record("00001") == seeded
 
 
 def test_scanner_package_has_no_egress_imports() -> None:
-    """Structural zero-egress check: every import in the scanner package
-    is on the allowlist — no socket/ssl/http or any third-party module
-    (the scanner is stdlib-only and sends nothing, ADR-0034); urllib
-    appears only as urllib.parse (query-string parsing, no network).
-    asyncio is allowlisted for loop primitives (Event, task awaiting);
-    egress would require the socket layer, which is not imported."""
+    # See ADR-0034.
     scanner_src = Path(__file__).resolve().parents[2] / "src" / "odda" / "scanner"
     py_files = sorted(scanner_src.rglob("*.py"))
     assert py_files, f"scanner package source not found at {scanner_src}"
 
     allowed = {
         "__future__",
-        "asyncio",  # loop primitives only, never open_connection et al
+        "asyncio",
         "collections",
         "contextlib",
         "dataclasses",
         "enum",
-        # ticket 05: dataset-adapter stdlib — one-shot digesting
-        # (hashlib), package-data loading (importlib.resources), and a
-        # memoized compile (functools). None can open a socket.
         "functools",
         "hashlib",
         "importlib",
@@ -282,32 +234,15 @@ def test_scanner_package_has_no_egress_imports() -> None:
         "pathlib",
         "queue",
         "re",
-        "shutil",  # slot removal (rmtree) — filesystem only, no sockets
-        # sys: registering the slot exec module in sys.modules for the
-        # exec's duration (see types above) — no network surface.
+        "shutil",
         "sys",
-        # codecs: the chunked lenient body decode (ticket 12) — an
-        # incremental UTF-8 decoder, no network surface.
         "codecs",
-        # time: time.sleep(0) GIL drops between the chunked text ops
-        # (ticket 12) — no clock or network surface.
         "time",
-        # threading: the body memo's lock (ticket 14) — register/
-        # deregister clears it from the loop thread while the drain
-        # worker reads it; a mutex, no network surface.
         "threading",
-        # types: ModuleType for the slot exec namespace — a bare dict
-        # breaks slots defining dataclasses (field resolution walks
-        # sys.modules); no network surface.
         "types",
-        # hyperscan: the Vectorscan-backed scan engine (ticket 11) — an
-        # in-process native extension that processes bytes; it has no
-        # socket surface, so zero egress survives the engine swap.
         "hyperscan",
         "typing",
-        "urllib",  # urllib.parse only — query-string parsing, no network
-        # First-party, package-internal only (odda.scanner.*); the
-        # scanner must not reach into flowstore/mitmproxy/mcp.
+        "urllib",
         "odda",
     }
     imported: set[str] = set()
@@ -325,15 +260,11 @@ def test_scanner_package_has_no_egress_imports() -> None:
     )
 
 
-# --- ticket 02: disclosure family ---
-
 _PK = "private-key.html"
 _PC = "public-cert.html"
 
 
 async def test_private_key_block_lands_finding(odda_session) -> None:
-    """A PEM private-key block in a response body yields a
-    disclosure.private-key Finding (HIGH) with body evidence and refs."""
     async with odda_session() as h, fixture_site([_PK]) as fx:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -353,8 +284,6 @@ async def test_private_key_block_lands_finding(odda_session) -> None:
         assert finding["severity"] == "high"
         assert finding["title"]
         assert "CWE-321" in finding["refs"]
-        # The fixture's match inventory: the RSA and the OpenSSH BEGIN
-        # sentinels — two blocks, one finding.
         assert len(finding["evidence"]) == 2
         details = {e["detail"] for e in finding["evidence"]}
         assert any("RSA PRIVATE KEY" in d for d in details)
@@ -365,8 +294,6 @@ async def test_private_key_block_lands_finding(odda_session) -> None:
 
 
 async def test_public_certificate_block_does_not_fire(odda_session) -> None:
-    """A public-key / certificate PEM block is not a private key — no
-    finding for published trust material."""
     async with odda_session() as h, fixture_site([_PC]) as fx:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -388,9 +315,6 @@ _BK = "benign-keynames.js"
 
 
 async def test_frontend_secret_assignment_lands_finding(odda_session) -> None:
-    """A hardcoded secret assignment in a served JS body yields a
-    disclosure.frontend-secret Finding (MEDIUM) with the assignments and
-    the logger line as evidence."""
     async with odda_session() as h, fixture_site([_FS]) as fx:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -410,9 +334,6 @@ async def test_frontend_secret_assignment_lands_finding(odda_session) -> None:
         assert finding["severity"] == "medium"
         assert finding["title"]
         assert "CWE-798" in finding["refs"]
-        # The fixture's match inventory: client_secret, refreshToken,
-        # and api_key assignments, a quoted "apiKey" property, and two
-        # password-leaking logger lines — six matches, one finding.
         assert len(finding["evidence"]) == 6
         details = " ".join(e["detail"] for e in finding["evidence"])
         assert "client_secret" in details
@@ -425,9 +346,6 @@ async def test_frontend_secret_assignment_lands_finding(odda_session) -> None:
 
 
 async def test_benign_key_names_do_not_fire(odda_session) -> None:
-    """Ordinary JS property names that merely contain "key" (hotkey,
-    keyword, apiKeyId, keydown) are not secrets — no finding, and the
-    scanner's subtree stays absent."""
     async with odda_session() as h, fixture_site([_BK]) as fx:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -446,8 +364,6 @@ async def test_benign_key_names_do_not_fire(odda_session) -> None:
 
 
 async def test_frontend_secret_requires_2xx(odda_session) -> None:
-    """The frontend-secret gate holds for 2xx responses only: the same
-    assignment shape served with status 404 yields no finding."""
     async with odda_session() as h, dyn_server() as dyn:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -474,9 +390,6 @@ _AWB = "aws-key-body.txt"
 
 
 async def test_aws_key_in_body_lands_finding(odda_session) -> None:
-    """An AWS access key id in a response body yields a
-    disclosure.aws-key Finding (HIGH); the near-miss decoys in the same
-    body (truncated, lowercase, embedded) do not add evidence."""
     async with odda_session() as h, fixture_site([_AWB]) as fx:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -504,9 +417,6 @@ async def test_aws_key_in_body_lands_finding(odda_session) -> None:
 
 
 async def test_aws_key_in_response_header_lands_finding(odda_session) -> None:
-    """An AWS access key id in a response header yields one
-    disclosure.aws-key Finding whose evidence is located in the stored
-    response headers (where="response_headers")."""
     async with odda_session() as h, dyn_server() as dyn:
         await _seed_slot(h, "disclosure")
         proxy = await h.call("proxy_url", {})
@@ -527,8 +437,6 @@ async def test_aws_key_in_response_header_lands_finding(odda_session) -> None:
         assert finding["rule_id"] == "disclosure.aws-key"
         assert finding["flow_id"] == flow["id"]
         assert finding["severity"] == "high"
-        # Header side only: the body is empty, so the single evidence
-        # entry comes from the stored response headers.
         assert len(finding["evidence"]) == 1
         first = finding["evidence"][0]
         assert first["where"] == "response_headers"
@@ -538,10 +446,6 @@ async def test_aws_key_in_response_header_lands_finding(odda_session) -> None:
 
 
 async def test_xdebug_setcookie_lands_finding(odda_session) -> None:
-    """A Set-Cookie: XDEBUG_SESSION= response yields a
-    cookie.xdebug-session Finding (HIGH) whose refs point at the Xdebug
-    remote-debug documentation, evidence located in the response
-    headers."""
     async with odda_session() as h, dyn_server() as dyn:
         await _seed_slot(h, "cookies")
         proxy = await h.call("proxy_url", {})
@@ -571,8 +475,6 @@ async def test_xdebug_setcookie_lands_finding(odda_session) -> None:
 
 
 async def test_ordinary_setcookie_does_not_fire(odda_session) -> None:
-    """A Set-Cookie response for an ordinary session cookie is not the
-    Xdebug echo — no finding."""
     async with odda_session() as h, dyn_server() as dyn:
         await _seed_slot(h, "cookies")
         proxy = await h.call("proxy_url", {})
@@ -592,13 +494,7 @@ async def test_ordinary_setcookie_does_not_fire(odda_session) -> None:
         assert h.findings_for(flow["id"]) == []
 
 
-# --- ticket 04: target-confirmation family ---
-
-
 async def test_shiro_rememberme_delete_me_lands_finding(odda_session) -> None:
-    """A ``rememberMe=deleteMe`` Set-Cookie response yields the Shiro
-    deserialization Finding (MEDIUM) with response-header evidence; an
-    ordinary session cookie on the same server shape does not fire."""
     async with odda_session() as h, dyn_server() as dyn:
         await _seed_slot(h, "fingerprints")
         proxy = await h.call("proxy_url", {})
@@ -621,7 +517,6 @@ async def test_shiro_rememberme_delete_me_lands_finding(odda_session) -> None:
         assert isinstance(first["offset"], int)
         assert "rememberMe=deleteMe" in first["detail"]
 
-        # Negative: an ordinary session cookie must not fire the rule.
         clean_url = (
             f"{dyn.tls_base}/?marker=t04-shiro-clean"
             "&header=set-cookie:session%3Dabc123%3B%20Path%3D%2F"
@@ -647,9 +542,6 @@ _TELERIK_MISS = "telerik-unknown.html"
 _PROM_HITS = "prometheus.txt"
 _PROM_MISS = "prometheus-negative.txt"
 
-# One sample script import per compromised CDN of the 2024 incident:
-# polyfill.io plus the BootCDN/Bootcss/Staticfile/Uncdn mirrors the
-# same operator was caught serving.
 _CDN_IMPORTS = {
     "polyfill.io": "https://polyfill.io/v3/polyfill.min.js",
     "bootcdn.net": "https://cdn.bootcdn.net/jquery/3.7.1/jquery.min.js",
@@ -661,15 +553,12 @@ _CDN_IMPORTS = {
 
 
 async def _fetch(h, proxy: str, url: str, marker: str) -> dict:
-    """Curl one URL through the proxy; wait for the flow record."""
     r = await curl(url, proxy, extra=["-o", "/dev/null", "-w", "%{http_code}"])
     assert r.stdout == "200", f"curl failed: {r.stdout!r} {r.stderr!r}"
     return await h.wait_flow(marker)
 
 
 async def _assert_silent(h, flow_id: str, rule_id: str) -> None:
-    """Bounded settle for the drain, then the rule fired on no flow of
-    this id (the negative-assertion counterpart of wait_finding)."""
     await asyncio.sleep(0.5)
     assert not any(f["rule_id"] == rule_id for f in h.findings_for(flow_id)), (
         f"{rule_id} fired unexpectedly on flow {flow_id}"
@@ -679,9 +568,6 @@ async def _assert_silent(h, flow_id: str, rule_id: str) -> None:
 async def test_s3_nosuchbucket_fires_and_normal_s3_error_does_not(
     odda_session,
 ) -> None:
-    """An S3 NoSuchBucket body yields the takeover Finding (HIGH) with
-    the BucketName value in evidence; a normal S3 XML error
-    (AccessDenied) does not fire."""
     async with odda_session() as h, fixture_site([_S3_HITS, _S3_MISS]) as fx:
         await _seed_slot(h, "takeover")
         proxy = await h.call("proxy_url", {})
@@ -704,8 +590,6 @@ async def test_s3_nosuchbucket_fires_and_normal_s3_error_does_not(
 
 
 async def test_shopify_shop_not_found_fires(odda_session) -> None:
-    """A Shopify shop-not-found body yields the takeover Finding (HIGH);
-    a page without the phrase does not fire."""
     async with odda_session() as h, fixture_site([_SHOPIFY, "index.html"]) as fx:
         await _seed_slot(h, "takeover")
         proxy = await h.call("proxy_url", {})
@@ -730,9 +614,6 @@ async def test_shopify_shop_not_found_fires(odda_session) -> None:
 async def test_each_compromised_cdn_import_fires_and_clean_cdns_do_not(
     odda_session,
 ) -> None:
-    """An HTML script import from each compromised CDN yields the
-    supply-chain Finding (HIGH) with the domain in evidence; imports
-    from unaffected CDNs (cdnjs, unpkg, jsdelivr) do not fire."""
     async with odda_session() as h, fixture_site([_CDN_CLEAN]) as fx:
         await _seed_slot(h, "supplychain")
         proxy = await h.call("proxy_url", {})
@@ -760,9 +641,6 @@ async def test_each_compromised_cdn_import_fires_and_clean_cdns_do_not(
 async def test_telerik_vulnerable_version_fires_and_unknown_does_not(
     odda_session,
 ) -> None:
-    """A Telerik WebResource reference carrying a vulnerable version
-    yields the CVE Finding (HIGH) with CVE-2017-9248 in refs and the
-    version in evidence; a fixed/unknown version does not fire."""
     async with (
         odda_session() as h,
         fixture_site([_TELERIK_HITS, _TELERIK_MISS]) as fx,
@@ -791,9 +669,6 @@ async def test_telerik_vulnerable_version_fires_and_unknown_does_not(
 async def test_prometheus_metrics_page_fires_and_prose_does_not(
     odda_session,
 ) -> None:
-    """A Prometheus exposition body on a 200 yields the exposure Finding
-    (MEDIUM) with the HELP/TYPE pair in evidence; ordinary prose that
-    mentions metrics does not fire."""
     async with odda_session() as h, fixture_site([_PROM_HITS, _PROM_MISS]) as fx:
         await _seed_slot(h, "fingerprints")
         proxy = await h.call("proxy_url", {})
@@ -814,21 +689,7 @@ async def test_prometheus_metrics_page_fires_and_prose_does_not(
         await _assert_silent(h, miss["id"], "exposure.prometheus-metrics")
 
 
-# --- ticket 05: retirejs dataset ---
-
-
 async def test_outdated_jquery_filecontent_lands_finding(odda_session) -> None:
-    """A served JS body matching a vendored file-content pattern yields a
-    js.outdated-library Finding at the highest matched advisory severity,
-    one evidence entry per matched advisory (each naming its own severity),
-    with the library, detected version, extractor, and CVE refs inline.
-
-    jquery 1.6.1 against the vendored jquery advisories: exactly seven
-    apply — four mediums with floors 1.6.1 clears (1.6.3 and 1.9.0b1
-    unbounded, CVE-2020-7656 >= 1.2.1, CVE-2015-9251 >= 1.4.0) plus
-    CVE-2019-11358 (>= 1.1.4), CVE-2020-11023 (>= 1.0.3), and the lone
-    low at < 2.999.999; the high (CVE-2016-10707) is fenced out by
-    atOrAbove 3.0.0-rc.1 — so the aggregate severity is medium."""
     _fx = "ticket05-jquery-old.js"
     async with odda_session() as h, fixture_site([_fx]) as fx:
         await _seed_slot(h, "retirejs")
@@ -859,11 +720,6 @@ async def test_outdated_jquery_filecontent_lands_finding(odda_session) -> None:
 
 
 async def test_sha1_hash_extractor_detects_hashed_version(odda_session) -> None:
-    """A JS body whose SHA-1 matches a known vulnerable version is
-    detected via the hash extractor. The fixture is byte-identical to
-    upstream's own retire-example test asset — the preimage of the
-    dataset's 07f8b94c… → 0.0.1 hash — and its banner also matches the
-    file-content pattern, so this pins the exact-hash-first priority."""
     _fx = "retire-example-0.0.1.min.js"
     async with odda_session() as h, fixture_site([_fx]) as fx:
         await _seed_slot(h, "retirejs")
@@ -889,9 +745,6 @@ async def test_sha1_hash_extractor_detects_hashed_version(odda_session) -> None:
 
 
 async def test_filename_extractor_detects_path_version(odda_session) -> None:
-    """The filename extractor matches the flow record's path: a body
-    too inert for any content pattern still lands a finding when the
-    URL filename carries the vendored version pattern."""
     _fx = "retire-example-0.0.1.js"
     async with odda_session() as h, fixture_site([_fx]) as fx:
         await _seed_slot(h, "retirejs")
@@ -915,11 +768,6 @@ async def test_filename_extractor_detects_path_version(odda_session) -> None:
 async def test_current_and_above_threshold_versions_yield_no_finding(
     odda_session,
 ) -> None:
-    """Versions outside the advisory bounds stay silent: a current
-    jquery (3.7.1, above every below-bound) and a retire-example at
-    the bound itself (0.0.2, not strictly below 0.0.2) produce no
-    js.outdated-library finding — while a positive control in the same
-    session proves the drain is live."""
     current, at_bound, control = (
         "ticket05-jquery-current.js",
         "retire-example-0.0.2.js",
@@ -941,7 +789,7 @@ async def test_current_and_above_threshold_versions_yield_no_finding(
             assert r.stdout == "200"
 
         control_flow = await h.wait_flow("scan-t05-control")
-        await h.wait_finding(control_flow["id"])  # the drain is live
+        await h.wait_finding(control_flow["id"])
 
         for marker in ("scan-t05-current", "scan-t05-bound"):
             flow = await h.wait_flow(marker)
@@ -952,12 +800,6 @@ async def test_current_and_above_threshold_versions_yield_no_finding(
 async def test_filecontent_scans_through_the_seam_in_one_pass(
     odda_session, monkeypatch
 ) -> None:
-    """The retire.js filecontent extractor scans through the fast-scan
-    seam (ticket 17): one engine pass per JS body carries every
-    library's filecontent patterns — a counting spy on the seam sees
-    exactly one find-all over the outdated-jquery body, and the finding
-    that lands is the same one the per-pattern stdlib scans produced
-    (severity, evidence count, extractor, refs)."""
     from odda.scanner import fastscan
 
     calls: list[str] = []
@@ -998,13 +840,6 @@ async def test_filecontent_scans_through_the_seam_in_one_pass(
 def test_refused_and_prefiltered_filecontent_patterns_still_detect(
     tmp_path,
 ) -> None:
-    """Patterns the seam refuses or only approximates keep detecting
-    (ticket 17): against a crafted dataset riding next to a copy of the
-    slot file, a zero-width pattern (refused at build — the batch
-    triage routes it stdlib, gated) and a backreference pattern
-    (approximated prefilter — stdlib confirm on the hit) both land the
-    same finding shape a clean engine-exact pattern does: detected
-    version, filecontent extractor, body offset, advisory severity."""
     _entry = {
         "extractors": {"filecontent": ["PATTERN"]},
         "vulnerabilities": [
@@ -1017,11 +852,8 @@ def test_refused_and_prefiltered_filecontent_patterns_still_detect(
         ],
     }
     dataset = {
-        # engine-exact: rides the shared pass
         "plain": {**_entry, "extractors": {"filecontent": ["plain-v§§version§§"]}},
-        # can match empty: the seam refuses it at build (stdlib, gated)
         "loose": {**_entry, "extractors": {"filecontent": ["§§version§§?"]}},
-        # backreference: the engine approximates it (prefilter + confirm)
         "echo": {
             **_entry,
             "extractors": {"filecontent": ["rev=§§version§§ echo:\\1"]},
@@ -1065,13 +897,7 @@ def test_refused_and_prefiltered_filecontent_patterns_still_detect(
         assert f"{library} {version} (via filecontent)" in finding.evidence[0].detail
 
 
-# --- ticket 06: user rules + rule tool trio ---
-
 _T06_CANARY = "odda-ticket06-canary"
-# One body drives both families: the canary marker for the user rules
-# under test, and a Python traceback banner so a seeded
-# disclosure.stack-trace finding doubles as the drain-settle probe for
-# negative assertions on later flows.
 _T06_BODY = (
     "<html><body>ticket06 page; Traceback (most recent call last): "
     f'File "/app/t06.py"; canary {_T06_CANARY} present</body></html>\n'
@@ -1127,11 +953,6 @@ RULES = [
 
 _RULE_BROKEN = "this is not python {{{"
 
-# Two rules in one slot: a normal matcher plus a rule whose scheme gate
-# raises at scan time (a str subclass whose __eq__ raises inside the
-# engine's ``in`` gate check) — the deterministic raising-rule
-# injection ticket 01 deferred. Containment must be per-rule, so the
-# sibling (and the seeded disclosure rule) still fire on the same flow.
 _RULE_PACK = f'''from odda.scanner import Rule, Severity
 
 
@@ -1171,7 +992,6 @@ async def _drive(h, fx, marker: str) -> dict:
 
 
 async def _wait_rule_finding(h, flow_id: str, rule_id: str) -> dict:
-    """Bounded poll for one flow's finding from one specific rule."""
     for _ in range(200):
         for f in h.findings_for(flow_id):
             if f["rule_id"] == rule_id:
@@ -1183,10 +1003,6 @@ async def _wait_rule_finding(h, flow_id: str, rule_id: str) -> dict:
 async def test_rule_install_applies_to_flows_after_install_only(
     odda_session,
 ) -> None:
-    """Installing from source mid-session: matching traffic driven after
-    the install yields the rule's Finding; traffic that flowed before the
-    install does not retroactively match, even though its scan drains
-    after the install."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         pre = await _drive(h, fx, "t06-pre-install")
 
@@ -1204,18 +1020,12 @@ async def test_rule_install_applies_to_flows_after_install_only(
         assert finding["evidence"][0]["where"] == "response_body"
         assert _T06_CANARY in finding["evidence"][0]["detail"]
 
-        # The pre-install flow never matches the rule (rules apply from
-        # arrival, not from scan time); settled by the post flow's
-        # canary finding — the drain passed the pre flow's entry.
         assert all(
             f["rule_id"] != "user.ticket06-canary" for f in h.findings_for(pre["id"])
         )
 
 
 async def test_rule_install_from_file_and_rule_list_rows(odda_session) -> None:
-    """install from a file path persists the project slot and rule_list
-    shows exactly the installed slots' rules — nothing ships with odda
-    — with slot, id, severity, scope, and state."""
     async with odda_session() as h:
         r = await _seed_slot(h, "disclosure")
         assert r["name"] == "disclosure"
@@ -1250,16 +1060,12 @@ async def test_rule_install_from_file_and_rule_list_rows(odda_session) -> None:
 async def test_syntax_error_install_rejected_with_expected_shape(
     odda_session,
 ) -> None:
-    """A syntax-error source is rejected naming the problem and showing
-    the expected rule-file shape; nothing is persisted."""
     async with odda_session() as h:
         err = await h.call_error(
             "rule_install", {"name": "bad", "source": _RULE_BROKEN}
         )
         assert "Failed to load rule slot 'bad'" in err
         assert "SyntaxError" in err
-        # the expected file shape rides the rejection — the exact
-        # skeleton constant, so error teaching can never drift from it
         assert RULE_FILE_SKELETON in err
         assert not _slot_path(h, "bad").exists()
 
@@ -1267,9 +1073,6 @@ async def test_syntax_error_install_rejected_with_expected_shape(
 async def test_colliding_rule_ids_rejected_naming_the_collision(
     odda_session,
 ) -> None:
-    """A rule id colliding with another slot's id is rejected at
-    install, naming the exact collision; the colliding slot never
-    reaches disk."""
     async with odda_session() as h:
         await _seed_slot(h, "disclosure")
         err = await h.call_error(
@@ -1287,9 +1090,6 @@ async def test_colliding_rule_ids_rejected_naming_the_collision(
 
 
 async def test_rule_remove_keeps_past_findings_stops_future(odda_session) -> None:
-    """rule_remove deregisters the slot's rules live and deletes the slot;
-    past Findings remain in the index; subsequent matching traffic
-    produces no Finding from the removed rules."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await _seed_slot(h, "disclosure")
         await h.call("rule_install", {"name": "canary", "source": _RULE_CANARY})
@@ -1305,30 +1105,22 @@ async def test_rule_remove_keeps_past_findings_stops_future(odda_session) -> Non
         assert not _slot_path(h, "canary").parent.exists()
 
         after = await _drive(h, fx, "t06-remove-after")
-        # settle: this flow drained (a disclosure finding fired on it), so the
-        # canary absence below is the removal, not drain lag
         await _wait_rule_finding(h, after["id"], "disclosure.stack-trace")
         assert all(
             f["rule_id"] != "user.ticket06-canary" for f in h.findings_for(after["id"])
         )
-        # past findings are never retracted
         assert any(
             f["rule_id"] == "user.ticket06-canary" for f in h.findings_for(before["id"])
         )
 
 
 async def test_raising_rule_is_contained_per_rule(odda_session) -> None:
-    """A user rule that raises at scan time is logged and skipped: the
-    flow still lands fully in the flows index, and other rules — the
-    builtin and a sibling user rule from the same slot — still fire on
-    that flow."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await _seed_slot(h, "disclosure")
         r = await h.call("rule_install", {"name": "pack", "source": _RULE_PACK})
         assert r["rules"] == ["user.ticket06-sibling", "user.ticket06-raiser"]
 
         flow = await _drive(h, fx, "t06-raiser-boom")
-        # the flow landed fully: request, response headers, and body files
         flow_dir = h.data_dir / "flows" / flow["id"]
         assert (flow_dir / "request").is_file()
         assert (flow_dir / "response_headers").is_file()
@@ -1342,9 +1134,6 @@ async def test_raising_rule_is_contained_per_rule(odda_session) -> None:
 
 
 async def test_rule_tool_validation_errors_verbatim(odda_session, tmp_path) -> None:
-    """file/source exclusivity, missing file, empty source, remove-missing,
-    and slot-name collision all error verbatim (the proxy-script
-    install contract)."""
     rf = tmp_path / "t06_canary_rule.py"
     rf.write_text(_RULE_CANARY)
     async with odda_session() as h:
@@ -1374,9 +1163,6 @@ async def test_rule_tool_validation_errors_verbatim(odda_session, tmp_path) -> N
 
 
 async def test_force_overwrite_swaps_the_slot_live(odda_session) -> None:
-    """force=True overwrites an existing slot: the old rule ids leave the
-    live set, the on-disk source is the new one, and subsequent traffic
-    finds only the replacement rule."""
     async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
         await h.call("rule_install", {"name": "swap", "source": _RULE_CANARY})
         r = await h.call(
@@ -1397,14 +1183,7 @@ async def test_force_overwrite_swaps_the_slot_live(odda_session) -> None:
         )
 
 
-# --- ticket 16: de-bundle — repo rule slots, assets, empty boot ---
-
-
-# The converted corpus lives outside the shipped package (ADR-0036):
-# one slot dir per family under the fixtures' rules tree, seeded through
-# the real rule_install path.
-# Every converted family, in one list (library-level tests scan against
-# the whole corpus the way sessions do when every slot is installed).
+# See ADR-0036.
 _SLOT_FAMILIES = (
     "cookies",
     "disclosure",
@@ -1417,12 +1196,10 @@ _SLOT_FAMILIES = (
 
 
 def _all_slot_rules() -> list[Rule]:
-    """Every repo slot family's rules, the full converted corpus."""
     return [rule for family in _SLOT_FAMILIES for rule in _slot_rules(family)]
 
 
 def _slot_module(family: str) -> dict:
-    """Exec one repo slot family and return its module namespace."""
     path = _RULES_SRC / family / "rule.py"
     module = ModuleType(f"t16.slot.{family}")
     module.__file__ = str(path)
@@ -1440,10 +1217,6 @@ def _slot_module(family: str) -> dict:
 async def test_rule_install_from_file_copies_sibling_assets(
     odda_session, tmp_path
 ) -> None:
-    """Installing from a file path copies the rule file's sibling
-    non-.py assets into the slot dir — a dataset-backed rule file reads
-    its data from its own directory, so the data must ride along. A
-    force-overwrite from a file with no assets leaves none behind."""
     src = tmp_path / "t16-dataset-slot"
     src.mkdir()
     rule_file = src / "rule.py"
@@ -1466,7 +1239,6 @@ async def test_rule_install_from_file_copies_sibling_assets(
         assert not (slot_dir / "helper.py").exists(), ".py siblings stay behind"
         assert not (slot_dir / "subdir").exists(), "subdirectories stay behind"
 
-        # force-overwrite from an asset-less file: no stale assets linger
         plain = tmp_path / "t16-plain.py"
         plain.write_text(_RULE_ALT)
         r2 = await h.call(
@@ -1479,11 +1251,7 @@ async def test_rule_install_from_file_copies_sibling_assets(
 
 
 async def test_empty_boot_scans_nothing_and_captures_fine(odda_session) -> None:
-    """A fresh install boots the Scanner with an empty ruleset — no
-    slots exist, nothing scans, nothing raises: traffic still captures
-    fully (clean, matching, and error flows alike), no findings index
-    appears, and rule_list shows the empty ruleset (ADR-0036's
-    deliberate empty boot)."""
+    # See ADR-0036.
     async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
         assert await h.call("rule_list", {}) == []
 
@@ -1498,9 +1266,6 @@ async def test_empty_boot_scans_nothing_and_captures_fine(odda_session) -> None:
         clean = await h.wait_flow(marker)
         assert clean["error"] is None
 
-        # A body that would fire disclosure.stack-trace under the
-        # former builtins: with no slots installed it lands as a plain
-        # captured flow — the scan is a no-op, not a failure.
         r = await curl(
             f"{fx.base}/{_FX}?marker=t16-empty-match",
             proxy,
@@ -1529,11 +1294,7 @@ async def test_empty_boot_scans_nothing_and_captures_fine(odda_session) -> None:
 
 
 def test_package_ships_no_rules_or_datasets() -> None:
-    """The shipped package carries scanner machinery only: no rule
-    registrations (no builtins modules exist to import) and no rule
-    datasets (no data dir, no package-data entry) — the corpus lives
-    as installable slot sources under tests/e2e/fixtures/rules/, outside
-    the package (ADR-0036)."""
+    # See ADR-0036.
     scanner_src = Path(__file__).resolve().parents[2] / "src" / "odda" / "scanner"
     names = {p.name for p in scanner_src.iterdir()}
     assert "builtins" not in names, "no builtin rule modules may ship"
@@ -1546,21 +1307,16 @@ def test_package_ships_no_rules_or_datasets() -> None:
     assert '"scanner/data/*"' not in pyproject.read_text(encoding="utf-8"), (
         "scanner package-data entry must be gone"
     )
-    # the converted corpus does exist, outside the package
     assert (_RULES_SRC / "retirejs" / "jsrepository.json").is_file()
 
 
 async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
     odda_session, config_home
 ) -> None:
-    """A slot installed in session A loads on session B's boot; a broken
-    slot (syntax error on disk) is skipped with its error visible in
-    rule_list while the good sibling slot still loads and fires."""
     async with odda_session() as h:
         await h.call("rule_install", {"name": "keeper", "source": _RULE_CANARY})
         assert _slot_path(h, "keeper").is_file()
 
-    # a broken slot appears on disk out-of-band (hand-edited, corrupted)
     broken = config_home / "rules" / "broken" / "rule.py"
     broken.parent.mkdir(parents=True)
     broken.write_text(_RULE_BROKEN)
@@ -1588,23 +1344,11 @@ async def test_slots_persist_and_load_on_next_boot_bad_slot_skipped(
         assert finding["flow_id"] == flow["id"]
 
 
-# --- ticket 03: request-side rules + browser gate ---
-
-# Query-parameter shapes the request-side rules match; markers are
-# unique to this ticket's flows.
 _JS = "jsessionid=t03-nav-session"
 _PW = "pwd=t03-nav-password"
 
 
 async def _drained_silent(h, fx, marker: str, *flow_ids: str) -> None:
-    """Prove the drain passed the given flows, then assert silence.
-
-    A finding-producing flow driven after them is awaited through to
-    its own finding; the queue is FIFO and the drain single-tasked, so
-    that finding landing proves every earlier entry was scanned — the
-    deterministic form of a negative assertion (the wait_finding
-    counterpart).
-    """
     proxy = await h.call("proxy_url", {})
     await curl(f"{fx.base}/{_FX}?marker={marker}", proxy, extra=["-o", "/dev/null"])
     probe = await h.wait_flow(marker)
@@ -1616,10 +1360,6 @@ async def _drained_silent(h, fx, marker: str, *flow_ids: str) -> None:
 async def test_browser_session_and_password_params_in_url_land_findings(
     odda_session,
 ) -> None:
-    """Real Chrome navigation with a session-token query parameter yields
-    the request.session-token-in-url Finding (MEDIUM) with request-side
-    evidence; a password-shaped parameter on the same navigation yields
-    request.password-in-url."""
     async with odda_session() as h, fixture_site(["index.html"]) as fx:
         await _seed_slot(h, "request")
         bid, tid = await h.open_browser()
@@ -1644,10 +1384,6 @@ async def test_browser_session_and_password_params_in_url_land_findings(
 async def test_request_send_probe_is_invisible_to_request_rules(
     odda_session,
 ) -> None:
-    """The same URL shape sent via request_send — session token, password
-    parameter, and an Authorization header all crafted in — yields NO
-    Finding: request_send flows carry no browser attribution, so the
-    browser-attribution gate holds."""
     async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
         await _seed_slot(h, "disclosure")
         await _seed_slot(h, "request")
@@ -1677,9 +1413,6 @@ async def test_request_send_probe_is_invisible_to_request_rules(
 
 
 async def test_browser_cleartext_authorization_http_only(odda_session) -> None:
-    """A browser request over http carrying an Authorization header yields
-    the request.cleartext-authorization Finding (HIGH); the https
-    counterpart and a non-browser curl with the same header do not."""
     async with (
         odda_session() as h,
         fixture_site([_FX, "index.html"]) as fx,
@@ -1689,8 +1422,6 @@ async def test_browser_cleartext_authorization_http_only(odda_session) -> None:
         await _seed_slot(h, "request")
         bid, tid = await h.open_browser(f"{fx.base}/")
 
-        # http: an in-page fetch with explicit credentials rides the
-        # browser's proxy attribution.
         status = await h.eval(
             bid,
             tid,
@@ -1711,8 +1442,6 @@ async def test_browser_cleartext_authorization_http_only(odda_session) -> None:
         assert ev["where"] == "request_headers"
         assert ev["detail"].startswith("Authorization:")
 
-        # https: the same in-page fetch against the dyn server — the
-        # scheme gate keeps the rule silent.
         await h.navigate(bid, tid, f"{dyn.tls_base}/")
         status = await h.eval(
             bid,
@@ -1726,8 +1455,6 @@ async def test_browser_cleartext_authorization_http_only(odda_session) -> None:
         assert https_flow["scheme"] == "https"
         assert https_flow["browser_id"] is not None
 
-        # Non-browser http with the same header: curl attributes to
-        # null, and the browser gate keeps the rule silent.
         proxy = await h.call("proxy_url", {})
         await curl(
             f"{fx.base}/?marker=t03-auth-curl",
@@ -1745,11 +1472,6 @@ async def test_browser_cleartext_authorization_http_only(odda_session) -> None:
 async def test_browser_xdebug_session_start_param_lands_finding(
     odda_session,
 ) -> None:
-    """A Chrome navigation with XDEBUG_SESSION_START in the URL yields the
-    cookie.xdebug-session Finding from the request side (the fixture's
-    plain 200 carries no Set-Cookie echo); a non-browser request with
-    the same param stays silent — the param half is browser-gated, the
-    Set-Cookie half is not."""
     async with odda_session() as h, fixture_site([_FX, "index.html"]) as fx:
         await _seed_slot(h, "cookies")
         await _seed_slot(h, "disclosure")
@@ -1778,17 +1500,9 @@ async def test_browser_xdebug_session_start_param_lands_finding(
 
 
 async def test_error_flow_from_browser_keeps_request_rules(odda_session) -> None:
-    """An error Flow from a dead-host browser navigation (no response
-    side) with a token in its URL still yields the request-side Finding —
-    error flows get request-side rules."""
     async with odda_session() as h:
         await _seed_slot(h, "request")
         bid, tid = await h.open_browser()
-        # The navigation itself fails (the host never resolves — a dead
-        # target, unlike a Chrome-blocked port, still sends the request
-        # through the proxy); the failed attempt is exactly what leaves
-        # the attributed error flow, so the tool result is irrelevant
-        # either way.
         await h.client.call_tool(
             "navigate",
             {
@@ -1808,21 +1522,12 @@ async def test_error_flow_from_browser_keeps_request_rules(odda_session) -> None
         assert finding["evidence"][0]["detail"].startswith("token=")
 
 
-# --- ticket 07: invariants across sessions (forward-only, per-session) ---
-
-# Curl "status only" extra — every ticket-07 drive checks the 200.
 _STATUS_ONLY = ["-o", "/dev/null", "-w", "%{http_code}"]
 
 
 async def test_sequential_sessions_are_forward_only(odda_session, tmp_path) -> None:
-    """Two sequential sessions on ONE shared data dir: session A's flows
-    are scanned exactly once — by A, while A lives — and session B, booting
-    on the same data dir, never adds a finding for them. B's non-matching
-    traffic stays silent; B's own matching traffic yields B's findings,
-    with A's and B's flows sitting alongside in the same flows.jsonl."""
     data_dir = tmp_path / ".odda"
     async with fixture_site([_FX, "index.html"]) as fx:
-        # Session A: stack-trace-matching traffic, then close.
         async with odda_session() as a:
             await _seed_slot(a, "disclosure")
             proxy = await a.call("proxy_url", {})
@@ -1831,15 +1536,11 @@ async def test_sequential_sessions_are_forward_only(odda_session, tmp_path) -> N
             )
             assert r.stdout == "200"
             flow_a = await a.wait_flow("t07-seq-a")
-            # Session-live observation: A scanned its own flow (the
-            # writing session scans — ADR-0034), so exactly A's finding
-            # exists from here on; no later session may extend it.
+            # See ADR-0034.
             finding_a = await a.wait_finding(flow_a["id"])
 
-        # A closed, B not yet booted: the index holds exactly A's finding.
         assert _findings_index(data_dir) == [finding_a]
 
-        # Session B boots on the same data dir (A's flows in flows.jsonl).
         async with odda_session() as b:
             proxy = await b.call("proxy_url", {})
             r = await curl(
@@ -1856,15 +1557,9 @@ async def test_sequential_sessions_are_forward_only(odda_session, tmp_path) -> N
             flow_b = await b.wait_flow("t07-seq-b-match")
             finding_b = await b.wait_finding(flow_b["id"])
 
-            # The drain is FIFO: finding_b landing proves the quiet flow
-            # drained before it, so both negatives below are settled —
-            # B produced nothing for its own clean flow, and nothing for
-            # A's matching flow sitting in the same flows.jsonl.
             assert b.findings_for(quiet["id"]) == []
             assert b.findings_for(flow_a["id"]) == [finding_a]
 
-        # Both closed: A's and B's flows share one flows.jsonl; the
-        # findings index is exactly A's frozen finding plus B's own.
         jsonl = (data_dir / "flows" / "flows.jsonl").read_text()
         assert "t07-seq-a" in jsonl
         assert "t07-seq-b-match" in jsonl
@@ -1874,26 +1569,13 @@ async def test_sequential_sessions_are_forward_only(odda_session, tmp_path) -> N
 async def test_concurrent_sessions_observe_their_own_flows_only(
     odda_session, odda_subprocess_session
 ) -> None:
-    """Two concurrently live sessions on ONE shared data dir each scan
-    exactly their own flows: interleaved matching traffic through each
-    session's own proxy yields exactly one finding per rule-flow pair —
-    no cross-observation, no duplicates from the sibling — and each
-    session's scanner keeps working after the sibling session tears down.
-
-    The sibling is a real ``odda mcp`` subprocess (the production
-    one-process-per-session shape): mitmproxy's context is process-global,
-    so a second in-process session cannot be a true concurrent sibling.
-    """
     async with fixture_site([_FX]) as fx, odda_session() as a:
         await _seed_slot(a, "disclosure")
         async with odda_subprocess_session() as b:
-            # Both sessions are live at once over the same data dir, each
-            # with its own proxy and its own scanner drain.
             proxy_a = await a.call("proxy_url", {})
             proxy_b = await b.call("proxy_url", {})
             assert proxy_a != proxy_b
 
-            # Interleaved matching traffic: a, b, a — both live throughout.
             for marker, proxy in (
                 ("t07-cc-a1", proxy_a),
                 ("t07-cc-b1", proxy_b),
@@ -1907,17 +1589,12 @@ async def test_concurrent_sessions_observe_their_own_flows_only(
             flow_a1 = await a.wait_flow("t07-cc-a1")
             flow_a2 = await a.wait_flow("t07-cc-a2")
             flow_b1 = await b.wait_flow("t07-cc-b1")
-            # The two sessions' writers allocate independently; mkdir
-            # uniqueness keeps the shared flows.jsonl collision-free.
             assert len({flow_a1["id"], flow_a2["id"], flow_b1["id"]}) == 3
 
             finding_a1 = await a.wait_finding(flow_a1["id"])
             finding_a2 = await a.wait_finding(flow_a2["id"])
             finding_b1 = await b.wait_finding(flow_b1["id"])
 
-            # Exactly one finding per rule-flow pair: three flows, three
-            # lines, no duplicate pairs — each session scanned its own
-            # flows; the sibling's scanner never observed them.
             index = _findings_index(a.data_dir)
             assert len(index) == 3
             assert len({(rec["rule_id"], rec["flow_id"]) for rec in index}) == 3
@@ -1930,9 +1607,6 @@ async def test_concurrent_sessions_observe_their_own_flows_only(
                 assert finding["flow_id"] == flow_id
                 assert finding["severity"] == "high"
 
-        # b's session closed: a's own scanner is untouched by the sibling
-        # teardown — matching traffic through a's proxy still lands a's
-        # finding.
         r = await curl(f"{fx.base}/{_FX}?marker=t07-cc-a3", proxy_a, extra=_STATUS_ONLY)
         assert r.stdout == "200"
         flow_a3 = await a.wait_flow("t07-cc-a3")
@@ -1943,17 +1617,10 @@ async def test_concurrent_sessions_observe_their_own_flows_only(
         assert len({(rec["rule_id"], rec["flow_id"]) for rec in index}) == 4
 
 
-# --- ticket 08: the drain never blocks the event loop ---
-
-# A rule whose scan() pins its thread for this long — the deterministic
-# stand-in for a multi-MB body against the linear-cost dataset regexes
-# (measured ~265 ms/MB on the ticket: a 10 MB JS body scanned in 2.7 s).
 _HOLD_S = 0.3
 
 
 class _SlowRule(Rule):
-    """Dataset-shaped rule: overrides ``scan`` and takes wall time."""
-
     def scan(self, view: FlowView) -> list[Finding]:
         time.sleep(_HOLD_S)
         return [
@@ -1970,10 +1637,6 @@ class _SlowRule(Rule):
 async def test_drain_keeps_loop_live_and_ordered_during_slow_scans(
     tmp_path,
 ) -> None:
-    """Scans run off the event loop's thread (ticket 08): while a rule
-    takes hundreds of milliseconds per flow, a heartbeat task on the
-    drain's own loop keeps its ~5 ms cadence, the findings still land,
-    and queue order survives — flow 1's finding precedes flow 2's."""
     data_dir = tmp_path / ".odda"
     scanner = Scanner(
         data_dir,
@@ -1991,7 +1654,7 @@ async def test_drain_keeps_loop_live_and_ordered_during_slow_scans(
             beats.append(time.monotonic())
 
     hb = asyncio.create_task(heartbeat())
-    await asyncio.sleep(0.05)  # warm-up beats
+    await asyncio.sleep(0.05)
 
     scanner.observe(_stored_flow(data_dir, "00001"))
     scanner.observe(_stored_flow(data_dir, "00002"))
@@ -2002,7 +1665,7 @@ async def test_drain_keeps_loop_live_and_ordered_during_slow_scans(
         if findings_path.is_file() and len(findings_path.read_text().splitlines()) == 2:
             break
         await asyncio.sleep(0.01)
-    await asyncio.sleep(0.05)  # post-scan beats
+    await asyncio.sleep(0.05)
 
     hb.cancel()
     drain.cancel()
@@ -2012,27 +1675,12 @@ async def test_drain_keeps_loop_live_and_ordered_during_slow_scans(
     assert [rec["flow_id"] for rec in index] == ["00001", "00002"]
     assert all(rec["rule_id"] == "test.slow-scan" for rec in index)
 
-    # The loop kept servicing the heartbeat while each scan pinned a
-    # worker for _HOLD_S. The pre-fix sync drain froze the loop for the
-    # whole queue (max gap >= 2 x _HOLD_S here); ~5-15 ms is the
-    # healthy range, so half a hold is a generous ceiling.
     gaps = [b - a for a, b in itertools.pairwise(beats)]
     assert gaps, "heartbeat never beat"
     assert max(gaps) < _HOLD_S / 2, f"loop stalled {max(gaps):.3f}s during drain"
 
 
 def test_literal_gate_never_suppresses_a_match() -> None:
-    """The necessary-literal gate is sound: across every rule and
-    dataset pattern of the converted slot corpus, on seeded random
-    texts spliced with the patterns' own literal fragments, a pattern
-    that matches always passes its gate (a gate miss can only ever
-    skip a pattern that would not have matched). Case-insensitive
-    patterns gate on casefolded literals, so the corpus includes
-    mixed-case matches for them, and the fold sweep below pins the
-    per-character soundness edge (every char an ASCII letter can
-    (?i)-match folds to exactly that letter's fold). Also pins gate
-    coverage, so a regex parser or dataset drift cannot silently
-    degrade every body scan back to ungated linear passes."""
     patterns: list[re.Pattern[str]] = []
     for library in _slot_module("retirejs")["_libraries"]():
         patterns.extend(library.filecontent)
@@ -2059,9 +1707,6 @@ def test_literal_gate_never_suppresses_a_match() -> None:
         "https://cdn.polyfill.io/v3/polyfill.min.js",
         "<Error><Code>NoSuchBucket</Code></Error>",
         "// PDFObject v1.2.3",
-        # mixed-case bodies for the fold-gated (?i) patterns: the
-        # Telerik/S3/supply-chain shapes must still pass their folded
-        # gates when they match
         "telerik.web.ui.webresource.axd?version=2017.2.503",
         "TeLeRiK.WEB.UI.WebResource.axd ... VeRsIoN=2013.2.717",
         '<ScRiPt defer src="https://cdn.polyfill.io/v3/x.js"></script>',
@@ -2087,11 +1732,6 @@ def test_literal_gate_never_suppresses_a_match() -> None:
 
 
 def test_ci_gate_fold_sweep_pins_the_soundness_edge() -> None:
-    """Case-insensitive gates fold both sides; the soundness edge is
-    per-character: Python matches (?i) via simple case folding while
-    the gate folds fully, so every character an ASCII letter can
-    (?i)-match must casefold to exactly that letter's fold — anything
-    else and a folded literal could miss a real match."""
     from odda.scanner.gates import _gate_fold
 
     for code in list(range(0x600)) + list(range(0x1E00, 0x2200)):
@@ -2105,20 +1745,6 @@ def test_ci_gate_fold_sweep_pins_the_soundness_edge() -> None:
 
 
 async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
-    """A 10 MB JavaScript body through the full converted slot corpus —
-    the retire.js filecontent scans above all — no longer stalls the
-    event loop for the scan's duration (ticket 08): with the scan off
-    the loop thread and the necessary-literal gate in front of every
-    body regex, a heartbeat on the drain's own loop keeps its ~5 ms
-    cadence (pre-fix the loop froze for the whole 2.7 s scan;
-    thread-offload alone still hitched ~0.3 s per un-gated regex).
-    Ticket 12's engine drains the declarative body stage (the
-    millisecond-cadence probe is the engine-path test below); this
-    probe stays on the residual Python path the spec keeps at a 0.6 s
-    ceiling — the retire.js slot's dataset scan() override above all,
-    until its filecontent patterns reroute through the engine. Queue
-    order survives: the small flow behind the big one still lands its
-    finding, and the big benign body lands none."""
     data_dir = tmp_path / ".odda"
     chunk = "var a=1;function f(){return a+1;}\n"
     big = _stored_flow(
@@ -2171,17 +1797,6 @@ async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
 
     gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
     assert gaps, "heartbeat never beat during the scan window"
-    # The residual Python-path ceiling the spec keeps (ticket 12's
-    # numbers contract): the retire.js slot's dataset scan() override
-    # still runs its gated stdlib loop over the body, so sequential
-    # runs see a ~70 ms worst gap; under the suite's own 3-worker
-    # xdist load the same regex ops stretch ~5x, so the ceiling must
-    # leave room for it. What the ceiling must catch is the bug:
-    # pre-fix, the loop froze for the whole 2.7 s scan.
-    # Under xdist the suite's own 3-worker load stretches those same
-    # regex ops past the sequential ceiling (the engine-path tests'
-    # convention above); the hazard — a 2.7 s whole-body freeze —
-    # still trips 1.5 s.
     ceiling = 1.5 if os.environ.get("PYTEST_XDIST_WORKER") else 0.6
     assert max(gaps) < ceiling, f"loop stalled {max(gaps):.3f}s during the drain"
 
@@ -2189,18 +1804,6 @@ async def test_multi_mb_js_scan_keeps_event_loop_live(tmp_path) -> None:
 async def test_multi_mb_engine_body_scan_keeps_loop_at_millisecond_cadence(
     tmp_path,
 ) -> None:
-    """The engine path's numbers contract (ticket 12): a 10 MB
-    JavaScript body scanned by the declarative corpus — every rule
-    whose body patterns compile into the epoch's one database, plus
-    their gated stdlib residuals — keeps the event loop at
-    millisecond cadence: the body pass itself is one GIL-released
-    engine call, and the Python-path tail (body decode, literal-gate
-    scans, folds) runs as sub-10 ms segments. The dataset-backed
-    retire.js slot (a scan() override riding the stdlib path until
-    ticket 17 reroutes it) is deliberately absent; the full-corpus
-    probe above carries the residual ceiling. Queue order survives:
-    the small flow behind the big one still lands its finding, and
-    the big benign body lands none."""
     data_dir = tmp_path / ".odda"
     chunk = "var a=1;function f(){return a+1;}\n"
     big = _stored_flow(
@@ -2255,22 +1858,6 @@ async def test_multi_mb_engine_body_scan_keeps_loop_at_millisecond_cadence(
 
     gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
     assert gaps, "heartbeat never beat during the scan window"
-    # The numbers contract: max event-loop gap <= 15 ms during a 10 MB
-    # scan in a normal run, <= 0.5 s under the suite's own 3-worker
-    # parallel load plus the desktop session the suite shares the box
-    # with (0.1 s proved too tight there: scheduler hiccups measured
-    # 0.10-0.12 s in two consecutive suite runs). What the ceiling must
-    # catch is the
-    # regression: per-pattern stdlib body scans hitch ~70 ms each, and
-    # the pre-offload drain froze the loop for the whole multi-second
-    # scan. Scanner-code floor measured at 2-3 ms; the serial bright
-    # line sits at 15 ms (not the original 10 ms) because a kernel-
-    # backed stall class outside the program's control (THP compaction
-    # on fragmented memory + first-touch faults with the box swap-
-    # fragged) lands a single 10-13 ms gap in ~half of serial runs —
-    # attribution: gaps end outside any marked op; gc-off does not
-    # help, THP-off reduces it. Optimization round deferred by
-    # maintainer decision (2026-10-19).
     ceiling = 0.5 if os.environ.get("PYTEST_XDIST_WORKER") else 0.015
     assert max(gaps) < ceiling, f"loop stalled {max(gaps):.3f}s during the drain"
 
@@ -2278,14 +1865,6 @@ async def test_multi_mb_engine_body_scan_keeps_loop_at_millisecond_cadence(
 async def test_mid_session_rule_install_keeps_loop_live(
     odda_session,
 ) -> None:
-    """A mid-session rule_install of the full retire.js slot (the
-    207-pattern dataset corpus) compiles its ruleset epoch off the
-    event loop: while the install is in flight, a heartbeat task on
-    the session's own loop keeps its ~5 ms cadence — the corpus
-    compile measured at ~1.2 s on this box would otherwise stall
-    every concurrent tool call (13x the accepted ticket-12 install
-    budget) — and the install still lands: the slot's rule registers
-    live."""
     async with odda_session() as h:
         beats: list[tuple[float, float]] = []
 
@@ -2298,7 +1877,7 @@ async def test_mid_session_rule_install_keeps_loop_live(
                 last = now
 
         hb = asyncio.create_task(heartbeat())
-        await asyncio.sleep(0.05)  # warm-up beats
+        await asyncio.sleep(0.05)
 
         window_start = time.monotonic()
         installed = await h.call(
@@ -2306,7 +1885,7 @@ async def test_mid_session_rule_install_keeps_loop_live(
             {"name": "retirejs", "file": str(_RULES_SRC / "retirejs" / "rule.py")},
         )
         window_end = time.monotonic()
-        await asyncio.sleep(0.05)  # post-install beats
+        await asyncio.sleep(0.05)
 
         hb.cancel()
         await asyncio.gather(hb, return_exceptions=True)
@@ -2317,18 +1896,8 @@ async def test_mid_session_rule_install_keeps_loop_live(
 
         gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
         assert gaps, "heartbeat never beat during the install window"
-        # The install-path ceiling: the epoch build runs in a worker
-        # thread (serial installs, one build at a time), so the loop's
-        # worst gap is the manager's on-loop bookkeeping, not the
-        # compile. What the ceiling must catch is the regression: the
-        # on-loop build froze the loop for the whole ~1.2 s compile.
-        # Under the suite's 3-worker xdist load the same bookkeeping
-        # ops stretch, so the parallel ceiling leaves room for it.
         ceiling = 0.5 if os.environ.get("PYTEST_XDIST_WORKER") else 0.15
         assert max(gaps) < ceiling, f"loop stalled {max(gaps):.3f}s during install"
-
-
-# --- ticket 12: the engine drains the body stage ---
 
 
 _T12_MARKER = "ticket12-engine-canary"
@@ -2337,15 +1906,6 @@ _T12_MARKER = "ticket12-engine-canary"
 async def test_engine_body_stage_records_match_stdlib_finditer(
     tmp_path,
 ) -> None:
-    """With the engine draining the body stage, Finding records stay
-    byte-identical: the records the scanner writes are exactly what
-    plain stdlib finditer over the same rule patterns produces — rule
-    ids, severities, titles, evidence where/offset/detail, refs. One
-    flow hits engine-exact rules (multi-match aggregation in the
-    stack-trace rule), an engine-approximated pattern (the Prometheus
-    exposition's backreference, prefilter plus stdlib confirm on the
-    hit), and an expansion-guard residual (the S3 bounded-lazy
-    takeover shape)."""
     rules = _all_slot_rules()
     body = (
         "Traceback (most recent call last):\n"
@@ -2370,12 +1930,10 @@ async def test_engine_body_stage_records_match_stdlib_finditer(
         if findings_path.is_file() and len(findings_path.read_text().splitlines()) >= 5:
             break
         await asyncio.sleep(0.01)
-    await asyncio.sleep(0.1)  # any late extra finding fails the set assert
+    await asyncio.sleep(0.1)
     drain.cancel()
     await asyncio.gather(drain, return_exceptions=True)
 
-    # The independent truth: plain stdlib finditer over the same rule
-    # patterns, aggregated per rule exactly as the scanner aggregates.
     expected: dict[str, dict] = {}
     for rule in rules:
         evidence = [
@@ -2407,13 +1965,6 @@ async def test_engine_body_stage_records_match_stdlib_finditer(
 
 
 async def test_arrival_epoch_never_matches_retroactively(tmp_path) -> None:
-    """The queue entry carries the whole ruleset epoch, so mid-session
-    installs and removes swap the live database without ever reaching
-    a flow that arrived earlier: observed while the drain was not yet
-    running, a pre-install flow drains entirely under later epochs and
-    still never matches the canary; the between-install flow matches
-    through the newly compiled database; the post-remove flow is
-    silent again."""
     data_dir = tmp_path / ".odda"
     body = f"pre {_T12_MARKER}-7 mid post\n"
     canary = Rule(
@@ -2422,13 +1973,13 @@ async def test_arrival_epoch_never_matches_retroactively(tmp_path) -> None:
         title="Ticket 12 canary marker disclosed",
         body_patterns=(rf"{_T12_MARKER}-[0-9]+",),
     )
-    scanner = Scanner(data_dir)  # boots empty: the arrival-time base epoch
+    scanner = Scanner(data_dir)
     pre = _stored_flow(data_dir, "00001", body.encode())
     scanner.observe(pre)
-    scanner.register_rules((canary,))  # install: next epoch, new database
+    scanner.register_rules((canary,))
     live = _stored_flow(data_dir, "00002", body.encode())
     scanner.observe(live)
-    scanner.deregister_rules({"user.ticket12-canary"})  # remove: next epoch
+    scanner.deregister_rules({"user.ticket12-canary"})
     post = _stored_flow(data_dir, "00003", body.encode())
     scanner.observe(post)
     drain = asyncio.create_task(scanner.run())
@@ -2438,7 +1989,7 @@ async def test_arrival_epoch_never_matches_retroactively(tmp_path) -> None:
         if findings_path.is_file() and findings_path.read_text().splitlines():
             break
         await asyncio.sleep(0.01)
-    await asyncio.sleep(0.2)  # let the later flows drain too
+    await asyncio.sleep(0.2)
     drain.cancel()
     await asyncio.gather(drain, return_exceptions=True)
 
@@ -2449,9 +2000,6 @@ async def test_arrival_epoch_never_matches_retroactively(tmp_path) -> None:
     assert index[0]["evidence"][0]["detail"] == f"{_T12_MARKER}-7"
 
 
-# --- ticket 13: prefilter and confirm for incompatible patterns ---
-
-
 _T13_HIT_BODY = (
     "# HELP go_goroutines Number of goroutines\n"
     "# TYPE go_goroutines gauge\n"
@@ -2460,12 +2008,7 @@ _T13_HIT_BODY = (
     '<script defer src="https://cdn.bootcss.com/x.js"></script>\n'
 )
 
-# The corpus's three refusal families in one rule, restated within the
-# engine's compile-expansion budget (ADR-0037: over-budget shapes stay
-# stdlib residuals however they scan): the Prometheus backreference
-# (fixtures/rules/fingerprints), the compromised-CDN lookarounds
-# (fixtures/rules/supplychain, bridging repeat shortened), and the quote-pair
-# secret an agent authors the same way.
+# See ADR-0037.
 _T13_REFUSED = Rule(
     id="user.ticket13-refused",
     severity=Severity.LOW,
@@ -2484,14 +2027,6 @@ _T13_REFUSED = Rule(
 async def test_confirmation_runs_only_on_approximation_hit_bodies(
     tmp_path, monkeypatch
 ) -> None:
-    """Ticket 13's proof, by counting stdlib body scans through the
-    library seam: three engine-refused body patterns ride the epoch's
-    one-pass database as approximate prefilters. A body no
-    approximation hits drains with zero stdlib body-pattern scans — no
-    confirmation, no residual — while a body whose approximations hit
-    triggers exactly one confirmation per pattern, the over-reporting
-    CDN host confirms away, and the finding that lands is byte-identical
-    to plain stdlib finditer over the same patterns."""
     from odda.scanner import engine, fastscan
 
     confirms: list[tuple[str, str]] = []
@@ -2526,12 +2061,10 @@ async def test_confirmation_runs_only_on_approximation_hit_bodies(
         if findings_path.is_file() and findings_path.read_text().splitlines():
             break
         await asyncio.sleep(0.01)
-    await asyncio.sleep(0.15)  # any late extra finding fails the set assert
+    await asyncio.sleep(0.15)
     drain.cancel()
     await asyncio.gather(drain, return_exceptions=True)
 
-    # The independent truth: plain stdlib finditer over the same rule
-    # patterns, aggregated exactly as the scanner aggregates.
     expected_evidence = [
         {
             "where": "response_body",
@@ -2552,8 +2085,6 @@ async def test_confirmation_runs_only_on_approximation_hit_bodies(
         "refs": [],
     }
 
-    # The miss body — no approximation hit, ASCII — never reached a
-    # stdlib pattern; the hit body confirmed each pattern exactly once.
     assert all("nothing exotic" not in text for _src, text in confirms)
     assert len(confirms) == 3, [src for src, _ in confirms]
     assert {src for src, _ in confirms} == {
@@ -2565,23 +2096,8 @@ async def test_confirmation_runs_only_on_approximation_hit_bodies(
 async def test_confirmation_over_multi_mb_body_keeps_residual_ceiling(
     tmp_path,
 ) -> None:
-    """The residual-path numbers contract during a confirmation
-    (ticket 13): a stdlib confirm sweep over a 10 MB body runs on the
-    drain's worker thread (ticket 10's offload), so the loop keeps its
-    cadence — the heartbeat's worst gap stays under the spec's 0.6 s
-    residual ceiling (a finditer confirm walks the body in match-step
-    sized segments; the hazard the ceiling guards is a whole-body
-    freeze). The body carries approximation hits that confirm away —
-    HELP/TYPE pairs with mismatched names, a lookaround-violating CDN
-    host — plus one true match per pattern; the findings are exactly
-    the true matches', and queue order survives."""
     data_dir = tmp_path / ".odda"
     noise = "var a=1;function f(){return a+1;}\n"
-    # A real metrics exposition's density: a few thousand HELP/TYPE
-    # families and a handful of script tags over 10 MB, not an
-    # approximation hit every line (an adversarial density floods the
-    # engine pass's match callbacks — a seam property, not a confirm
-    # property; the confirm under test is the finditer sweep itself).
     unit = (
         noise * 96
         + "# HELP go_noise metric documentation line\n"
@@ -2658,25 +2174,13 @@ async def test_confirmation_over_multi_mb_body_keeps_residual_ceiling(
 
     gaps = [gap for ts, gap in beats if window_start <= ts <= window_end + 0.001]
     assert gaps, "heartbeat never beat during the scan window"
-    # The residual ceiling the spec keeps (ticket 13): confirmations
-    # hold the GIL one finditer step at a time, never the whole sweep.
-    # Under xdist the suite's own 3-worker load stretches the steps
-    # past the sequential ceiling (the engine-path tests' convention);
-    # a whole-sweep freeze stays multi-second and still trips 1.5 s.
     ceiling = 1.5 if os.environ.get("PYTEST_XDIST_WORKER") else 0.6
     assert max(gaps) < ceiling, f"loop stalled {max(gaps):.3f}s during the drain"
-
-
-# --- ticket 15: global rules dir + config-home resolver ---
 
 
 def test_config_home_resolver_honors_override_and_keeps_default_paths(
     tmp_path, monkeypatch
 ) -> None:
-    """The config-home resolver behind the global rules dir and the Base
-    profile: with the override unset it yields exactly the historical
-    hardcoded paths (byte-for-byte the pre-ticket shapes), and
-    ODDA_CONFIG_HOME redirects every child of the config home."""
     from odda import paths
 
     monkeypatch.delenv(paths.CONFIG_HOME_ENV, raising=False)
@@ -2695,13 +2199,6 @@ def test_config_home_resolver_honors_override_and_keeps_default_paths(
 async def test_rule_slots_are_project_scoped_with_a_shared_global_tree(
     odda_subprocess_session, config_home, tmp_path
 ) -> None:
-    """Two subprocess sessions over two data dirs but one config home:
-    a slot installed in project-a stays in project-a (project B's boot
-    never loads it, and no rules tree appears under B's data dir),
-    while a slot hand-placed in the config home's rules dir loads in
-    both projects and fires — the global tree is the sharing path, and
-    install never writes it. Live registration stays per-session and
-    arrival-time: A's pre-install flow never matches the rule."""
     project_a = tmp_path / "project-a"
     project_b = tmp_path / "project-b"
     project_a.mkdir()
@@ -2717,15 +2214,11 @@ async def test_rule_slots_are_project_scoped_with_a_shared_global_tree(
 
             post = await _drive(a, fx, "t15-post-install")
             await _wait_rule_finding(a, post["id"], "user.ticket06-canary")
-            # arrival-time: the pre-install flow drained after the
-            # install (post's finding proves it) yet never matches
             assert all(
                 f["rule_id"] != "user.ticket06-canary"
                 for f in a.findings_for(pre["id"])
             )
 
-        # a global slot rides the config home: hand-placed, it loads
-        # in every project on the machine
         curated = config_home / "rules" / "curated"
         curated.mkdir(parents=True)
         (curated / "rule.py").write_text(_RULE_ALT, encoding="utf-8")
@@ -2733,10 +2226,8 @@ async def test_rule_slots_are_project_scoped_with_a_shared_global_tree(
         async with odda_subprocess_session(cwd=project_b) as b:
             rows = await b.call("rule_list", {})
             by_id = {row["id"]: row for row in rows}
-            # A's project install never reached B
             assert "user.ticket06-canary" not in by_id
             assert not (project_b / ".odda" / "rules").exists()
-            # the hand-placed global slot did
             assert by_id["user.ticket06-alt"] == {
                 "slot": "curated",
                 "id": "user.ticket06-alt",
@@ -2751,16 +2242,9 @@ async def test_rule_slots_are_project_scoped_with_a_shared_global_tree(
             assert finding["flow_id"] == flow["id"]
 
 
-# --- ticket 18: rule guide resource ---
-
-
 async def test_rule_guide_resource_covers_the_authoring_surface(
     odda_session,
 ) -> None:
-    """The odda://scanner/rule-guide resource is listed and readable over
-    MCP; its payload covers every section of the authoring guide and its
-    rule-file section embeds the exact skeleton the install rejections
-    teach — one source, so the guide and the errors cannot drift."""
     async with odda_session() as h:
         listed = await h.client.list_resources()
         guide = next(
@@ -2772,7 +2256,6 @@ async def test_rule_guide_resource_covers_the_authoring_surface(
         r = await h.client.read_resource("odda://scanner/rule-guide")
         text = r.contents[0].text
 
-        # every section of the guide rides the payload
         for heading in (
             "## Installing rules — arrival-time semantics",
             "## The rule file",
@@ -2787,10 +2270,8 @@ async def test_rule_guide_resource_covers_the_authoring_surface(
         ):
             assert heading in text, f"guide section missing: {heading}"
 
-        # the skeleton section is the single-sourced constant
         assert RULE_FILE_SKELETON in text
 
-        # every pattern kind and every gate is documented
         for field in (
             "body_patterns",
             "header_patterns",
@@ -2804,7 +2285,6 @@ async def test_rule_guide_resource_covers_the_authoring_surface(
         ):
             assert field in text, f"rule field not documented: {field}"
 
-        # the whole FlowView API is documented
         for attr in (
             "record",
             "request",
@@ -2820,17 +2300,12 @@ async def test_rule_guide_resource_covers_the_authoring_surface(
         ):
             assert attr in text, f"FlowView attribute not documented: {attr}"
 
-        # the severity scale is the five-level enum, name for name
         for level in ("info", "low", "medium", "high", "critical"):
             assert level in text
 
-        # both worked examples are real rule files
         assert "body_patterns=(" in text
         assert "def scan(self, view" in text
 
-        # the engine tradeoff names its parts: the approximate
-        # prefilter, the confirm it forces, the bounded-repeat hazard —
-        # and the accepted catastrophic-backtracking tail
         assert "prefilter" in text
         assert "confirm" in text
         assert "backtrack" in text
@@ -2839,17 +2314,11 @@ async def test_rule_guide_resource_covers_the_authoring_surface(
 async def test_rule_install_description_is_contract_plus_guide_pointer(
     odda_session,
 ) -> None:
-    """rule_install's description is the install contract plus a one-line
-    pointer to the guide resource; the skeleton it used to carry is gone
-    from the description (it keeps riding the rejections)."""
     async with odda_session() as h:
         tools = await h.client.list_tools()
         doc = next(t.description for t in tools.tools if t.name == "rule_install")
         assert "odda://scanner/rule-guide" in doc
-        # the skeleton no longer rides the description
         assert "RULES = [" not in doc
         assert "from odda.scanner import" not in doc
-        # the install contract stays: applies forward only, assets ride
-        # file installs
         assert "never retroactively" in doc
         assert "assets" in doc

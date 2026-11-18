@@ -1,14 +1,9 @@
-"""Port of scrut 07-request-send-h1.md: request_new creates an empty editable
-request + meta.json; a raw HTTP/1.1 request_send records the flow."""
-
 from __future__ import annotations
 
 from tests.e2e.conftest import dyn_server
 
 
 async def test_request_new_creates_empty_request_and_meta(odda_session) -> None:
-    """request_new returns the request's identity (scheme https, host) and
-    writes an empty request file plus a meta.json sidecar."""
     async with odda_session() as h, dyn_server() as dyn:
         sc = await h.call(
             "request_new", {"name": "h1-test", "host": "127.0.0.1", "port": dyn.port}
@@ -24,9 +19,6 @@ async def test_request_new_creates_empty_request_and_meta(odda_session) -> None:
 
 
 async def test_send_h1_records_flow(odda_session) -> None:
-    """A raw H1 GET send returns the flow record (200, error null, id), stores
-    the response body and the on-the-wire request, and records scheme + port
-    in flows.jsonl."""
     async with odda_session() as h, dyn_server() as dyn:
         await h.call(
             "request_new", {"name": "h1-test", "host": "127.0.0.1", "port": dyn.port}

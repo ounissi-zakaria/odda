@@ -1,19 +1,3 @@
-"""Raw HTTP/2 server that emits a header value with leading whitespace.
-
-Reproduces the real-world 502 "HTTP/2 protocol error: Received header
-value surrounded by whitespace" observed against hosts like
-hackerone.on.symphony.com (which sends ` IE=Edge`). hypercorn strips
-header values before sending (hypercorn/utils.py: `build_and_validate_headers`
-calls `bytes(value).strip()`), so the standard dyn_asgi.py fixture cannot
-reproduce the bug. This server writes raw h2 frames over TLS using the
-`h2` library directly, sending `X-Bad-Header: <space>IE=Edge` unsanitized.
-
-Run as: python3 ws_header_h2server.py <port> <cert.pem> <key.pem>
-    Then curl/browser through odda's proxy -> https://127.0.0.1:<port>/
-
-Responds 200 with the bad header and body `ws-header-fix-test`.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -27,7 +11,6 @@ import h2.events
 
 
 def main(port: int, cert: str, key: str) -> None:
-    """Listen on ``port`` and serve one raw h2 response per connection."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.set_alpn_protocols(["h2"])
     ctx.load_cert_chain(cert, key)
@@ -75,10 +58,6 @@ def _serve_one(conn: socket.socket) -> None:
                         (b":status", b"200"),
                         (b"content-type", b"text/plain; charset=utf-8"),
                         (b"content-length", b"18"),
-                        # Leading space in the value — invalid per RFC 7540
-                        # §8.1.2.5. validate_outbound_headers=False above lets
-                        # us send it raw; this is what a non-conformant server
-                        # (e.g. hackerone.on.symphony.com) does on the wire.
                         (b"x-bad-header", b" IE=Edge"),
                     ],
                 )

@@ -1,31 +1,3 @@
-"""Shared e2e harness: real MCP server in-process, real Chrome, real fixture servers.
-
-Maps the scrut suite's per-document model onto pytest:
-
-- **Per-test sessions.** Each test enters ``async with odda_session() as h:``
-  inside its own body — the session (and its lifespan: real Chrome +
-  real mitmproxy) is created and torn down within one task, the pattern
-  the SDK's own interaction tests use (anyio cancel scopes must exit in
-  the task that entered them, so pytest fixtures can't outlive the
-  test). One session = one data dir = one browser set: every test is
-  self-contained, no inter-test state coupling.
-- **Data-dir isolation via cwd.** ``odda.paths.project_data_dir`` is
-  cwd-``.odda``-relative and the lifespan calls
-  ``flowstore.set_data_dir`` at session start, so the session factory
-  chdirs into a per-test tmp dir for the session's lifetime. xdist
-  workers run tests sequentially, so the process-global cwd is never
-  contended.
-- **Real subprocess fixture servers.** ``fixture_site`` (plain HTTP
-  serving the repo's fixture files), ``dyn_server`` (hypercorn HTTPS,
-  H1+H2 via ALPN, dynamic ``?body=&status=&header=&gzip=1&race=``
-  responses), and ``script_server`` (raw-socket fixtures). Their
-  blocking launch parts run in worker threads — the event loop that
-  carries the in-process mitmproxy must never block. Booting is
-  amortized where it is pure overhead: the request-stateless
-  ``dyn_server`` keeps one instance per worker process (``_shared_dyn_server``)
-  and the TLS cert pair is generated once per process (``_tls_cert``).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -60,14 +32,12 @@ FIXTURES = REPO_ROOT / "tests" / "e2e" / "fixtures"
 
 
 def pick_port() -> int:
-    """Bind a socket to get an OS-assigned free port (same trick as scrut's pick_port)."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
 def _wait_tcp(port: int, attempts: int = 400, delay: float = 0.03) -> None:
-    """Bounded poll until a TCP listener answers; never sleeps past readiness."""
     last: OSError | None = None
     for _ in range(attempts):
         try:
@@ -82,7 +52,6 @@ def _wait_tcp(port: int, attempts: int = 400, delay: float = 0.03) -> None:
 def _launch_server_threaded(
     cmd: list[str], env: dict[str, str] | None = None
 ) -> ServerHandle:
-    """Launch a fixture server in a worker thread; return once its port answers."""
     port = pick_port()
     argv = [a.replace("{port}", str(port)) for a in cmd]
     proc = subprocess.Popen(  # noqa: S603
@@ -104,7 +73,6 @@ async def curl(
     extra: list[str] | None = None,
     timeout: float = 30.0,
 ) -> subprocess.CompletedProcess:
-    """curl through the proxy; the blocking subprocess call runs in a thread."""
     cmd = ["curl", "-s", "--max-time", str(timeout), "-x", proxy]
     if insecure:
         cmd += ["-k", "--proxy-insecure"]
@@ -118,8 +86,6 @@ async def curl(
 
 
 class ServerHandle:
-    """A running fixture-server subprocess with an auto-picked port."""
-
     def __init__(self, proc: subprocess.Popen, port: int, path: str = "") -> None:
         self.proc = proc
         self.port = port
@@ -127,16 +93,13 @@ class ServerHandle:
 
     @property
     def base(self) -> str:
-        """Plain-http base URL for this server."""
         return f"http://127.0.0.1:{self.port}{self.path}"
 
     @property
     def tls_base(self) -> str:
-        """https base URL (for servers speaking TLS)."""
         return f"https://127.0.0.1:{self.port}"
 
     def stop(self) -> None:
-        """Terminate the server; bounded wait; hard-kill if needed."""
         self.proc.terminate()
         try:
             self.proc.wait(timeout=10)
@@ -146,7 +109,6 @@ class ServerHandle:
 
 
 async def _stop(handle: ServerHandle) -> None:
-    """Stop a server from async code without blocking the loop."""
     await asyncio.to_thread(handle.stop)
 
 
@@ -154,16 +116,6 @@ async def _stop(handle: ServerHandle) -> None:
 async def fixture_site(
     filenames: Iterable[str] = (), index_body: str | None = None
 ) -> AsyncIterator[ServerHandle]:
-    """Serve FIXTURES/<name> files over plain HTTP (http.server).
-
-    One server per worker process serves a scratch root that holds one
-    directory per distinct site content — the directory is named after the
-    content key (see :func:`_site_dir`) and contains exactly the requested
-    files, so a test still sees only its own file set. Booting an
-    interpreter + ``http.server`` per content (``["index.html"]`` alone
-    appears in 37 tests) bought nothing over a path segment under one
-    server.
-    """
     key = (tuple(sorted(filenames)), index_body)
     root_dir, root = await asyncio.to_thread(_boot_site_root)
     path = await asyncio.to_thread(_site_dir, root_dir, key)
@@ -171,7 +123,6 @@ async def fixture_site(
 
 
 def _boot_site_root() -> tuple[Path, ServerHandle]:
-    """Boot (once per worker) the http.server that serves every site dir."""
     global _SITE_SERVER, _SITE_ROOT  # noqa: PLW0603 — process-wide scratch root
     with _SHARED_LOCK:
         handle = _SITE_SERVER
@@ -200,12 +151,6 @@ def _boot_site_root() -> tuple[Path, ServerHandle]:
 
 
 def _site_dir(root: Path, key: tuple[tuple[str, ...], str | None]) -> str:
-    """Materialize one site content key as a directory under the site root.
-
-    Returns the URL path it is served under. Files are symlinked from
-    FIXTURES (no copy) and an ``index_body`` is written out; the directory
-    holds nothing else, so the served file set stays exactly the key's.
-    """
     filenames, index_body = key
     with _SHARED_LOCK:
         name = _SITE_DIRS.get(key)
@@ -222,7 +167,6 @@ def _site_dir(root: Path, key: tuple[tuple[str, ...], str | None]) -> str:
 
 
 def _boot_dyn_server(race_dir: Path | None) -> ServerHandle:
-    """Boot a hypercorn HTTPS server (H1+H2 via ALPN) on the shared cert."""
     key, cert = _tls_cert()
     env = {**os.environ}
     if race_dir is not None:
@@ -245,14 +189,6 @@ def _boot_dyn_server(race_dir: Path | None) -> ServerHandle:
 
 
 def _shared_dyn_server() -> ServerHandle:
-    """Return the worker's long-lived dyn server, booting it on first use.
-
-    Booting costs an interpreter, hypercorn, and a TLS key exchange
-    (~0.4 s per test that serves dynamic responses), and dyn_asgi is
-    request-stateless — every behavior is a query parameter — so one
-    instance per worker process serves every caller that needs no private
-    race dir. A dead instance (crashed server) is rebooted in place.
-    """
     handle = _DYN_SHARED.get("default")
     if handle is None or handle.proc.poll() is not None:
         handle = _boot_dyn_server(None)
@@ -261,7 +197,6 @@ def _shared_dyn_server() -> ServerHandle:
 
 
 def _stop_shared_servers() -> None:
-    """Reap the shared fixture servers at process exit (they are daemons)."""
     stop_handles = [*_DYN_SHARED.values(), *([_SITE_SERVER] if _SITE_SERVER else [])]
     for handle in stop_handles:
         with suppress(Exception):
@@ -282,12 +217,6 @@ atexit.register(_stop_shared_servers)
 
 @asynccontextmanager
 async def dyn_server(race_dir: Path | None = None) -> AsyncIterator[ServerHandle]:
-    """Hypercorn HTTPS server (H1+H2 via ALPN) serving dyn_asgi with a self-signed cert.
-
-    ``race_dir`` callers get a private instance (the race behavior lives in
-    the server's environment) that is stopped with the block; everyone else
-    shares the worker's instance (see :func:`_shared_dyn_server`).
-    """
     if race_dir is None:
         yield _shared_dyn_server()
         return
@@ -300,7 +229,6 @@ async def dyn_server(race_dir: Path | None = None) -> AsyncIterator[ServerHandle
 
 @asynccontextmanager
 async def script_server(script: str, *args: str) -> AsyncIterator[ServerHandle]:
-    """Run a FIXTURES server script (close_without_response, echo_path_h2server, …)."""
     handle = await asyncio.to_thread(
         _launch_server_threaded,
         [sys.executable, str(FIXTURES / script), "{port}", *args],
@@ -312,18 +240,7 @@ async def script_server(script: str, *args: str) -> AsyncIterator[ServerHandle]:
 
 
 class Harness:
-    """One MCP session + one data dir + one config home; the assertion conventions every test shares.
-
-    ``call`` asserts the tool *succeeded* and returns the natural value:
-    dict results pass through, str/list/union unwrap from the SDK's
-    ``{"result": X}`` wrap (natural returns); text-only
-    tools (eval, wait_for as ``-> Any``; screenshot — ADR 0027) come
-    back as their text.
-    ``call_error``
-    asserts the call *failed* and returns the error text — the #03
-    contract: odda messages verbatim after the SDK's ``Error executing
-    tool <name>: `` prefix, param names never ``--flag`` spellings.
-    """
+    # See ADR-0027.
 
     def __init__(self, client: Client, data_dir: Path, config_home: Path) -> None:
         self.client = client
@@ -331,27 +248,18 @@ class Harness:
         self.config_home = config_home
 
     async def call(self, name: str, args: dict | None = None) -> object:
-        """Call a tool, assert success, return the natural value.
-
-        Natural-return tools ride the SDK's structured
-        channel: dict results pass through as themselves, str/list/union
-        unwrap from the ``{"result": X}`` wrap. Text-only tools
-        (eval/wait_for as ``-> Any``; screenshot — ADR 0027) return
-        their first text block.
-        """
+        # See ADR-0027.
         r = await self.client.call_tool(name, args or {})
         assert not r.is_error, f"{name} errored: {[c.text for c in r.content]}"
         sc = r.structured_content
         if sc is None and r.content:
-            # Text-only tools (eval/wait_for as -> Any; screenshot —
-            # ADR 0027): no structured channel.
+            # See ADR-0027.
             return r.content[0].text
         if isinstance(sc, dict) and list(sc) == ["result"]:
             return sc["result"]
         return sc
 
     async def call_error(self, name: str, args: dict | None = None) -> str:
-        """Call a tool, assert failure, return the error text (SDK prefix stripped)."""
         r = await self.client.call_tool(name, args or {})
         assert r.is_error, f"{name} unexpectedly succeeded: {r.structured_content}"
         text = r.content[0].text if r.content else ""
@@ -359,7 +267,6 @@ class Harness:
         return text.removeprefix(prefix)
 
     async def open_browser(self, url: str | None = None) -> tuple[str, int]:
-        """Open a browser; optionally navigate its initial tab; return (browser_id, tab_id)."""
         r = await self.call("browser_open", {})
         bid, tid = r["browser_id"], r["tab_id"]
         assert re.fullmatch(r"[a-z]{5}", bid), f"browser_id not a token: {bid!r}"
@@ -368,7 +275,6 @@ class Harness:
         return bid, tid
 
     async def eval(self, bid: str, tid: int, js: str) -> str:
-        """eval is Any-annotated → text-only; assert not-error and return the text."""
         r = await self.client.call_tool(
             "eval", {"browser_id": bid, "tab_id": tid, "js": js}
         )
@@ -378,7 +284,6 @@ class Harness:
     async def wait_for(
         self, bid: str, tid: int, expression: str, timeout: float = 10
     ) -> str:
-        """wait_for is Any-annotated → text-only."""
         r = await self.client.call_tool(
             "wait_for",
             {
@@ -392,17 +297,14 @@ class Harness:
         return r.content[0].text
 
     async def navigate(self, bid: str, tid: int, url: str, **kwargs: object) -> dict:
-        """navigate (default wait_until=load); extra kwargs pass through."""
         return await self.call(
             "navigate", {"browser_id": bid, "tab_id": tid, "url": url, **kwargs}
         )
 
     async def page_snapshot(self, bid: str, tid: int) -> str:
-        """page_snapshot returns the tree as its natural str value."""
         return await self.call("page_snapshot", {"browser_id": bid, "tab_id": tid})
 
     def write_request(self, name: str, raw: bytes) -> Path:
-        """Write agent-authored wire bytes into requests/<name>/request."""
         d = self.data_dir / "requests" / name
         d.mkdir(parents=True, exist_ok=True)
         (d / "request").write_bytes(raw)
@@ -415,7 +317,6 @@ class Harness:
         return f.read_text().splitlines()
 
     def flow_record(self, flow_id: str) -> dict:
-        """Return the flows.jsonl record for flow_id."""
         for line in self._flows_lines():
             rec = json.loads(line)
             if rec["id"] == flow_id:
@@ -423,17 +324,14 @@ class Harness:
         raise AssertionError(f"flow {flow_id} not in flows.jsonl")
 
     def flow_count(self) -> int:
-        """Number of records in flows.jsonl (0 when absent)."""
         return len(self._flows_lines())
 
     def flows_with(self, marker: str) -> list[dict]:
-        """All flows.jsonl records whose line contains marker."""
         return [json.loads(l) for l in self._flows_lines() if marker in l]
 
     async def wait_flow(
         self, marker: str, attempts: int = 200, delay: float = 0.05
     ) -> dict:
-        """Bounded poll until a flow matching marker lands in flows.jsonl (mitmproxy flush)."""
         for _ in range(attempts):
             flows = self.flows_with(marker)
             if flows:
@@ -448,7 +346,6 @@ class Harness:
         return f.read_text().splitlines()
 
     def findings_for(self, flow_id: str) -> list[dict]:
-        """All findings.jsonl records for flow_id."""
         out: list[dict] = []
         for l in self._findings_lines():
             rec = json.loads(l)
@@ -459,11 +356,6 @@ class Harness:
     async def wait_finding(
         self, flow_id: str, attempts: int = 200, delay: float = 0.05
     ) -> dict:
-        """Bounded poll until a finding for flow_id lands in findings.jsonl.
-
-        One async hop beyond wait_flow: the flow line lands first, then
-        the scanner's drain task records the finding.
-        """
         for _ in range(attempts):
             findings = self.findings_for(flow_id)
             if findings:
@@ -473,7 +365,6 @@ class Harness:
 
 
 def self_signed_cert(tmp_dir: Path) -> tuple[Path, Path]:
-    """Generate a self-signed cert/key pair (CN=127.0.0.1) into tmp_dir; returns paths."""
     key, cert = tmp_dir / "srv.key", tmp_dir / "srv.pem"
     subprocess.run(  # noqa: S603
         [
@@ -499,12 +390,6 @@ def self_signed_cert(tmp_dir: Path) -> tuple[Path, Path]:
 
 
 def _tls_cert() -> tuple[Path, Path]:
-    """Return a process-wide self-signed cert/key pair, generating it once.
-
-    RSA-2048 keygen is ~0.15 s of CPU, and the fixture TLS servers only need
-    *a* valid 127.0.0.1 cert, so one pair per worker process serves every
-    boot (removed at process exit by the atexit sweep below).
-    """
     global _CERT_PAIR  # noqa: PLW0603 — memo slot, written once under the lock
     with _CERT_LOCK:
         if _CERT_PAIR is None:
@@ -520,7 +405,6 @@ _CERT_PAIR: tuple[Path, Path] | None = None
 
 @asynccontextmanager
 async def slow_load_server(site_dir: Path) -> AsyncIterator[ServerHandle]:
-    """Serve the SPA slow-load fixture (site_dir + /slow-image?sleep=N)."""
     handle = await asyncio.to_thread(
         _launch_server_threaded,
         [
@@ -538,14 +422,6 @@ async def slow_load_server(site_dir: Path) -> AsyncIterator[ServerHandle]:
 
 @pytest.fixture(autouse=True)
 def config_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Per-test ODDA_CONFIG_HOME: every test runs against its own config home.
-
-    odda's machine-global state — the global rules dir, the Base profile —
-    roots at the ODDA_CONFIG_HOME override, so pointing it at the test's
-    tmp keeps the suite off the real ``~/.config/odda`` for every session
-    a test boots, in-process or subprocess (the subprocess fixture
-    forwards it explicitly: the stdio client passes only a safelisted env).
-    """
     home = tmp_path / "config-home"
     home.mkdir()
     monkeypatch.setenv("ODDA_CONFIG_HOME", str(home))
@@ -554,14 +430,6 @@ def config_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def odda_session(tmp_path: Path, config_home: Path) -> Iterator[object]:
-    """Per-test MCP session factory: ``async with odda_session() as h:``.
-
-    A sync fixture returning an async context manager: the session is
-    entered and exited inside the test's own task (the SDK's pattern —
-    anyio cancel scopes cannot cross tasks), with cwd moved into the
-    test's tmp dir for the session's lifetime so the data-dir
-    resolution isolates this test's ``.odda``.
-    """
     import odda.mcp as odda_mcp
     from odda import flowstore
 
@@ -585,22 +453,6 @@ def odda_session(tmp_path: Path, config_home: Path) -> Iterator[object]:
 
 @pytest.fixture
 def odda_subprocess_session(tmp_path: Path, config_home: Path) -> Iterator[object]:
-    """Per-test subprocess MCP session factory: ``async with
-    odda_subprocess_session() as h:`` — the production
-    one-process-per-session shape over stdio, sharing the test's data dir.
-
-    Concurrently-live sessions cannot share one process: mitmproxy keeps
-    process-global context (``mitmproxy_ctx.master``/``options``), so a
-    second in-process master absorbs the first's traffic. A concurrently-
-    live sibling session must be its own process — ``python -m odda mcp``
-    with its cwd at the test's tmp dir (same ``.odda`` data dir) and
-    PYTHONPATH pointing at this checkout's ``src`` so the child runs the
-    code under test, not any installed odda. ``_session(cwd=...)`` boots
-    the child against a different project dir (its own ``.odda``); the
-    config-home override is forwarded explicitly because the stdio
-    client passes the child only a safelisted environment plus
-    ``env``.
-    """
     from mcp.client.stdio import StdioServerParameters
 
     src = Path(__file__).resolve().parents[2] / "src"
@@ -624,24 +476,16 @@ def odda_subprocess_session(tmp_path: Path, config_home: Path) -> Iterator[objec
     return _session
 
 
-# --- scanner suite helpers (test_30 / test_32) ---
-#
-# The scanner tests' rule corpus (ADR-0036: no rules ship with odda)
-# loaded or seeded through the real paths, plus the findings-index
-# reader the harness cannot serve (its assertions run with no live
-# session). Test-local slot sources — the spec's "test-local slots"
-# wording — kept under fixtures/, not at the repo root.
+# See ADR-0036.
 _RULES_SRC = Path(__file__).parent / "fixtures" / "rules"
 
 
 def _slot_rules(family: str) -> list[Rule]:
-    """Load one fixtures/rules/<family> slot through the slot loader."""
     path = _RULES_SRC / family / "rule.py"
     return load_slot_source(family, path.read_text(encoding="utf-8"), str(path))
 
 
 async def _seed_slot(h: Harness, family: str) -> dict:
-    """Install the fixtures' rules/<family> slot through the real tool path."""
     return await h.call(
         "rule_install",
         {"name": family, "file": str(_RULES_SRC / family / "rule.py")},
@@ -649,11 +493,6 @@ async def _seed_slot(h: Harness, family: str) -> dict:
 
 
 def _findings_index(data_dir: Path) -> list[dict]:
-    """Every findings.jsonl record on the data dir ([] when absent).
-
-    Harness-free on purpose: the assertions between sessions (one
-    closed, the next not yet booted) have no live session to ask.
-    """
     f = data_dir / "scanner" / "findings.jsonl"
     if not f.is_file():
         return []
@@ -661,11 +500,6 @@ def _findings_index(data_dir: Path) -> list[dict]:
 
 
 def sans_display_urls(rows):
-    """Drop the per-open Virtual display endpoints from browser_list rows.
-
-    The URLs carry dynamic ports; their shape is asserted where it
-    belongs, in test_01's test_open_runs_on_a_virtual_display.
-    """
     return [
         {k: v for k, v in row.items() if k not in ("vnc_url", "novnc_url")}
         for row in rows
@@ -681,14 +515,6 @@ def _stored_flow(
     status_code: int = 200,
     query: str | None = None,
 ) -> dict:
-    """One stored flow through the real on-disk layout, as the store
-    writes it: the flow directory (``flows/<id>``) with the stored
-    response body, stored response headers, and — when ``query`` is
-    given — the stored request file (request-stage rules need it).
-    Parameterized status/content type, so flow-context gates can vary
-    while the body stays byte-identical; the record handed to
-    ``Scanner.observe`` comes back.
-    """
     flow_dir = data_dir / "flows" / flow_id
     flow_dir.mkdir(parents=True)
     (flow_dir / "response_body.txt").write_bytes(body)

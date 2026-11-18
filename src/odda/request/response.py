@@ -1,5 +1,3 @@
-"""Response header parsing and body decoding."""
-
 from __future__ import annotations
 
 import contextlib
@@ -14,12 +12,6 @@ import zstandard
 def parse_response_head(
     data: bytes,
 ) -> tuple[int, str | None, int | None, str | None, str | None]:
-    r"""Parse response headers bytes (through the terminal ``\r\n\r\n``).
-
-    Returns:
-        (status_code, content_type, content_length, transfer_encoding,
-        content_encoding)
-    """
     text = data.decode("ascii", errors="replace")
     lines = text.split("\r\n")
     status_line = lines[0]
@@ -62,12 +54,6 @@ def parse_response_head(
 
 
 def decode_content_encoding(data: bytes, encoding: str | None) -> bytes:
-    """Decode ``Content-Encoding`` (gzip/deflate/br/zstd).
-
-    If the declared encoding doesn't match the actual bytes (e.g. a server
-    sends ``Content-Encoding: gzip`` but returns plain text), the original
-    bytes are returned unchanged.
-    """
     if not encoding or not data:
         return data
     try:
@@ -88,7 +74,6 @@ def decode_content_encoding(data: bytes, encoding: str | None) -> bytes:
 
 
 def status_reason(code: int) -> str:
-    """Return the standard HTTP reason phrase for a status code."""
     try:
         return HTTPStatus(code).phrase
     except ValueError:

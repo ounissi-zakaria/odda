@@ -1,5 +1,3 @@
-"""HTTP/1.x raw socket sender."""
-
 from __future__ import annotations
 
 import asyncio
@@ -19,23 +17,12 @@ from odda.request.types import (
 
 
 class PipelineError(Exception):
-    """A mid-sequence failure in :func:`send_h1_pipeline`.
-
-    Carries the responses that were read *before* the failure
-    (``partial_responses``) and the index of the step that failed
-    (``failed_step``, 0-based), so the caller can write response flows
-    for steps 0..failed_step-1, an error flow for ``failed_step``, and
-    aborted flows for the rest. The connection is already closed when
-    this is raised.
-    """
-
     def __init__(
         self,
         failed_step: int,
         partial_responses: list[RawResponse],
         cause: Exception,
     ) -> None:
-        """Set the failing step index, partial responses, and cause."""
         self.failed_step = failed_step
         self.partial_responses = partial_responses
         self.cause = cause
@@ -45,17 +32,6 @@ class PipelineError(Exception):
 async def _read_until_headers_end(
     reader: asyncio.StreamReader,
 ) -> bytes:
-    r"""Read until ``\r\n\r\n`` and return bytes through the terminator.
-
-    Raises ``ConnectionError`` if EOF is reached before the header
-    terminator — a clean (or abrupt) close with no (or partial) response
-    headers. Swallowing that case and returning the empty/partial bytes
-    produces a ``status_code: 0`` pseudo-response that looks like a
-    successful empty response, masking a dropped connection. The
-    pipelining loop and single-shot caller both translate the raise into
-    a descriptive error flow ("connection closed before response
-    headers") instead of an ambiguous ``status_code: 0, error: null``.
-    """
     try:
         return await reader.readuntil(b"\r\n\r\n")
     except asyncio.IncompleteReadError as e:
@@ -68,22 +44,6 @@ async def _read_until_headers_end(
             msg = "connection closed before response headers"
         raise ConnectionError(msg) from None
     except OSError as e:
-        # A hard transport reset surfaces on the reader as an ``OSError``
-        # subclass — ``ConnectionResetError``/``BrokenPipeError`` over a
-        # plain TCP socket, or ``ssl.SSLError`` over a TLS connection (e.g.
-        # an unexpected close mid-handshake/mid-read) — rather than a clean
-        # EOF (``IncompleteReadError``). This happens most often under load
-        # in the ``pipelining`` write-all path: the server reads request
-        # 1, responds, and closes while the client is still writing/draining
-        # the pipelined follow-ups, so the reader observes a reset before
-        # any headers. ``asyncio.LimitOverrunError`` is a ``ValueError``,
-        # not an ``OSError``, so it is still caught by its own clause below.
-        # Without this normalization the raw ``OSError`` escapes to the
-        # pipeline loop and gets attributed to whatever step is reading
-        # (e.g. "step 1 failed ([Errno 32] Broken pipe)") instead of the
-        # clean "connection closed before response headers" message that
-        # the single-shot and pipeline callers already translate into a
-        # descriptive error flow.
         raise ConnectionError("connection closed before response headers") from e
     except asyncio.LimitOverrunError:
         msg = "response headers too large"
@@ -91,11 +51,6 @@ async def _read_until_headers_end(
 
 
 async def _read_chunked_body(reader: asyncio.StreamReader) -> bytes:
-    """Read a chunked transfer-encoded body and return the de-chunked bytes.
-
-    Handles servers that close the connection mid-stream or send an empty
-    chunked body gracefully by returning whatever was collected.
-    """
     body = b""
     while True:
         try:
@@ -130,12 +85,6 @@ async def _read_one_response(
     *,
     deadline: float,
 ) -> RawResponse:
-    """Read one HTTP/1.x response from ``reader`` before ``deadline``.
-
-    Shared by :func:`send_h1` (single-shot) and :func:`send_h1_pipeline`
-    (multi-request). Reads headers, then the body (chunked, content-length,
-    or until connection close), and returns a :class:`RawResponse`.
-    """
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         msg = "timeout before reading response"
@@ -189,7 +138,6 @@ async def _read_one_response(
 
 
 def _make_ssl_ctx(scheme: str, *, insecure: bool) -> ssl.SSLContext | None:
-    """Build an SSL context for an H1/H2 connection, ALPN http/1.1."""
     if scheme != "https":
         return None
     ssl_ctx = ssl.create_default_context()
@@ -208,7 +156,6 @@ async def _open_h1(
     deadline: float,
     insecure: bool,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """Open an HTTP/1.x connection (TLS for https, ALPN http/1.1)."""
     ssl_ctx = _make_ssl_ctx(scheme, insecure=insecure)
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -233,7 +180,6 @@ async def send_h1(
     has_content_length: bool,
     has_transfer_encoding: bool,
 ) -> RawResponse:
-    """Send an HTTP/1.x request over a raw socket and read the response."""
     deadline = time.monotonic() + timeout
 
     reader, writer = await _open_h1(
@@ -264,39 +210,7 @@ async def send_h1_pipeline(
     insecure: bool,
     pipelining: bool = False,
 ) -> list[RawResponse]:
-    """Send multiple HTTP/1.x requests on one connection, read all responses.
-
-    One TCP/TLS connection (ALPN http/1.1). All requests are written with
-    their exact bytes (no re-encoding, no Content-Length fixing); the
-    connection stays open across sends and is closed at the end.
-
-    ``pipelining=False`` (default, sequential keep-alive): for each request,
-    write its bytes, drain, then read one response before writing the next.
-    This covers response-queue poisoning (send smuggling → read resp1 →
-    send victim → read resp2) and same-connection CL.0 confirmation.
-
-    ``pipelining=True`` (true H1 pipelining): write every request's bytes
-    up front, drain once, then read every response in order. This covers
-    victim-consumption, where the victim request must arrive while the
-    server is still parsing the smuggling POST's body.
-
-    Bare-body requests (a body with no Content-Length and no
-    Transfer-Encoding) are rejected before the socket opens: they require
-    ``write_eof`` to terminate the body, which half-closes the connection
-    and makes subsequent sends impossible. Every documented smuggling
-    variant uses at least one framing header, so nothing legitimate is
-    blocked.
-
-    Raises:
-        ValueError: If any request has a body with no Content-Length and no
-            Transfer-Encoding (the bare-body shape that would require
-            half-closing the socket).
-        PipelineError: If a read or write fails mid-sequence. Carries the
-            responses read before the failure and the failing step index;
-            the caller writes response flows for steps before the failure,
-            an error flow for the failing step, and aborted flows for the
-            rest (ADR-0019).
-    """
+    # See ADR-0019.
     for _request_bytes, parsed in requests:
         if (
             bool(parsed.body)
@@ -319,20 +233,6 @@ async def send_h1_pipeline(
         if pipelining:
             for request_bytes, _parsed in requests:
                 writer.write(request_bytes)
-            # Tolerate a close during the write-all phase: the server is
-            # allowed to read request 1, send its response, and close
-            # before we finish writing the pipelined follow-ups. If the
-            # transport closes mid-drain, suppress the write error and
-            # let the read loop below detect the real EOF — that yields
-            # the correct per-step attribution (step 1's buffered
-            # response is read, step 2 hits EOF and becomes the failed
-            # step, steps 3..N become aborted). Without this, a fast
-            # close aborts everything as "step 1 failed" and loses step
-            # 1's response. ``OSError`` covers every connection-close
-            # variant asyncio raises here (``ConnectionResetError``,
-            # ``BrokenPipeError``, ``ssl.SSLError``); the read loop is
-            # the authoritative attribution path, so non-transport errors
-            # are left to propagate.
             with contextlib.suppress(OSError):
                 await writer.drain()
             responses: list[RawResponse] = []
@@ -374,7 +274,6 @@ async def _send_one_h1_parallel(
     deadline: float,
     insecure: bool,
 ) -> tuple[int, ConcurrentResult]:
-    """Open one H1 connection, send one request, return (index, result)."""
     try:
         reader, writer = await _open_h1(
             host, port, scheme, deadline=deadline, insecure=insecure
@@ -413,33 +312,7 @@ async def send_h1_parallel(
     timeout: float,
     insecure: bool,
 ) -> list[ConcurrentResult]:
-    """Send N identical requests on N parallel HTTP/1.1 connections.
-
-    H1 cannot stream-multiplex on one connection, and H1 pipelining is
-    server-side sequential (only the first request lands in a race
-    window). So for concurrent delivery over H1 we open N parallel
-    TCP/TLS connections in the same process and fire one request on
-    each. Tighter than bash-parallel (no ~100-300ms process startup
-    spread) but each connection does its own TLS handshake, so there's
-    residual handshake spread. Matches Burp's "send group in parallel"
-    (ADR-0020).
-
-    Per-connection failures are isolated: that slot gets a
-    :class:`StreamError`, the others continue. There is no
-    connection-level abort (each request is on its own connection).
-
-    Args:
-        host: TCP destination host.
-        port: TCP destination port.
-        scheme: ``http`` or ``https``.
-        requests: N (request_bytes, parsed) tuples.
-        timeout: Total timeout for connect + send + read, per connection.
-        insecure: Skip TLS certificate verification.
-
-    Returns:
-        A list of ``ConcurrentResult`` (one per input request, in send
-        order).
-    """
+    # See ADR-0020.
     deadline = time.monotonic() + timeout
     tasks = [
         _send_one_h1_parallel(

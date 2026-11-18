@@ -1,16 +1,4 @@
-"""e2e port of scrut 18-proxy-scripts.md: proxy-script install/list/remove.
-
-Proxy-scripts are user-supplied mitmproxy addons odda execs into the
-running proxy's addon chain (ADR-0018). Scope is global (one proxy for
-all browsers); the name is the key; force gates overwrite. Covers
-install (file + source modes), persistence under
-``data_dir/proxy-scripts/<name>/script.py``, live-chain firing on real
-traffic, remove semantics, validation errors verbatim, capture honesty
-(FlowFileAddon ahead of user scripts), runtime hook errors, and the
-boot-restore contract (proxy-scripts re-added on MCP lifespan boot —
-ticket #12).
-"""
-
+# See ADR-0018.
 from __future__ import annotations
 
 import asyncio
@@ -20,8 +8,6 @@ from pathlib import Path
 import pytest
 
 from tests.e2e.conftest import odda_session
-
-# --- the scripts under test (mitmproxy -s format: module namespace = addon) ---
 
 PS_MINIMAL = "def response(flow):\n    pass\n"
 PS_ADDHEADER = (
@@ -52,13 +38,11 @@ def _script_path(h, name: str) -> Path:
 
 
 async def _opener(h) -> urllib.request.OpenerDirector:
-    """A urllib opener routed through odda's HTTP proxy."""
     proxy_url = await h.call("proxy_url", {})
     return urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url}))
 
 
 async def _fetch(opener, url: str) -> dict[str, str]:
-    """Blocking urllib open, run in a thread (no real sleeps)."""
 
     def _open() -> dict[str, str]:
         with opener.open(url, timeout=10) as resp:
@@ -68,7 +52,6 @@ async def _fetch(opener, url: str) -> dict[str, str]:
 
 
 async def test_install_file_persists_source(odda_session, tmp_path) -> None:
-    """install --file returns name/size>0 and persists the source on disk."""
     ps = tmp_path / "ps_minimal.py"
     ps.write_text(PS_MINIMAL)
     async with odda_session() as h:
@@ -79,7 +62,6 @@ async def test_install_file_persists_source(odda_session, tmp_path) -> None:
 
 
 async def test_install_source_inline(odda_session, tmp_path) -> None:
-    """install --source installs inline Python; mutually exclusive with file."""
     async with odda_session() as h:
         r = await h.call(
             "proxy_script_install",
@@ -91,7 +73,6 @@ async def test_install_source_inline(odda_session, tmp_path) -> None:
 
 
 async def test_list_returns_installed_sorted(odda_session, tmp_path) -> None:
-    """list returns both installed scripts, names sorted."""
     ps = tmp_path / "ps_minimal.py"
     ps.write_text(PS_MINIMAL)
     async with odda_session() as h:
@@ -105,7 +86,6 @@ async def test_list_returns_installed_sorted(odda_session, tmp_path) -> None:
 
 
 async def test_remove_deletes_script_and_stops_hook(odda_session, tmp_path) -> None:
-    """remove returns name/removed, deletes the dir, stops the hook firing."""
     from tests.e2e.conftest import fixture_site
 
     ps = tmp_path / "ps_addheader.py"
@@ -114,7 +94,6 @@ async def test_remove_deletes_script_and_stops_hook(odda_session, tmp_path) -> N
         await h.call("proxy_script_install", {"name": "addheader", "file": str(ps)})
         opener = await _opener(h)
 
-        # hook fires on live traffic through the proxy
         hdrs = await _fetch(opener, f"{fx.base}/?marker=ps-fires")
         assert hdrs.get("x-odda-proxy-script") == "fired"
 
@@ -122,16 +101,13 @@ async def test_remove_deletes_script_and_stops_hook(odda_session, tmp_path) -> N
         assert r == {"name": "addheader", "removed": True}
         assert not _script_path(h, "addheader").parent.exists()
 
-        # hook no longer fires
         hdrs = await _fetch(opener, f"{fx.base}/?marker=ps-stopped")
         assert "x-odda-proxy-script" not in hdrs
 
-        # the earlier flow was still captured (script ran after FlowFileAddon)
         await h.wait_flow("ps-fires")
 
 
 async def test_collision_and_force_swap(odda_session, tmp_path) -> None:
-    """install on an existing name errors; force swaps the live chain."""
     from tests.e2e.conftest import fixture_site
 
     ps = tmp_path / "ps_addheader.py"
@@ -146,14 +122,12 @@ async def test_collision_and_force_swap(odda_session, tmp_path) -> None:
         )
         assert "already installed" in err
 
-        # fresh install, then force-overwrite with a different header value
         await h.call("proxy_script_install", {"name": "addheader", "file": str(ps)})
         r = await h.call(
             "proxy_script_install",
             {"name": "addheader", "file": str(ps2), "force": True},
         )
         assert r["name"] == "addheader"
-        # on-disk source is the new one
         assert "replaced" in _script_path(h, "addheader").read_text()
 
         opener = await _opener(h)
@@ -162,7 +136,6 @@ async def test_collision_and_force_swap(odda_session, tmp_path) -> None:
 
 
 async def test_validation_errors_verbatim(odda_session, tmp_path) -> None:
-    """both/neither/missing-file/empty-source/remove-missing all error verbatim."""
     ps = tmp_path / "ps_minimal.py"
     ps.write_text(PS_MINIMAL)
     async with odda_session() as h:
@@ -190,7 +163,6 @@ async def test_validation_errors_verbatim(odda_session, tmp_path) -> None:
 
 
 async def test_exec_failure_errors(odda_session, tmp_path) -> None:
-    """A non-Python source fails to exec with the library's message."""
     bad = tmp_path / "ps_bad.py"
     bad.write_text("this is not python {{{")
     async with odda_session() as h:
@@ -201,12 +173,6 @@ async def test_exec_failure_errors(odda_session, tmp_path) -> None:
 
 
 async def test_runtime_hook_error_does_not_crash_proxy(odda_session, tmp_path) -> None:
-    """A raising response hook: proxy still serves and captures afterwards.
-
-    The scrut doc's `odda logs` log-grep is dead surface (logs command
-    deleted); the surviving contract is the proxy keeps serving and
-    capturing after the hook error.
-    """
     from tests.e2e.conftest import curl, fixture_site
 
     ps = tmp_path / "ps_raise.py"
@@ -222,7 +188,6 @@ async def test_runtime_hook_error_does_not_crash_proxy(odda_session, tmp_path) -
         )
         assert "curl_status=200" in cp.stdout
 
-        # the proxy still serves and captures a subsequent request
         cp = await curl(
             f"{fx.base}/?marker=ps-after-boom",
             proxy,
@@ -233,14 +198,7 @@ async def test_runtime_hook_error_does_not_crash_proxy(odda_session, tmp_path) -
 
 
 async def test_capture_honesty_flowfile_ahead(odda_session, tmp_path) -> None:
-    """FlowFileAddon records the original request; mutations reach upstream.
-
-    A request hook injecting a header mutates what goes upstream, but the
-    captured flow's request file must NOT contain it (ADR-0018 ordering).
-    A response-hook echo script then proves the injection really reached
-    upstream: ``request`` hooks fire before ``response`` hooks, so when the
-    echo script runs, ``flow.request.headers`` carries the injection.
-    """
+    # See ADR-0018.
     from tests.e2e.conftest import fixture_site
 
     ps = tmp_path / "ps_inject.py"
@@ -256,22 +214,12 @@ async def test_capture_honesty_flowfile_ahead(odda_session, tmp_path) -> None:
         req = (h.data_dir / "flows" / rec["id"] / "request").read_bytes()
         assert b"x-odda-injected" not in req.lower()
 
-        # The mutation did reach the upstream: the echo script (a response
-        # hook, so after the request hook) copies flow.request's injected
-        # header onto the response. "upstream" (not "missing") proves the
-        # injection was live on the request that went upstream.
         await h.call("proxy_script_install", {"name": "echo", "file": str(ps_echo)})
         hdrs = await _fetch(opener, f"{fx.base}/?marker=ps-echo")
         assert hdrs.get("x-odda-echo") == "upstream"
 
 
 async def test_boot_restore_readds_persisted_script(odda_session, tmp_path) -> None:
-    """A persisted proxy-script is re-added on server boot (ticket #12).
-
-    Install a script, exit the session, start a new session on the SAME
-    data dir — the boot scan must re-exec and re-add it, observable both
-    in proxy_script_list and in the hook firing on live traffic.
-    """
     from tests.e2e.conftest import fixture_site
 
     ps = tmp_path / "ps_restore.py"
@@ -280,7 +228,6 @@ async def test_boot_restore_readds_persisted_script(odda_session, tmp_path) -> N
         async with odda_session() as h:
             await h.call("proxy_script_install", {"name": "restorer", "file": str(ps)})
 
-        # Fresh session on the same tmp_path → same .odda data dir.
         async with odda_session() as h:
             r = await h.call("proxy_script_list", {})
             assert "restorer" in {s["name"] for s in r}
@@ -293,29 +240,14 @@ async def test_boot_restore_readds_persisted_script(odda_session, tmp_path) -> N
 async def test_boot_with_broken_script_does_not_kill_session(
     odda_session, tmp_path
 ) -> None:
-    """A persisted proxy-script that fails to exec is skipped, not fatal.
-
-    The boot contract says "logged and skipped, never blocking boot".
-    This pins the harder half: mitmproxy's ErrorCheck would normally
-    sys.exit(1) the process on an ERROR logged during its startup
-    checkpoints; odda disarms it (library embedding, agent session),
-    so the session boots, lists the script as persisted, and serves
-    traffic through the proxy.
-    """
     from tests.e2e.conftest import fixture_site
 
-    # Seed the data dir the way a previous session would leave it: a
-    # persisted script whose exec fails. (A live install would error
-    # and persist nothing, so write the file directly.)
     script_dir = tmp_path / ".odda" / "proxy-scripts" / "broken"
     script_dir.mkdir(parents=True)
     (script_dir / "script.py").write_text(PS_BROKEN)
 
     async with (
         fixture_site(["index.html"]) as fx,
-        # Fresh session on the same data dir: the broken script's exec
-        # failure logs ERROR during lifespan boot — the session must
-        # survive it and the proxy must serve.
         odda_session() as h,
     ):
         r = await h.call("proxy_script_list", {})

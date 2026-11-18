@@ -1,12 +1,3 @@
-"""navigate: timeout and wait_until for SPAs that defer `load` (scrut 17).
-
-The SPA page's inline JS runs at DOMContentLoaded but a 35s slow image
-blocks window.onload. navigate's timeout bounds the wait and its error
-names the wait_until event that timed out; wait_until picks an earlier
-lifecycle event (commit, domcontentloaded) that resolves immediately.
-The tool's input schema pins the defaults: timeout 30, wait_until load.
-"""
-
 from __future__ import annotations
 
 import json
@@ -17,7 +8,6 @@ from tests.e2e.conftest import FIXTURES, slow_load_server
 
 
 def _site_dir(tmp_path) -> Path:
-    """Build the slow-load site dir (spa-slow-load.html copied from fixtures)."""
     site = tmp_path / "spa-site"
     site.mkdir()
     (site / "spa-slow-load.html").write_bytes(
@@ -29,7 +19,6 @@ def _site_dir(tmp_path) -> Path:
 async def test_navigate_timeout_errors_and_names_load_event(
     odda_session, tmp_path
 ) -> None:
-    """timeout=3 errors with `Timeout` + `wait-until \`load\`` in well under 12s."""
     site = _site_dir(tmp_path)
     async with odda_session() as h, slow_load_server(site) as srv:
         bid, tid = await h.open_browser()
@@ -52,7 +41,6 @@ async def test_navigate_timeout_errors_and_names_load_event(
 async def test_navigate_wait_until_domcontentloaded_succeeds(
     odda_session, tmp_path
 ) -> None:
-    """wait_until=domcontentloaded resolves immediately; the SPA already ran."""
     site = _site_dir(tmp_path)
     async with odda_session() as h, slow_load_server(site) as srv:
         bid, tid = await h.open_browser()
@@ -61,7 +49,6 @@ async def test_navigate_wait_until_domcontentloaded_succeeds(
         nav = await h.navigate(bid, tid, url, wait_until="domcontentloaded")
         assert nav["status"].startswith("Navigated to: ")
 
-        # eval is Any-annotated → text; the object renders as JSON.
         text = await h.eval(
             bid,
             tid,
@@ -79,7 +66,6 @@ async def test_navigate_wait_until_domcontentloaded_succeeds(
 
 
 async def test_navigate_wait_until_commit_succeeds(odda_session, tmp_path) -> None:
-    """wait_until=commit resolves once the navigation response is received."""
     site = _site_dir(tmp_path)
     async with odda_session() as h, slow_load_server(site) as srv:
         bid, tid = await h.open_browser()
@@ -94,8 +80,6 @@ async def test_navigate_wait_until_commit_succeeds(odda_session, tmp_path) -> No
 async def test_navigate_wait_until_networkidle_times_out(
     odda_session, tmp_path
 ) -> None:
-    """wait_until=networkidle timeout=3 errors naming `networkidle` (slow image
-    keeps a connection open 35s)."""
     site = _site_dir(tmp_path)
     async with odda_session() as h, slow_load_server(site) as srv:
         bid, tid = await h.open_browser()
@@ -120,7 +104,6 @@ async def test_navigate_wait_until_networkidle_times_out(
 async def test_navigate_wait_until_rejects_invalid_event(
     odda_session, tmp_path
 ) -> None:
-    """wait_until=bogus errors naming the wait_until param."""
     async with odda_session() as h:
         bid, tid = await h.open_browser()
 
@@ -139,7 +122,6 @@ async def test_navigate_wait_until_rejects_invalid_event(
 
 
 async def test_navigate_input_schema_defaults(odda_session, tmp_path) -> None:
-    """navigate's tool schema defaults: timeout 30.0, wait_until 'load'."""
     async with odda_session() as h:
         tools = await h.client.list_tools()
         tool = next(t for t in tools.tools if t.name == "navigate")

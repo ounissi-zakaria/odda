@@ -1,29 +1,4 @@
-"""Wrap: transparent observation at a named function or property.
-
-A Wrap is a transparent wrapper installed as a named userscript via the
-existing userscript mechanism. The generated JS replaces the original
-function or property accessor with a wrapper that records each call or
-access (receiver, arguments, return value, call stack) into
-``window.__oddaWrap``, then calls through to the original. The wrapper
-is leaf-only (ADR-0003): it records the call it was placed on and does
-not follow callbacks passed as arguments.
-
-Wraps reach all frames in a tab including cross-origin iframes
-(inherited from the userscript extension's ``all_frames: true``).
-Records are wiped on navigation (the userscript re-initializes
-``window.__oddaWrap`` on each ``document_start``); installations
-persist across navigation (the userscript re-runs on every load).
-
-Per ADR-0004, records are wiped on navigation. The agent must dump
-before navigating again or the records are lost.
-
-Wrap userscripts are named ``__odda-wrap__<name>`` so they can be
-distinguished from user-installed userscripts. A ``wrap-meta.json``
-sidecar in the userscript directory records the wrap spec (name, type,
-expr) so ``wrap list`` can return structured information without
-parsing JS comments.
-"""
-
+# See ADR-0003, ADR-0004.
 from __future__ import annotations
 
 import json
@@ -36,7 +11,6 @@ if TYPE_CHECKING:
 
 WRAP_USERSCRIPT_PREFIX = "__odda-wrap__"
 
-# Serialization limits (implementation details).
 _MAX_DEPTH = 5
 _MAX_ARRAY = 100
 _MAX_OBJECT_KEYS = 50
@@ -45,25 +19,12 @@ _MAX_FUNCTION_SOURCE = 1000
 
 
 def _wrap_userscript_name(name: str) -> str:
-    """Return the userscript name for a wrap named ``name``."""
     return f"{WRAP_USERSCRIPT_PREFIX}{name}"
 
 
 def _wrap_meta_path(browser_id: str, userscript_name: str) -> Path:
-    """Return the path to the wrap's ``wrap-meta.json`` sidecar."""
     return userscript.userscripts_dir(browser_id) / userscript_name / "wrap-meta.json"
 
-
-# --- JS helpers (shared by all wrap userscripts) ---------------------------
-
-# The shared helpers are defined once per page load by the first wrap
-# userscript to run. Subsequent wraps reuse them. On navigation, the
-# page is fresh so the helpers are undefined and the first wrap
-# re-defines them. The helpers are:
-# - ``__oddaSerialize``: serialize a JS value to a JSON-safe form,
-#   converting functions to opaque refs, truncating large/cyclic values.
-# - ``__oddaStack``: serialize ``new Error().stack`` into uniform frames.
-# - ``__oddaWrap``: the per-tab record array, initialized to ``[]``.
 
 _HELPERS_JS = (
     """\
@@ -313,21 +274,6 @@ if (!window.__oddaWrapArm) {
     .replace("%MAX_FN%", str(_MAX_FUNCTION_SOURCE))
 )
 
-# A call wrap replaces the function at ``expr`` (e.g. ``JSON.parse``,
-# ``EventTarget.prototype.addEventListener``, ``libX.modY.calc``) with
-# a wrapper that records each call. The ``expr`` is split on the last
-# dot to find the owner object and property name; the function is
-# replaced in place so the original call site still reaches it. The
-# wrapper calls through to the original with ``apply(this, args)`` so
-# ``this`` is preserved. If the owner chain or the function itself
-# does not exist at ``document_start``, the wrap arms itself via
-# ``__oddaWrapArm`` (owner appearing later) and a converting pre-armed
-# pair (function appearing later: functions written to the slot are
-# stored wrapped; other values pass through unchanged). Top-level
-# ``var``/``function`` declarations DEFINE (not set) the global
-# property, clobbering pre-armed pairs — wraps re-check on a bounded
-# post-load schedule so declared targets still get wrapped. Global
-# lexical owners (``let``/``const``, module scope) are unwatchable.
 
 _CALL_WRAPPER_TEMPLATE = """\
 (() => {
@@ -430,34 +376,6 @@ $HELPERS$
 })();
 """
 
-
-# --- Access wrap generation ------------------------------------------------
-
-# An access wrap intercepts every get/set of the property at ``expr``
-# (e.g. ``document.cookie``, ``window.__libLoaded``,
-# ``libX.modY.flag``, ``HTMLElement.prototype.innerHTML``). The
-# ``expr`` is split on the last dot to find the owner; when the owner
-# chain does not resolve at ``document_start`` (the page creates the
-# objects later) the wrap arms itself via ``__oddaWrapArm`` and
-# installs on first appearance, re-arming if the owner is replaced.
-# The property descriptor is found by walking the prototype chain
-# (the property may be inherited). What gets installed depends on the
-# descriptor's shape at install time:
-#
-# - Accessor (own or inherited): the existing getter/setter are
-#   wrapped in place, redefining the descriptor where it lives.
-# - Data slot: converted to a recording accessor pair whose values
-#   are stored per receiver (a WeakMap seeded from the slot), so a
-#   wrap placed on a prototype keeps instances isolated. An inherited
-#   data slot is shadowed on the owner — the write path an assignment
-#   would take — leaving the prototype untouched.
-#
-# A get records ``ret`` as the value read; a set records ``args[0]``
-# as the value written with ``ret: null``. Pinned targets offer no
-# interception point and stay unwrapped: a non-writable slot (writes
-# must keep failing), a slot that is non-configurable on the owner
-# itself (frozen, sealed, or [Unforgeable] properties like
-# ``window.location``), and non-extensible owners.
 
 _ACCESS_WRAPPER_TEMPLATE = """\
 (() => {
@@ -595,7 +513,6 @@ $HELPERS$
 
 
 def _build_wrapper(template: str, name: str, wrap_type: str, expr: str) -> str:
-    """Fill in a wrapper template with the wrap spec and shared helpers."""
     metadata = json.dumps({"name": name, "type": wrap_type, "expr": expr})
     return (
         template.replace("$METADATA$", json.dumps(metadata))
@@ -606,61 +523,14 @@ def _build_wrapper(template: str, name: str, wrap_type: str, expr: str) -> str:
 
 
 def generate_call_wrapper(name: str, expr: str) -> str:
-    """Generate the wrapper JS for a function (call) wrap.
-
-    Args:
-        name: The wrap name (agent-supplied, used in records and as the
-            userscript name suffix).
-        expr: A JS expression resolving to the function to wrap (e.g.
-            ``JSON.parse``, ``EventTarget.prototype.addEventListener``,
-            ``libX.modY.calc``). If the owner chain or the function
-            itself appears after document_start, the wrap arms itself
-            and installs on first appearance (functions written later
-            are stored wrapped). Top-level var/function declarations
-            define (not set) the global property, clobbering pre-armed
-            pairs — wraps re-check on a bounded post-load schedule.
-            Global lexical owners (``let``/``const``, module scope)
-            are unwatchable.
-
-    Returns:
-        The wrapper JS source, ready to install as a userscript.
-    """
     return _build_wrapper(_CALL_WRAPPER_TEMPLATE, name, "call", expr)
 
 
 def generate_access_wrapper(name: str, expr: str) -> str:
-    """Generate the wrapper JS for a property (access) wrap.
-
-    Args:
-        name: The wrap name.
-        expr: A dotted JS path to the property (e.g.
-            ``document.cookie``, ``window.__libLoaded``,
-            ``HTMLElement.prototype.innerHTML``). The last segment is
-            the property name; the preceding segments are the owner
-            expression. Existing accessors are wrapped in place; data
-            slots convert to recording accessors; a property the page
-            has not defined yet is pre-armed so its first write
-            records. An owner chain the page has not built yet is
-            armed and the wrap installs on first appearance (re-arming
-            on replacement). Pinned targets (non-writable, or
-            non-configurable on the owner; frozen owners) stay
-            unwrapped; global lexical owners (``let``/``const``,
-            module scope) are unwatchable. Top-level var/function
-            declarations define (not set) the global property,
-            clobbering pre-armed pairs — wraps re-check on a bounded
-            post-load schedule.
-
-    Returns:
-        The wrapper JS source, ready to install as a userscript.
-    """
     return _build_wrapper(_ACCESS_WRAPPER_TEMPLATE, name, "access", expr)
 
 
-# --- Install / remove / list (disk state) ----------------------------------
-
-
 def _write_meta(browser_id: str, userscript_name: str, meta: dict[str, Any]) -> None:
-    """Write the wrap-meta.json sidecar for a wrap userscript."""
     _wrap_meta_path(browser_id, userscript_name).write_text(
         json.dumps(meta), encoding="utf-8"
     )
@@ -673,19 +543,6 @@ def _install(
     expr: str,
     generator,
 ) -> dict[str, Any]:
-    """Install a wrap as a named userscript and write its meta sidecar.
-
-    Args:
-        browser_id: Browser whose scope to install into.
-        name: The wrap name.
-        wrap_type: ``"call"`` or ``"access"``.
-        expr: A JS expression/path for the wrap target.
-        generator: ``generate_call_wrapper`` or
-            ``generate_access_wrapper``.
-
-    Returns:
-        ``{name, type, expr, userscript_name, size}``.
-    """
     us_name = _wrap_userscript_name(name)
     js = generator(name, expr)
     result = userscript.install(browser_id, us_name, js)
@@ -697,43 +554,14 @@ def _install(
 
 
 def install_call(browser_id: str, name: str, expr: str) -> dict[str, Any]:
-    """Install a call wrap as a named userscript and write its meta sidecar.
-
-    Args:
-        browser_id: Browser whose scope to install into.
-        name: The wrap name.
-        expr: A JS expression resolving to the function to wrap.
-
-    Returns:
-        ``{name, type, expr, userscript_name, size}``.
-    """
     return _install(browser_id, name, "call", expr, generate_call_wrapper)
 
 
 def install_access(browser_id: str, name: str, expr: str) -> dict[str, Any]:
-    """Install an access wrap as a named userscript and write its meta sidecar.
-
-    Args:
-        browser_id: Browser whose scope to install into.
-        name: The wrap name.
-        expr: A dotted JS path to the property to wrap.
-
-    Returns:
-        ``{name, type, expr, userscript_name, size}``.
-    """
     return _install(browser_id, name, "access", expr, generate_access_wrapper)
 
 
 def remove(browser_id: str, name: str) -> dict[str, Any]:
-    """Remove a wrap's userscript (and its meta sidecar).
-
-    Args:
-        browser_id: Browser whose scope to remove from.
-        name: The wrap name.
-
-    Raises:
-        ValueError: If the wrap does not exist.
-    """
     us_name = _wrap_userscript_name(name)
     result = userscript.remove(browser_id, us_name)
     result["name"] = name
@@ -741,14 +569,6 @@ def remove(browser_id: str, name: str) -> dict[str, Any]:
 
 
 def list_wraps(browser_id: str) -> list[dict[str, Any]]:
-    """List installed wraps for one browser by scanning for ``__odda-wrap__*`` userscripts.
-
-    Args:
-        browser_id: Browser whose scope to list from.
-
-    Returns:
-        A list of ``{name, type, expr}`` dicts, sorted by name.
-    """
     wraps: list[dict[str, Any]] = []
     us_dir = userscript.userscripts_dir(browser_id)
     if not us_dir.exists():

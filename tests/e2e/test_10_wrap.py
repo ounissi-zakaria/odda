@@ -1,12 +1,4 @@
-"""Wrap: install, list, remove, dump, clear (port of scrut 10-wrap.md).
-
-A wrap is a named userscript that transparently records calls (or
-property accesses) with receiver, args, ret, and stack. Functions in
-args/ret serialize as opaque refs; large values truncate. Leaf-only
-per ADR-0003. Records wipe on navigation; installations persist
-(ADR-0004).
-"""
-
+# See ADR-0003, ADR-0004.
 from __future__ import annotations
 
 import json
@@ -15,8 +7,6 @@ from tests.e2e.conftest import fixture_site
 
 
 async def test_wrap_call_access_records_and_clears(odda_session) -> None:
-    """Call wrap records args/ret/stack; access wrap records the written
-    value; function args become opaque refs; clear zeros the records."""
     async with (
         odda_session() as h,
         fixture_site(["wrap.html", "iframe-inner.html"]) as fx,
@@ -35,7 +25,6 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
             ("jp", "call", "JSON.parse")
         ]
 
-        # The wrap userscript runs at document_start, so re-navigate.
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaWrapFixture === 'function'")
 
@@ -51,8 +40,7 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
         assert isinstance(rec["stack"], list) and len(rec["stack"]) >= 1
         assert all(set(f) == {"fn", "url", "line", "col"} for f in rec["stack"])
 
-        # Opaque function refs (ADR-0003 leaf-only): the callback is
-        # recorded as {type, name, source}, never invoked/wrapped itself.
+        # See ADR-0003.
         await h.call(
             "wrap_calls_add",
             {
@@ -85,7 +73,6 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
         assert isinstance(fn.get("source"), str) and "myHandler" in fn["source"]
         assert ael[0]["ret"] is None
 
-        # Access wrap: a set records args[0] as the value written, ret null.
         r = await h.call(
             "wrap_access_add",
             {
@@ -109,7 +96,6 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
         assert ih[0]["ret"] is None
         assert "this" in ih[0] and isinstance(ih[0]["stack"], list)
 
-        # Clear zeros the records without navigating.
         r = await h.call("wrap_clear", {"browser_id": bid, "tab_id": tid})
         assert r["status"] == "cleared" and r["count"] >= 0
         r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
@@ -119,8 +105,7 @@ async def test_wrap_call_access_records_and_clears(odda_session) -> None:
 async def test_wrap_records_wipe_installation_persists_iframes(
     odda_session,
 ) -> None:
-    """Records wipe on navigation but the wrap re-installs (ADR-0004);
-    wraps reach iframes and aggregate to the top frame."""
+    # See ADR-0004.
     async with (
         odda_session() as h,
         fixture_site(["wrap.html", "iframe-inner.html"]) as fx,
@@ -134,7 +119,6 @@ async def test_wrap_records_wipe_installation_persists_iframes(
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaWrapFixture === 'function'")
 
-        # Seed a record, then navigate: records wipe, installation persists.
         await h.eval(
             bid, tid, "String(window.__oddaWrapParseAndReturn('{\"x\": 1}').x)"
         )
@@ -142,7 +126,6 @@ async def test_wrap_records_wipe_installation_persists_iframes(
         assert any(x["wrap"] == "jp" for x in r)
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaWrapFixture === 'function'")
-        # Playwright's own setup may record; clear any stragglers first.
         await h.call("wrap_clear", {"browser_id": bid, "tab_id": tid})
         r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert r == []
@@ -152,8 +135,6 @@ async def test_wrap_records_wipe_installation_persists_iframes(
         r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x["wrap"] == "jp" for x in r)
 
-        # all_frames: true — the wrap runs in the iframe too, and
-        # same-origin iframes aggregate records to the top frame.
         await h.call("wrap_clear", {"browser_id": bid, "tab_id": tid})
         await h.eval(
             bid,
@@ -167,10 +148,7 @@ async def test_wrap_records_wipe_installation_persists_iframes(
 
 
 async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
-    """Large arrays truncate; remove stops future recording; missing
-    browser and non-existent-wrap errors are verbatim; closing the
-    last tab closes the browser — headed Chrome exits with its last
-    window, and the record goes with it (ADR-0040)."""
+    # See ADR-0040.
     async with (
         odda_session() as h,
         fixture_site(["wrap.html", "iframe-inner.html"]) as fx,
@@ -197,7 +175,6 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaWrapFixture === 'function'")
 
-        # Arrays longer than 100 elements truncate to {type, truncated, length}.
         await h.eval(
             bid,
             tid,
@@ -211,14 +188,11 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         assert big[0]["ret"]["truncated"] is True
         assert big[0]["ret"]["length"] == 150
 
-        # Remove jp; the others stay installed.
         r = await h.call("wrap_remove", {"browser_id": bid, "name": "jp"})
         assert (r["name"], r["removed"]) == ("jp", True)
         r = await h.call("wrap_list", {"browser_id": bid})
         assert sorted(w["name"] for w in r) == ["ael", "big", "ih"]
 
-        # After a re-navigate the removed wrap no longer records; the
-        # others still do.
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "typeof window.__oddaWrapFixture === 'function'")
         await h.eval(
@@ -230,8 +204,6 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert any(x["wrap"] == "ih" for x in r)
 
-        # Errors: missing browser, non-existent wrap. (Install/remove
-        # no longer validate a tab — they are browser-scope operations.)
         err = await h.call_error("wrap_list", {"browser_id": "zzzzz"})
         assert err == "Browser zzzzz not found."
         err = await h.call_error(
@@ -240,10 +212,7 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
         )
         assert err == "Userscript '__odda-wrap__no-such-wrap' not found"
 
-        # Closing the browser's last tab closes the browser: headed
-        # Chrome exits with its last window (ADR-0040), so odda closes
-        # the record, context, and display with it. Wrap ops stay
-        # browser-scope (ADR-0010) — no tab reference anywhere above.
+        # See ADR-0040, ADR-0010.
         r = await h.call("tabs_close", {"browser_id": bid, "tab_id": tid})
         assert r["browser_closed"] is True
         rows = await h.call("browser_list", {})
@@ -251,14 +220,6 @@ async def test_wrap_truncation_remove_and_errors(odda_session) -> None:
 
 
 async def test_wrap_access_data_slots_and_page_defined_props(odda_session) -> None:
-    """Access wraps record plain data slots and properties the page
-    defines later: an own data slot converts to a recording accessor
-    (the value round-trips), an inherited data slot records on the
-    owner without touching the prototype, and a not-yet-defined
-    property is pre-armed so the page's load-time write records. A
-    pre-armed property answers `in` but stays out of Object.keys
-    until its first write flips it enumerable, like an assignment
-    would."""
     body = (
         "<!doctype html><html><body><script>"
         "window.__oddaLib = 'page-set';"
@@ -271,8 +232,6 @@ async def test_wrap_access_data_slots_and_page_defined_props(odda_session) -> No
         url = f"{fx.base}/"
         bid, tid = await h.open_browser(url)
 
-        # "000-*" sorts before "__odda-wrap__*", so these exist as plain
-        # data slots at document_start, before the wrap userscripts run.
         await h.call(
             "userscript_install",
             {
@@ -299,14 +258,10 @@ async def test_wrap_access_data_slots_and_page_defined_props(odda_session) -> No
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "window.__oddaLib === 'page-set'")
 
-        # Pre-armed: the page's own load-time write recorded as a set
-        # with the written value in args.
         r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
         lib = [x for x in r if x["wrap"] == "lib"]
         assert any(x["args"] == ["page-set"] and x["ret"] is None for x in lib)
 
-        # Own data slot: the pre-existing value survives the conversion
-        # and later reads/writes record (get: args [] + ret value).
         out = await h.eval(bid, tid, "String(window.__oddaOwn)")
         assert out == "42"
         await h.eval(bid, tid, "window.__oddaOwn = 43; String(window.__oddaOwn)")
@@ -316,9 +271,6 @@ async def test_wrap_access_data_slots_and_page_defined_props(odda_session) -> No
         assert any(x["args"] == [43] and x["ret"] is None for x in own)
         assert any(x["args"] == [] and x["ret"] == 43 for x in own)
 
-        # Inherited data slot: accesses record on the owner; the write
-        # shadows (assignment semantics) and the prototype keeps its
-        # value.
         await h.eval(
             bid, tid, "window.__oddaKid.shared = 2; String(window.__oddaKid.shared)"
         )
@@ -329,9 +281,6 @@ async def test_wrap_access_data_slots_and_page_defined_props(odda_session) -> No
         assert any(x["args"] == [2] and x["ret"] is None for x in kid)
         assert any(x["args"] == [] and x["ret"] == 2 for x in kid)
 
-        # Pre-arm enumerability: never-written is reachable via `in`
-        # but absent from Object.keys; the once-written property is
-        # listed, as an assignment-created property would be.
         out = await h.eval(
             bid,
             tid,
@@ -348,9 +297,6 @@ async def test_wrap_access_data_slots_and_page_defined_props(odda_session) -> No
 
 
 async def test_wrap_access_frozen_targets_stay_unwrapped(odda_session) -> None:
-    """Frozen owners and pinned (non-writable, non-configurable) data
-    slots offer no interception point: the wrap installs but records
-    nothing, and the page keeps working with values intact."""
     body = "<!doctype html><html><body>ok</body></html>"
     async with (
         odda_session() as h,
@@ -381,8 +327,6 @@ async def test_wrap_access_frozen_targets_stay_unwrapped(odda_session) -> None:
         await h.navigate(bid, tid, url)
         await h.wait_for(bid, tid, "window.__oddaFrozen && window.__oddaPinned === 7")
 
-        # Sloppy-mode writes to the frozen/pinned slots are silent
-        # no-ops; nothing records.
         out = await h.eval(
             bid,
             tid,
@@ -395,11 +339,6 @@ async def test_wrap_access_frozen_targets_stay_unwrapped(odda_session) -> None:
 
 
 async def test_wrap_access_proto_data_slot_is_per_receiver(odda_session) -> None:
-    """A data-slot wrap on a prototype keeps per-receiver values: one
-    instance's write must not leak into another instance or the
-    prototype itself (an assignment would have created an own
-    property on the writing instance), and unwritten receivers keep
-    the slot's original value."""
     body = "<!doctype html><html><body>ok</body></html>"
     async with (
         odda_session() as h,
@@ -441,11 +380,6 @@ async def test_wrap_access_proto_data_slot_is_per_receiver(odda_session) -> None
 
 
 async def test_wrap_access_owner_appearing_later(odda_session) -> None:
-    """Wraps whose owner object does not exist at document_start arm
-    the owner chain level by level (window.libX, then libX.modY) and
-    start recording once the page creates the objects; a replaced
-    owner is re-armed. Global lexical owners (let) never pass through
-    window, so they stay unwatchable and silent."""
     body = (
         "<!doctype html><html><body><script>"
         "window.libX = {modY: {flag: 1}};"
@@ -476,9 +410,6 @@ async def test_wrap_access_owner_appearing_later(odda_session) -> None:
         assert any(x["args"] == [5] and x["ret"] is None for x in late)
         assert any(x["args"] == [] and x["ret"] == 5 for x in late)
 
-        # Replacing the whole owner re-arms the wrap on the new object:
-        # the literal's flag seeds the backing (read back as 9), and a
-        # write on the new owner records.
         out = await h.eval(
             bid, tid, "window.libX = {modY: {flag: 9}}; String(window.libX.modY.flag)"
         )
@@ -489,16 +420,11 @@ async def test_wrap_access_owner_appearing_later(odda_session) -> None:
         assert any(x["args"] == [] and x["ret"] == 9 for x in late)
         assert any(x["args"] == [3] and x["ret"] is None for x in late)
 
-        # let-bound owners never surface on window: silent, no records.
         r = await h.call("wrap_dump", {"browser_id": bid, "tab_id": tid})
         assert not any(x["wrap"] == "glet" for x in r)
 
 
 async def test_wrap_access_armed_chain_survives_churn(odda_session) -> None:
-    """An armed chain that keeps failing to resolve (repeated
-    non-object writes) must not multiply its watchers: after churn,
-    the real owner still installs and records, and the page stays
-    responsive."""
     body = (
         "<!doctype html><html><body><script>"
         "for (var i = 0; i < 30; i++) window.libX = null;"
@@ -528,9 +454,6 @@ async def test_wrap_access_armed_chain_survives_churn(odda_session) -> None:
 
 
 async def test_wrap_access_existing_prefix_replaced(odda_session) -> None:
-    """An armed chain watches levels that already exist at
-    document_start too: replacing an existing-but-incomplete owner
-    (window.libX present, modY missing) re-arms on the new object."""
     async with (
         odda_session() as h,
         fixture_site(index_body="<!doctype html><html><body>ok</body></html>") as fx,
@@ -565,9 +488,6 @@ async def test_wrap_access_existing_prefix_replaced(odda_session) -> None:
 
 
 async def test_wrap_calls_owner_and_function_appearing_later(odda_session) -> None:
-    """Call wraps on functions whose owner object or the function
-    itself does not exist at document_start: both arm and record once
-    the page defines them."""
     body = (
         "<!doctype html><html><body><script>"
         "window.libC = {modC: {calc: function (x) { return x * 2; }}};"
@@ -604,8 +524,6 @@ async def test_wrap_calls_owner_and_function_appearing_later(odda_session) -> No
         lf = [x for x in r if x["wrap"] == "lf"]
         assert any(x["args"] == [1] and x["ret"] == 2 for x in lf)
 
-        # A bare global written again with a new function keeps
-        # recording (the converting pre-arm re-wraps on write).
         await h.eval(
             bid,
             tid,
@@ -616,8 +534,6 @@ async def test_wrap_calls_owner_and_function_appearing_later(odda_session) -> No
         lf = [x for x in r if x["wrap"] == "lf"]
         assert any(x["args"] == [4] and x["ret"] == 40 for x in lf)
 
-        # Self-assignment must not wrap the wrapper: exactly one
-        # record per call afterwards.
         await h.eval(
             bid,
             tid,
@@ -629,10 +545,6 @@ async def test_wrap_calls_owner_and_function_appearing_later(odda_session) -> No
 
 
 async def test_wrap_records_page_declared_globals(odda_session) -> None:
-    """A top-level function or var DECLARATION does not assign through
-    window — the engine defines the property, clobbering any pre-armed
-    pair. Both wrap kinds re-check after load, so page-declared globals
-    record like assignment-defined ones."""
     body = (
         "<!doctype html><html><body><script>"
         "function jsAlert() { return 'alerted'; }"

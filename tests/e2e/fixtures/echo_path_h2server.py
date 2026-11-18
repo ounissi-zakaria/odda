@@ -1,18 +1,3 @@
-r"""Raw HTTP/2 server that accepts an invalid ``:path`` (with CRLF) and echoes it.
-
-Reproduces the H2->H1 downgrade gateway scenario where a non-validating
-server accepts an H2 ``:path`` containing ``\r\n`` (which hypercorn
-rejects via path validation). This server uses the ``h2`` library with
-``validate_inbound_headers=False`` so it accepts any ``:path`` value,
-then echoes the received ``:path`` verbatim as the response body.
-
-Run as: python3 echo_path_h2server.py <port> <cert.pem> <key.pem>
-
-Used by test 22-request-send-h2-line-terminator.md to prove that a
-literal CRLF in the ``:path`` (crafted via a custom line terminator)
-survives odda's parse and lands in the H2 frame on the wire.
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -26,7 +11,6 @@ import h2.events
 
 
 def main(port: int, cert: str, key: str) -> None:
-    """Listen on ``port`` and echo the received ``:path`` as the body."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.set_alpn_protocols(["h2"])
     ctx.load_cert_chain(cert, key)

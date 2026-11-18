@@ -1,15 +1,9 @@
-"""Port of scrut 08-request-send-extra.md: request_send HTTP/2 negotiation,
-fix_content_length CRLF preservation (H1 + H2 paths), gzip decode, TLS and
-connection-close error flows, empty-file rejection, excluded body storage."""
-
 from __future__ import annotations
 
 from tests.e2e.conftest import dyn_server, script_server
 
 
 async def test_h2_negotiated_when_request_line_says_http2(odda_session) -> None:
-    """An ``HTTP/2`` request line makes the send negotiate h2 via ALPN: 200,
-    decoded body, and stored response headers showing HTTP/2."""
     async with odda_session() as h, dyn_server() as dyn:
         await h.call(
             "request_new", {"name": "h2-test", "host": "127.0.0.1", "port": dyn.port}
@@ -33,9 +27,6 @@ async def test_h2_negotiated_when_request_line_says_http2(odda_session) -> None:
 
 
 async def test_fix_content_length_preserves_crlf_after_cl(odda_session) -> None:
-    """fix_content_length rewrites the declared CL to the real body size without
-    eating the CR when another header follows (H1 path); the editable file
-    keeps the declared 999."""
     async with odda_session() as h, dyn_server() as dyn:
         await h.call(
             "request_new", {"name": "cl-crlf", "host": "127.0.0.1", "port": dyn.port}
@@ -70,8 +61,6 @@ async def test_fix_content_length_preserves_crlf_after_cl(odda_session) -> None:
 
 
 async def test_fix_content_length_preserves_crlf_on_h2_path(odda_session) -> None:
-    """The CL rewrite runs on the raw bytes before the H2/H1 branch, so an
-    HTTP/2 request with CL followed by a trailing header keeps CRLF too."""
     async with odda_session() as h, dyn_server() as dyn:
         await h.call(
             "request_new", {"name": "cl-h2", "host": "127.0.0.1", "port": dyn.port}
@@ -103,8 +92,6 @@ async def test_fix_content_length_preserves_crlf_on_h2_path(odda_session) -> Non
 
 
 async def test_gzip_response_is_decoded(odda_session) -> None:
-    """A gzip=1 dyn response is decoded: the stored response_body.json holds
-    the plain body, not the compressed bytes."""
     async with odda_session() as h, dyn_server() as dyn:
         await h.call(
             "request_new", {"name": "gzip-test", "host": "127.0.0.1", "port": dyn.port}
@@ -126,9 +113,6 @@ async def test_gzip_response_is_decoded(odda_session) -> None:
 
 
 async def test_tls_failure_is_error_flow_not_tool_error(odda_session) -> None:
-    """Without insecure, the self-signed TLS failure is captured as an error
-    flow (status_code null + error message, not a tool error); insecure then
-    succeeds."""
     async with odda_session() as h, dyn_server() as dyn:
         await h.call(
             "request_new",
@@ -141,9 +125,6 @@ async def test_tls_failure_is_error_flow_not_tool_error(odda_session) -> None:
             + b"Connection: close\r\n\r\n",
         )
 
-        # Inspect the raw CallToolResult: the failure must NOT be a tool
-        # error, and request_send rides the SDK's structured channel —
-        # the union annotation wraps the record as {"result": flow}.
         r = await h.client.call_tool(
             "request_send", {"name": "insecure-test", "timeout": 5}
         )
@@ -162,8 +143,6 @@ async def test_tls_failure_is_error_flow_not_tool_error(odda_session) -> None:
 
 
 async def test_connection_close_without_response_is_error_flow(odda_session) -> None:
-    """A server that accepts then closes without response headers yields an
-    error flow naming the close — not the status_code 0 pseudo-response."""
     async with (
         odda_session() as h,
         script_server("close_without_response_server.py") as srv,
@@ -188,8 +167,6 @@ async def test_connection_close_without_response_is_error_flow(odda_session) -> 
 
 
 async def test_empty_request_file_is_rejected(odda_session) -> None:
-    """request_send against the empty file request_new created is a tool error
-    naming the empty file."""
     async with odda_session() as h:
         await h.call("request_new", {"name": "empty-test", "host": "127.0.0.1"})
         err = await h.call_error("request_send", {"name": "empty-test", "timeout": 5})
@@ -197,8 +174,6 @@ async def test_empty_request_file_is_rejected(odda_session) -> None:
 
 
 async def test_excluded_content_type_body_is_stored(odda_session) -> None:
-    """request_send stores the response body even for excluded Content-Types
-    (image/jpeg) that browser capture would drop."""
     async with odda_session() as h, dyn_server() as dyn:
         await h.call(
             "request_new", {"name": "img-test", "host": "127.0.0.1", "port": dyn.port}
