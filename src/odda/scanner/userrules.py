@@ -445,7 +445,9 @@ class RuleManager:
         desired = self._desired()
         dropped = frozenset(self._active) - desired.keys()
         added = [
-            rule for rule_id, rule in desired.items() if rule_id not in self._active
+            rule
+            for rule_id, rule in desired.items()
+            if self._active.get(rule_id) is not rule
         ]
         if dropped:
             await asyncio.to_thread(self._scanner.deregister_rules, dropped)

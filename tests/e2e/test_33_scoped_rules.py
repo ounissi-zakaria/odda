@@ -34,6 +34,18 @@ RULES = [
 ]
 '''
 
+_RULE_CANARY_V2 = f'''from odda.scanner import Rule, Severity
+
+RULES = [
+    Rule(
+        id="user.ticket06-canary",
+        severity=Severity.HIGH,
+        title="Ticket06 canary v2",
+        body_patterns=(r"{_T06_CANARY}",),
+    ),
+]
+'''
+
 _RULE_PAIR = f'''from odda.scanner import Rule, Severity
 
 RULES = [
@@ -240,6 +252,31 @@ async def test_force_reinstall_keeps_the_name_disable(odda_session) -> None:
         await h.call("rule_enable", {"name": "swap"})
         back = await _drive(h, fx, "t33-force-back")
         await _wait_rule_finding(h, back["id"], "user.ticket06-alt")
+
+
+async def test_force_reinstall_same_rule_id_reloads_the_live_rule(
+    odda_session,
+) -> None:
+    async with odda_session() as h, fixture_site(index_body=_T06_BODY) as fx:
+        await _seed_slot(h, "disclosure")
+        await h.call("rule_install", {"name": "canary", "source": _RULE_CANARY})
+        before = await _drive(h, fx, "t33-reload-before")
+        await _wait_rule_finding(h, before["id"], "user.ticket06-canary")
+        assert any(
+            f["rule_id"] == "user.ticket06-canary"
+            and f["title"] == "Ticket06 canary marker disclosed"
+            for f in h.findings_for(before["id"])
+        )
+
+        await h.call(
+            "rule_install",
+            {"name": "canary", "source": _RULE_CANARY_V2, "force": True},
+        )
+
+        after = await _drive(h, fx, "t33-reload-after")
+        finding = await _wait_rule_finding(h, after["id"], "user.ticket06-canary")
+        assert finding["title"] == "Ticket06 canary v2"
+        assert finding["severity"] == "high"
 
 
 async def test_disables_persist_across_boots(odda_session) -> None:

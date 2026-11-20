@@ -351,6 +351,8 @@ class Scanner:
 
     def register_rules(self, rules: Sequence[Rule]) -> None:
         with self._build_lock:
+            new_ids = {rule.id for rule in rules}
+            self._rules = [rule for rule in self._rules if rule.id not in new_ids]
             self._rules.extend(rules)
             self._epoch_serial += 1
             self._epoch = _RulesetEpoch(self._rules, self._epoch_serial)
