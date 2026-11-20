@@ -279,6 +279,11 @@ class FlowView:
         self._note("is_browser")
         return self._record_view.get("browser_id") is not None
 
+    @property
+    def data_dir(self) -> Path:
+        self._note("data_dir")
+        return self._data_dir
+
     @staticmethod
     def _read(path: Path) -> str:
         return path.read_bytes().decode("utf-8", errors="replace")

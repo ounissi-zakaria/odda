@@ -8,34 +8,35 @@ sent anywhere (the scanner reads captured material only), and flows
 that predate the session are never scanned.
 
 No rules ship with odda. Rules live in two scopes, both loaded on
-every boot: this project's rules dir (`.odda/rules/`, what
-`rule_install` and `rule_remove` manage, private to the project like
-everything else in `.odda/`) and the global rules dir under the odda
-config home (`~/.config/odda/rules`), which no tool writes — global
-slots are placed and removed by hand and fire in every project on the
-machine.
+every boot and both managed by `rule_install` and `rule_remove`:
+this project's rules dir (`.odda/rules/`, the default scope,
+private to the project like everything else in `.odda/`) and the
+global rules dir under the odda config home (`~/.config/odda/rules`,
+selected with `scope: "global"`), whose slots fire in every project
+on the machine.
 
 ## Installing rules — arrival-time semantics
 
-`rule_install` installs into the project's rules dir. It takes a slot
-name plus the rule file's source text or a file path (pass exactly
-one; `force` overwrites an existing slot by name). Installing from a
-file path copies the file's sibling non-.py assets — datasets — into
-the slot. Install validates before persisting: a file that fails to
-load, or whose rule ids collide with another slot's in either scope,
-is rejected naming the problem (and showing the file shape), and
-nothing reaches disk.
+`rule_install` installs into the project's rules dir by default, or
+the global rules dir with `scope: "global"`. It takes a slot name
+plus the rule file's source text or a file path (pass exactly one;
+`force` overwrites an existing slot by name). Installing from a
+file path copies the file's sibling non-.py assets — datasets —
+into the slot. Install validates before persisting: a file that
+fails to load, or whose rule ids collide with another slot's in
+either scope, is rejected naming the problem (and showing the file
+shape), and nothing reaches disk.
 
 Rules apply from arrival, not from scan time: a rule installed
 mid-session matches flows captured after the install, never
 retroactively — even a flow whose scan drains after the install.
-Removing a slot (`rule_remove`) stops its future findings only; past
-findings stay in the append-only index.
+Removing a slot (`rule_remove`, same `scope` parameter) stops its
+future findings only; past findings stay in the append-only index.
 
 ## Scopes, disabling, and the listing
 
 Every installed rule belongs to one scope — `project` (`.odda/rules/`)
-or `global` (the config home's rules dir, hand-managed) — and
+or `global` (the config home's rules dir) — and
 `rule_list` shows one row per rule with its `scope` and `state`.
 Rule ids are unique across both scopes: an install whose id already
 lives in either one is rejected.
@@ -229,6 +230,12 @@ had (an error flow has no response side) raises `FileNotFoundError`.
   value; None when the flow has no response headers or no such header.
 - `is_browser` — `bool`, whether the flow rode a browser's proxy
   credentials.
+- `data_dir` — `Path`, the project's data dir (`.odda`) the scanned
+  flows live under: cross-flow context — the flows index
+  (`data_dir / "flows" / "flows.jsonl"`, one record dict per line)
+  and sibling bodies (`data_dir / record["body_file"]` from any
+  index record). A scan that reads it is never memoized: fresh
+  scan per flow.
 
 - `dataset_facet()` — `tuple`, the flow context a `scan()` override
   may lawfully gate on (see scan() overrides above); the scan-result

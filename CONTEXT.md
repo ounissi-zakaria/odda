@@ -165,11 +165,11 @@ A single passive check over one Flow's captured material, gated on flow context 
 _Avoid_: check, signature, template, detector
 
 **Rule slot**:
-One persisted unit of Rules: a named directory holding a single Python file whose module-level `RULES` list defines the slot's Rules, living in one Scope — the Project rules dir (installed via `rule_install`, `force` overwrites by name; removed via `rule_remove`) or the Global rules dir (placed and removed by hand). Re-loaded on every session boot; a slot that fails to load is skipped without blocking the others.
+One persisted unit of Rules: a named directory holding a single Python file whose module-level `RULES` list defines the slot's Rules, living in one Scope — the Project rules dir or the Global rules dir, both managed by `rule_install` (`force` overwrites by name) and `rule_remove`. Re-loaded on every session boot; a slot that fails to load is skipped without blocking the others.
 _Avoid_: rule file, custom rule, rule package
 
 **Scope**:
-Which of a Rule slot's two homes a rule belongs to: project or global. Every `rule_list` row carries it; install and remove act on project slots only.
+Which of a Rule slot's two homes a rule belongs to: project or global. Every `rule_list` row carries it; `rule_install` and `rule_remove` take a `scope` selecting the home — project (the default) or global.
 _Avoid_: rules location, rule origin, rule source
 
 **Project rules dir**:
@@ -177,7 +177,7 @@ The directory project Rule slots persist in: `rules/` under the Data dir, create
 _Avoid_: local rules dir, .odda rules
 
 **Global rules dir**:
-The directory global Rule slots persist in: `rules/` under the odda config home (`~/.config/odda` by default; the `ODDA_CONFIG_HOME` environment variable redirects it, and the Base profile lives under the same root). Machine-global — its slots load in every project and MCP session on the machine — and hand-managed: no tool writes it.
+The directory global Rule slots persist in: `rules/` under the odda config home (`~/.config/odda` by default; the `ODDA_CONFIG_HOME` environment variable redirects it, and the Base profile lives under the same root). Machine-global — its slots load in every project and MCP session on the machine — and managed by `rule_install`/`rule_remove` with `scope: "global"`, or by hand.
 _Avoid_: rules folder, user rules dir, rule store
 
 **Disable**:

@@ -1099,6 +1099,7 @@ async def test_rule_remove_keeps_past_findings_stops_future(odda_session) -> Non
         r = await h.call("rule_remove", {"name": "canary"})
         assert r == {
             "name": "canary",
+            "scope": "project",
             "removed": True,
             "rules": ["user.ticket06-canary"],
         }

@@ -234,46 +234,52 @@ class RuleManager:
         self._active: dict[str, Rule] = {}
         self._ops = asyncio.Lock()
 
-    def name_exists(self, name: str) -> bool:
-        return name_exists(self._dirs["project"], name)
+    def name_exists(self, name: str, scope: str = "project") -> bool:
+        return name_exists(self._dirs[scope], name)
 
     async def install(
-        self, name: str, source: str, *, assets_from: Path | str | None = None
+        self,
+        name: str,
+        source: str,
+        *,
+        assets_from: Path | str | None = None,
+        scope: str = "project",
     ) -> dict[str, Any]:
         async with self._ops:
-            path = _rule_path(self._dirs["project"], name)
+            path = _rule_path(self._dirs[scope], name)
             try:
                 rules = load_slot_source(name, source, str(path))
             except ValueError as exc:
                 msg = f"{exc}\nA rule file must look like:\n{RULE_FILE_SKELETON}"
                 raise ValueError(msg) from None
-            self._reject_id_collisions("project", name, rules)
-            install_source(self._dirs["project"], name, source)
+            self._reject_id_collisions(scope, name, rules)
+            install_source(self._dirs[scope], name, source)
             assets = (
-                install_assets(self._dirs["project"], name, assets_from)
+                install_assets(self._dirs[scope], name, assets_from)
                 if assets_from
                 else []
             )
-            self._slots["project"][name] = _SlotState(rules=tuple(rules))
+            self._slots[scope][name] = _SlotState(rules=tuple(rules))
             await self._sync()
         return {
             "name": name,
+            "scope": scope,
             "size": path.stat().st_size,
             "rules": [rule.id for rule in rules],
             "assets": assets,
         }
 
-    async def remove(self, name: str) -> dict[str, Any]:
+    async def remove(self, name: str, *, scope: str = "project") -> dict[str, Any]:
         async with self._ops:
-            if not name_exists(self._dirs["project"], name):
-                raise ValueError(self._remove_refusal(name))
-            state = self._slots["project"].get(name)
+            if not name_exists(self._dirs[scope], name):
+                raise ValueError(self._remove_refusal(name, scope))
+            state = self._slots[scope].get(name)
             removed = [rule.id for rule in state.rules] if state else []
-            remove_source(self._dirs["project"], name)
-            self._slots["project"].pop(name, None)
+            remove_source(self._dirs[scope], name)
+            self._slots[scope].pop(name, None)
             self._drop_dangling_entries(name, removed)
             await self._sync()
-            return {"name": name, "removed": True, "rules": removed}
+            return {"name": name, "scope": scope, "removed": True, "rules": removed}
 
     async def disable(self, kind: str, value: str) -> dict[str, Any]:
         async with self._ops:
@@ -357,14 +363,15 @@ class RuleManager:
         if self._active:
             self._scanner.register_rules(list(self._active.values()))
 
-    def _remove_refusal(self, name: str) -> str:
-        if name_exists(self._dirs["global"], name):
+    def _remove_refusal(self, name: str, scope: str) -> str:
+        if scope == "project" and name_exists(self._dirs["global"], name):
             return (
                 f"Rule slot '{name}' is global (the config home's rules "
-                "dir); rule_remove only manages project slots — suppress "
-                f"it in this project with rule_disable(name='{name}'), or "
-                "delete it from the global rules dir by hand"
+                "dir); pass scope='global' to remove it, or suppress it "
+                f"in this project with rule_disable(name='{name}')"
             )
+        if scope == "global":
+            return f"Rule slot '{name}' not found in the global rules dir"
         return f"Rule slot '{name}' not found"
 
     def _drop_dangling_entries(self, name: str, rule_ids: Sequence[str]) -> None:

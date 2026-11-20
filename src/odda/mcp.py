@@ -29,7 +29,7 @@ from odda.request import (
 )
 from odda.scanner.engine import Scanner
 from odda.scanner.guide import load_rule_guide
-from odda.scanner.userrules import RuleManager
+from odda.scanner.userrules import SCOPES, RuleManager
 
 # See ADR-0019, ADR-0020.
 _PIPELINE_MIN_NAMES = 2
@@ -933,12 +933,14 @@ def scanner_rule_guide() -> str:
 
 _RULE_INSTALL_DOC = (
     "Install a passive-scanner rule slot from file or source into this "
-    "project's rules dir (.odda/rules/). Installed rules scan flows "
-    "captured after the install, never retroactively. Installing from a "
-    "file path copies the file's sibling non-.py assets (datasets) into "
-    "the slot; rule_disable suppresses an installed rule without removing "
-    "it. The full authoring guide is the odda://scanner/rule-guide "
-    "resource."
+    "project's rules dir (.odda/rules/), or with scope='global' into "
+    "the global rules dir under the odda config home (fires in every "
+    "project on the machine). Installed rules scan flows captured "
+    "after the install, never retroactively. Installing from a file "
+    "path copies the file's sibling non-.py assets (datasets) into "
+    "the slot; rule_disable suppresses an installed rule without "
+    "removing it. The full authoring guide is the odda://scanner/"
+    "rule-guide resource."
 )
 
 
@@ -950,18 +952,21 @@ async def rule_install(
     source: str | None = None,
     *,
     force: bool = False,
+    scope: str = "project",
     ctx: Context[OddaState],
 ) -> dict[str, Any]:
     """Install a passive-scanner rule slot from file or source."""
     py = _read_install_source(file, source, "py")
     if not py.strip():
         raise ToolParamError("source is empty")
+    if scope not in SCOPES:
+        raise ToolParamError(f"scope must be one of {', '.join(SCOPES)}")
     rules = ctx.request_context.lifespan_context.rules
-    if not force and rules.name_exists(name):
+    if not force and rules.name_exists(name, scope):
         raise ToolParamError(
             f"Rule slot '{name}' already installed. Use force to overwrite."
         )
-    return await rules.install(name, py, assets_from=file)
+    return await rules.install(name, py, assets_from=file, scope=scope)
 
 
 @mcp_server.tool()
@@ -973,9 +978,17 @@ async def rule_list(*, ctx: Context[OddaState]) -> list[dict[str, Any]]:
 
 @mcp_server.tool()
 @odda_tool
-async def rule_remove(name: str, *, ctx: Context[OddaState]) -> dict[str, Any]:
-    """Remove a rule slot: live rules stop, past findings remain."""
-    return await ctx.request_context.lifespan_context.rules.remove(name)
+async def rule_remove(
+    name: str, *, scope: str = "project", ctx: Context[OddaState]
+) -> dict[str, Any]:
+    """Remove a rule slot.
+
+    Live rules stop, past findings remain — the project rules dir by
+    default, the global rules dir with scope='global'.
+    """
+    if scope not in SCOPES:
+        raise ToolParamError(f"scope must be one of {', '.join(SCOPES)}")
+    return await ctx.request_context.lifespan_context.rules.remove(name, scope=scope)
 
 
 _RULE_DISABLE_DOC = (
