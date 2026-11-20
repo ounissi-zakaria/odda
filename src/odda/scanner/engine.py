@@ -412,6 +412,16 @@ class Scanner:
         body_file = view.record.get("body_file")
         if body_file is None:
             return None
+        # See ADR-0045.
+        digest_hex = view.record.get("body_sha256")
+        if digest_hex:
+            try:
+                return bytes.fromhex(digest_hex)
+            except ValueError:
+                logger.warning(
+                    "flow %s: malformed body_sha256; falling back to re-hash",
+                    view.record.get("id"),
+                )
         hasher = hashlib.sha256()
         try:
             for chunk in read_chunked(self._data_dir / body_file, _HASH_CHUNK):

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import itertools
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -230,11 +232,25 @@ class FlowRecordWriter:
         flow_dir = self._flows_dir / flow_id
 
         body_file: str | None = None
+        body_sha256: str | None = None
         if body_bytes is not None and (keep_body or should_store_body(content_type)):
             ext = _mime_to_ext(content_type)
             body_name = f"response_body{ext}"
-            _write_readonly(flow_dir / body_name, body_bytes)
+            # See ADR-0045.
+            digest = hashlib.sha256(body_bytes).hexdigest()
+            obj_dir = DATA_DIR / "objects"
+            obj = obj_dir / digest
+            if not obj.exists():
+                obj_dir.mkdir(parents=True, exist_ok=True)
+                tmp = obj_dir / f"{digest}-{flow_id}.part"
+                _write_readonly(tmp, body_bytes)
+                tmp.replace(obj)
+            try:
+                os.link(obj, flow_dir / body_name)
+            except OSError:
+                _write_readonly(flow_dir / body_name, body_bytes)
             body_file = f"flows/{flow_id}/{body_name}"
+            body_sha256 = digest
 
         _write_readonly(flow_dir / "response_headers", response_headers_bytes)
 
@@ -249,6 +265,7 @@ class FlowRecordWriter:
             "status_code": status_code,
             "total_duration_ms": total_duration_ms,
             "body_file": body_file,
+            "body_sha256": body_sha256,
             "error": None,
         }
         if ws:

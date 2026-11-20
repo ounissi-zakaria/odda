@@ -208,8 +208,8 @@ had (an error flow has no response side) raises `FileNotFoundError`.
 - `record` — the flow's index record dict: `id`, `method`, `scheme`,
   `host`, `port`, `path`, `browser_id` (None for non-browser flows),
   `status_code` (None on error flows), `total_duration_ms`,
-  `body_file` (relative stored-body path or None), `error` (message or
-  None).
+  `body_file` (relative stored-body path or None), `body_sha256` (hex
+  sha256 of the stored body, or None), `error` (message or None).
 - `request` — `str`, the stored raw request (request line + headers +
   body). Raises `FileNotFoundError` when no request was stored.
 - `request_method` — `str | None`, the request line's method token.
