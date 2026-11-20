@@ -923,7 +923,7 @@ wheels = [
 
 [[package]]
 name = "odda"
-version = "0.61.2"
+version = "0.62.0"
 source = { editable = "." }
 dependencies = [
     { name = "brotli" },
